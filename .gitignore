@@ -1,0 +1,73 @@
+# ============================================================
+# .gitignore — ExpiryManager / ServerTimeDemo
+# 原则：源码与文档入库；运行期数据、凭据、构建产物一律排除。
+# ============================================================
+
+# ---------- 凭据与个人隐私（绝不入库） ----------
+# login_memory.json 含真实手机号 + 密码密文（DPAPI）
+login_memory.json
+remember_me.json
+*.credentials.json
+
+# ---------- 运行期数据 ----------
+# 统一数据目录（程序首次启动自动创建并迁移）
+ExpiryManager_Data/
+
+# SQLite 数据库
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# 业务数据目录
+Tools/
+excel/
+account_images/
+process_flow_images/
+study_notes_images/
+study_notes_attachments/
+study_demo/
+adb_history/
+
+# ---------- 构建产物 ----------
+dist/
+build/
+*.toc
+*.pkg
+*.pyz
+*.zip
+*.egg-info/
+
+# ---------- Python 缓存与虚拟环境 ----------
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---------- 备份与临时文件 ----------
+*.bak
+*.bak.*
+*.orig
+*.rej
+*.tmp
+*.temp
+*~
+*.log
+
+# 分析脚本生成的报告（可随时重跑）
+_audit_out.txt
+
+# ---------- 编辑器 / IDE ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini

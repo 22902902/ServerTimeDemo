@@ -1,0 +1,1727 @@
+{
+  "environments": {
+    "test": {
+      "label": "测试环境",
+      "endpoint": "http://auctioncs.example.com:6070//culture-frontend-trade/webHttpServlet"
+    },
+    "prod": {
+      "label": "正式环境",
+      "endpoint": "http://api.example.com:2130//culture-frontend-trade/webHttpServlet"
+    }
+  },
+  "login_interface": {
+    "display_name": "账号密码登录",
+    "name": "logon",
+    "method": "POST",
+    "request_mode": "json",
+    "description": "登录接口，密码字段 P 需要先做 DES/CBC/PKCS7/Base64 加密。",
+    "fields": [
+      {
+        "name": "name",
+        "label": "接口名",
+        "description": "固定为登录接口标识。",
+        "widget": "entry",
+        "readonly": true,
+        "default": "logon"
+      },
+      {
+        "name": "U",
+        "label": "登录账号",
+        "description": "登录用户 ID，默认带入当前登录账号。",
+        "widget": "entry",
+        "default": "{{account}}"
+      },
+      {
+        "name": "P",
+        "label": "密码密文",
+        "description": "按 DES/CBC/PKCS7/Base64 生成的密码密文，默认自动带入。",
+        "widget": "entry",
+        "readonly": true,
+        "default": "{{encrypted_password}}"
+      },
+      {
+        "name": "LT",
+        "label": "登录类型",
+        "description": "pc 表示 PC 客户端，web 表示网页客户端。",
+        "widget": "select",
+        "default": "{{lt}}",
+        "options": [
+          {
+            "label": "web",
+            "value": "web"
+          },
+          {
+            "label": "pc",
+            "value": "pc"
+          }
+        ]
+      }
+    ],
+    "params": {
+      "name": "logon",
+      "U": "{{account}}",
+      "P": "{{encrypted_password}}",
+      "LT": "{{lt}}"
+    }
+  },
+  "shared_interfaces": [
+    {
+      "display_name": "仓单出库申请查询",
+      "name": "out_bill_apply_query",
+      "method": "POST",
+      "request_mode": "json",
+      "no_login": true,
+      "endpoint_suffix": "/bill-frontend/webHttpServlet",
+      "date_range": {
+        "start": "SD",
+        "end": "ED",
+        "max_months": 3
+      },
+      "description": "仓单出库申请查询接口，不依赖登录态，供货会员与经济会员列表中都显示。请求地址为当前环境 IP:端口 + /bill-frontend/webHttpServlet。开始日期与结束日期区间不能超过 3 个月。",
+      "response_description": [
+        "仓单出库申请查询返回包说明：",
+        "{",
+        "  \"name\": \"out_bill_apply_query\",",
+        "  \"RESULT\": {",
+        "    \"RETCODE\": \"返回码，>=0 成功，其他为失败，错误描述在 MESSAGE 中\",",
+        "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+        "    \"TC\": \"总记录数\"",
+        "  },",
+        "  \"RESULTLIST\": {",
+        "    \"REC\": [{",
+        "      \"OAI\": \"出库编号\",",
+        "      \"BII\": \"仓单号\",",
+        "      \"UI\": \"用户代码\",",
+        "      \"UNA\": \"用户名称\",",
+        "      \"OVI\": \"仓单原始凭证号\",",
+        "      \"BRI\": \"品种代码\",",
+        "      \"BRN\": \"品种名称\",",
+        "      \"WHI\": \"仓库编号\",",
+        "      \"WHN\": \"仓库名称\",",
+        "      \"CQ\": \"商品数量\",",
+        "      \"UN\": \"商品单位\",",
+        "      \"DT\": \"出库方式，0 自提，1 配送\",",
+        "      \"BS\": \"出库状态，0 出库申请，1 已设置配送费用，2 已确定配送费用，3 出库完成，4 撤销\",",
+        "      \"DF\": \"配送费\",",
+        "      \"CT\": \"创建时间\",",
+        "      \"PT\": \"处理时间\",",
+        "      \"EC\": \"配送公司\",",
+        "      \"EN\": \"配送单号\",",
+        "      \"DP\": \"收货人姓名\",",
+        "      \"TEL\": \"收货人手机号\",",
+        "      \"DA\": \"收货地址\"",
+        "    }]",
+        "  }",
+        "}"
+      ],
+      "fields": [
+        {
+          "name": "name",
+          "label": "接口名",
+          "description": "固定为仓单出库申请查询接口标识。",
+          "widget": "entry",
+          "readonly": true,
+          "default": "out_bill_apply_query"
+        },
+        {
+          "name": "WMI",
+          "label": "仓库管理员ID",
+          "description": "仓库管理员登录账号。",
+          "widget": "entry",
+          "default": ""
+        },
+        {
+          "name": "WMP",
+          "label": "仓库管理员密码",
+          "description": "仓库管理员密码，按接口要求原样提交。",
+          "widget": "entry",
+          "default": ""
+        },
+        {
+          "name": "SD",
+          "label": "开始日期",
+          "description": "日期格式为 YYYY-MM-DD，且与结束日期区间不能超过 3 个月。",
+          "widget": "date",
+          "default": "{{today}}"
+        },
+        {
+          "name": "ED",
+          "label": "结束日期",
+          "description": "日期格式为 YYYY-MM-DD，不能早于开始日期，且区间不能超过 3 个月。",
+          "widget": "date",
+          "default": "{{today}}"
+        },
+        {
+          "name": "UI",
+          "label": "用户代码 UI",
+          "description": "可为空。",
+          "widget": "entry",
+          "default": ""
+        },
+        {
+          "name": "BI",
+          "label": "品种ID BI",
+          "description": "可为空。",
+          "widget": "entry",
+          "default": ""
+        }
+      ],
+      "params": {
+        "name": "out_bill_apply_query",
+        "WMI": "",
+        "WMP": "",
+        "SD": "",
+        "ED": "",
+        "UI": "",
+        "BI": ""
+      }
+    }
+  ],
+  "post_login_interfaces": {
+    "supplier": [
+      {
+        "display_name": "登录接口示例",
+        "name": "logon",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "当前仅预置登录接口示例，后续供货会员接口可继续按该格式补充。",
+        "response_description": [
+          "登录返回包说明：",
+          "{",
+          "  \"name\": \"logon\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码，>=0 成功，其他为失败，错误描述在 MESSAGE 中\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"SYI\": \"当前登录系统编号\",",
+          "    \"JSI\": \"有权限的系统编号，多个用英文分号分隔，例如 201;301\",",
+          "    \"FUT\": \"资金账户类型，0 主账户，1 附属账户\",",
+          "    \"LT\": \"上次登录时间\",",
+          "    \"LI\": \"上次登录 IP\",",
+          "    \"CP\": \"是否需要修改密码，1 是，2 否\",",
+          "    \"CFP\": \"是否需要修改资金密码，1 是，2 否\",",
+          "    \"RST\": \"实名状态，0 未实名，1 审核中，2 已实名\",",
+          "    \"I\": \"用户身份，0 客户，1 会员\",",
+          "    \"N\": \"登录用户名称\",",
+          "    \"NN\": \"昵称\",",
+          "    \"ISNN\": \"是否设置过昵称，1 已设置，2 未设置\",",
+          "    \"U\": \"登录用户ID\",",
+          "    \"UT\": \"交易员类型，1 超级交易员，2 高级交易员，3 普通交易员\",",
+          "    \"RK\": \"随机串\",",
+          "    \"UPL\": \"用户头像图片地址\",",
+          "    \"TR\": \"服务端登录过程中每个操作的耗时信息\"",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为登录接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "logon"
+          },
+          {
+            "name": "U",
+            "label": "登录账号",
+            "description": "默认带入当前账号，可按需修改。",
+            "widget": "entry",
+            "default": "{{account}}"
+          },
+          {
+            "name": "P",
+            "label": "密码密文",
+            "description": "默认带入当前登录密码加密结果。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{encrypted_password}}"
+          },
+          {
+            "name": "LT",
+            "label": "登录类型",
+            "description": "可选 web 或 pc。",
+            "widget": "select",
+            "default": "{{lt}}",
+            "options": [
+              {
+                "label": "web",
+                "value": "web"
+              },
+              {
+                "label": "pc",
+                "value": "pc"
+              }
+            ]
+          }
+        ],
+        "params": {
+          "name": "logon",
+          "U": "{{account}}",
+          "P": "{{encrypted_password}}",
+          "LT": "{{lt}}"
+        }
+      },
+      {
+        "display_name": "成交查询",
+        "name": "broker_trade_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员成交查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。RECCNT 大于 0 向上查最新成交，小于 0 向下查历史成交。",
+        "response_description": [
+          "供货会员下成交查询返回包说明：",
+          "{",
+          "  \"name\": \"broker_trade_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"TN\": \"成交号\",",
+          "      \"ON\": \"挂摘单号\",",
+          "      \"TI\": \"成交时间\",",
+          "      \"BS\": \"买卖方向，1买，2卖\",",
+          "      \"COI\": \"商品统一代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"TP\": \"成交价格\",",
+          "      \"TQ\": \"成交数量\",",
+          "      \"TPM\": \"成交金额\",",
+          "      \"OP\": \"存货价\",",
+          "      \"CPL\": \"卖出盈亏(利润)\",",
+          "      \"CAT\": \"卖出增值税\",",
+          "      \"TF\": \"交易手续费\",",
+          "      \"ACF\": \"加收手续费\",",
+          "      \"WF\": \"仓储费\",",
+          "      \"IF\": \"保险费\",",
+          "      \"TRF\": \"托管费\",",
+          "      \"TT\": \"成交类型，1 正常交易，2 强平交易，3 协议交易，4 委托交易\",",
+          "      \"PR\": \"用户代码\",",
+          "      \"PNM\": \"用户名称\",",
+          "      \"PT\": \"用户类型，0 客户，1 会员\",",
+          "      \"OT\": \"操作类型，0 返回所有，1 返回挂单成交，2 返回摘单成交\",",
+          "      \"PON\": \"对方委托单号\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为成交查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_trade_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，成交号 > LTI；小于 0 表示查询之前记录，成交号 < LTI。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_trade_query",
+          "U": "{{login_user_u}}",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "成交查询(历史)",
+        "name": "broker_trade_history_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员成交历史查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。开始时间与结束时间不能为空，且区间不能超过 3 个月。",
+        "response_description": [
+          "供货会员下成交查询(历史)返回包说明：",
+          "{",
+          "  \"name\": \"broker_trade_history_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"TN\": \"成交号\",",
+          "      \"ON\": \"挂摘单号\",",
+          "      \"TI\": \"成交时间\",",
+          "      \"TY\": \"买卖方向，1买，2卖\",",
+          "      \"COI\": \"商品统一代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"TP\": \"成交价格\",",
+          "      \"TQ\": \"成交数量\",",
+          "      \"TPM\": \"成交金额\",",
+          "      \"OP\": \"存货价\",",
+          "      \"CPL\": \"卖出盈亏(利润)\",",
+          "      \"CAT\": \"卖出增值税\",",
+          "      \"TF\": \"交易手续费\",",
+          "      \"ACF\": \"加收手续费\",",
+          "      \"WF\": \"仓储费\",",
+          "      \"IF\": \"保险费\",",
+          "      \"TRF\": \"托管费\",",
+          "      \"TT\": \"成交类型，1 正常交易，2 强平交易，3 协议交易，4 委托交易\",",
+          "      \"PR\": \"用户代码\",",
+          "      \"PNM\": \"用户名称\",",
+          "      \"PT\": \"用户类型，0 客户，1 会员\",",
+          "      \"OT\": \"委托操作类型，0 返回所有，1 返回挂单成交，2 返回摘单成交\",",
+          "      \"PON\": \"对方委托单号\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为成交历史查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_trade_history_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "SDT",
+            "label": "开始时间",
+            "description": "日期格式为 2020-12-12，且与结束时间区间不能超过 3 个月。",
+            "widget": "date",
+            "default": "{{today}}"
+          },
+          {
+            "name": "EDT",
+            "label": "结束时间",
+            "description": "日期格式为 2020-12-12，且不能早于开始时间。",
+            "widget": "date",
+            "default": "{{yesterday}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，成交号 > LTI；小于 0 表示查询之前记录，成交号 < LTI。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_trade_history_query",
+          "U": "{{login_user_u}}",
+          "SDT": "",
+          "EDT": "",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "商品挂单记录查询",
+        "name": "broker_order_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员商品挂单记录查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。RECCNT 大于 0 向上查最新记录，小于 0 向下查之前记录。",
+        "response_description": [
+          "供货会员下商品挂单记录查询返回包说明：",
+          "{",
+          "  \"name\": \"broker_order_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"ON\": \"委托单号\",",
+          "      \"OT\": \"下单时间\",",
+          "      \"OS\": \"状态，1 已委托，2 已成交，4 已撤单\",",
+          "      \"BS\": \"买卖方向，1买，2卖\",",
+          "      \"OPT\": \"操作类型，1 挂单，2 摘单\",",
+          "      \"COI\": \"商品统一代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"OP\": \"委托价格\",",
+          "      \"OQ\": \"挂摘单数量\",",
+          "      \"BAL\": \"剩余量\",",
+          "      \"PR\": \"用户代码\",",
+          "      \"PNM\": \"用户名称\",",
+          "      \"PT\": \"用户类型，0 客户，1 会员\",",
+          "      \"WDT\": \"撤单时间\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为商品挂单记录查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_order_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，小于 0 表示查询之前记录。",
+            "widget": "entry",
+            "default": "20"
+          }
+        ],
+        "params": {
+          "name": "broker_order_query",
+          "U": "{{login_user_u}}",
+          "SI": "{{login_retcode}}",
+          "LTI": "0",
+          "RECCNT": "20"
+        }
+      },
+      {
+        "display_name": "商品挂单记录查询(历史)",
+        "name": "broker_order_history_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员商品挂单记录历史查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。开始时间与结束时间不能为空，且区间不能超过 3 个月。",
+        "response_description": [
+          "供货会员下商品挂单记录查询(历史)返回包说明：",
+          "{",
+          "  \"name\": \"broker_order_history_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"ON\": \"委托单号\",",
+          "      \"OT\": \"下单时间\",",
+          "      \"OS\": \"状态，1 已委托，2 已成交，4 已撤单\",",
+          "      \"BS\": \"买卖方向，1买，2卖\",",
+          "      \"OPT\": \"操作类型，1 挂单，2 摘单\",",
+          "      \"COI\": \"商品统一代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"OP\": \"委托价格\",",
+          "      \"OQ\": \"委托数量\",",
+          "      \"BAL\": \"剩余量\",",
+          "      \"PR\": \"用户代码\",",
+          "      \"PNM\": \"用户名称\",",
+          "      \"PT\": \"用户类型，0 客户，1 会员\",",
+          "      \"WDT\": \"撤单时间\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为商品挂单记录历史查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_order_history_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，小于 0 表示查询之前记录。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SDT",
+            "label": "开始时间",
+            "description": "日期格式为 2020-12-12，且与结束时间区间不能超过 3 个月。",
+            "widget": "date",
+            "default": "{{today}}"
+          },
+          {
+            "name": "EDT",
+            "label": "结束时间",
+            "description": "日期格式为 2020-12-12，且不能早于开始时间。",
+            "widget": "date",
+            "default": "{{yesterday}}"
+          }
+        ],
+        "params": {
+          "name": "broker_order_history_query",
+          "U": "{{login_user_u}}",
+          "SI": "{{login_retcode}}",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SDT": "",
+          "EDT": ""
+        }
+      },
+      {
+        "display_name": "持仓汇总查询",
+        "name": "broker_hold_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员持仓汇总查询，一次返回全部持仓数据。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。",
+        "response_description": [
+          "供货会员下持仓汇总查询返回包说明：",
+          "{",
+          "  \"name\": \"broker_hold_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"COI\": \"商品代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"HQ\": \"持有数量\",",
+          "      \"HAP\": \"存货均价\",",
+          "      \"OFQ\": \"挂单冻结数量\",",
+          "      \"LFQ\": \"限销冻结数量\",",
+          "      \"DQ\": \"交收申请数量\",",
+          "      \"HF\": \"持仓金额\",",
+          "      \"HPL\": \"货值变化\",",
+          "      \"TDE\": \"可卖量\",",
+          "      \"CUQ\": \"可用量 = 持有量 - 委托冻结 - 限销冻结 - 交收申请数量\",",
+          "      \"PR\": \"用户代码\",",
+          "      \"PT\": \"用户类型，0 客户，1 会员\",",
+          "      \"PNM\": \"用户名称\",",
+          "      \"MV\": \"市值\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为持仓汇总查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_hold_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_hold_query",
+          "U": "{{login_user_u}}",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "提货申请查询",
+        "name": "broker_delivery_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员提货申请查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。RECCNT 大于 0 向上查最新记录，小于 0 向下查之前记录。",
+        "response_description": [
+          "供货会员下提货申请查询返回包说明：",
+          "{",
+          "  \"name\": \"broker_delivery_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"DAI\": \"交收申请ID\",",
+          "      \"COI\": \"商品代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"WHI\": \"仓库编号\",",
+          "      \"WHN\": \"仓库名称\",",
+          "      \"DQ\": \"交收数量\",",
+          "      \"AQ\": \"申请件数\",",
+          "      \"U\": \"单位\",",
+          "      \"DD\": \"最晚提货日期\",",
+          "      \"PR\": \"用户代码\",",
+          "      \"PNM\": \"用户名称\",",
+          "      \"PT\": \"用户类型，0 客户，1 会员\",",
+          "      \"CT\": \"申请时间\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为提货申请查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_delivery_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，小于 0 表示查询之前记录。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_delivery_query",
+          "U": "{{login_user_u}}",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "提货申请查询(历史)",
+        "name": "broker_delivery_history_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员提货申请历史查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。开始时间与结束时间不能为空，且区间不能超过 3 个月。",
+        "response_description": [
+          "供货会员下提货申请查询(历史)返回包说明：",
+          "{",
+          "  \"name\": \"broker_delivery_history_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"DAI\": \"交收申请ID\",",
+          "      \"COI\": \"商品代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"WHI\": \"仓库编号\",",
+          "      \"WHN\": \"仓库名称\",",
+          "      \"DQ\": \"交收数量\",",
+          "      \"AQ\": \"申请件数\",",
+          "      \"U\": \"单位\",",
+          "      \"DD\": \"最晚提货日期\",",
+          "      \"PR\": \"用户代码\",",
+          "      \"PNM\": \"用户名称\",",
+          "      \"PT\": \"用户类型，0 客户，1 会员\",",
+          "      \"CT\": \"申请时间\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为提货申请历史查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_delivery_history_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，小于 0 表示查询之前记录。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SDT",
+            "label": "开始时间",
+            "description": "日期格式为 2020-12-12，且与结束时间区间不能超过 3 个月。",
+            "widget": "date",
+            "default": "{{today}}"
+          },
+          {
+            "name": "EDT",
+            "label": "结束时间",
+            "description": "日期格式为 2020-12-12，且不能早于开始时间。",
+            "widget": "date",
+            "default": "{{yesterday}}"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_delivery_history_query",
+          "U": "{{login_user_u}}",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SDT": "",
+          "EDT": "",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "过户申请查询",
+        "name": "broker_transfer_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员过户申请查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。RECCNT 大于 0 向上查最新记录，小于 0 向下查之前记录。",
+        "response_description": [
+          "供货会员下过户申请查询返回包说明：",
+          "{",
+          "  \"name\": \"broker_transfer_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"TAI\": \"过户申请ID\",",
+          "      \"COI\": \"商品代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"DQ\": \"数量\",",
+          "      \"S\": \"状态，0 申请，1 确定过户，2 已撤销\",",
+          "      \"PR\": \"申请方用户代码\",",
+          "      \"PT\": \"申请方用户类型，0 客户，1 会员\",",
+          "      \"PNM\": \"申请方用户名称\",",
+          "      \"APR\": \"接受方用户代码\",",
+          "      \"APT\": \"接受方用户类型，0 客户，1 会员\",",
+          "      \"APNM\": \"接受方用户名称\",",
+          "      \"CT\": \"申请时间\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为过户申请查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_transfer_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，小于 0 表示查询之前记录。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_transfer_query",
+          "U": "{{login_user_u}}",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "过户申请查询(历史)",
+        "name": "broker_transfer_history_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员过户申请历史查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。开始时间与结束时间不能为空，且区间不能超过 3 个月。",
+        "response_description": [
+          "供货会员下过户申请查询(历史)返回包说明：",
+          "{",
+          "  \"name\": \"broker_transfer_history_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"TAI\": \"过户申请ID\",",
+          "      \"COI\": \"商品代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"DQ\": \"申请数量\",",
+          "      \"S\": \"状态，0 申请，1 确定过户，2 已撤销\",",
+          "      \"PR\": \"申请方用户代码\",",
+          "      \"PT\": \"申请方用户类型，0 客户，1 会员\",",
+          "      \"PNM\": \"申请方用户名称\",",
+          "      \"APR\": \"接受方用户代码\",",
+          "      \"APT\": \"接受方用户类型，0 客户，1 会员\",",
+          "      \"APNM\": \"接受方用户名称\",",
+          "      \"CT\": \"申请时间\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为过户申请历史查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_transfer_history_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，小于 0 表示查询之前记录。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SDT",
+            "label": "开始时间",
+            "description": "日期格式为 2020-12-12，且与结束时间区间不能超过 3 个月。",
+            "widget": "date",
+            "default": "{{today}}"
+          },
+          {
+            "name": "EDT",
+            "label": "结束时间",
+            "description": "日期格式为 2020-12-12，且不能早于开始时间。",
+            "widget": "date",
+            "default": "{{yesterday}}"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_transfer_history_query",
+          "U": "{{login_user_u}}",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SDT": "",
+          "EDT": "",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "协议交易查询",
+        "name": "broker_block_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员协议交易查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。RECCNT 大于 0 向上查最新记录，小于 0 向下查之前记录。",
+        "response_description": [
+          "供货会员下协议交易查询返回包说明：",
+          "{",
+          "  \"name\": \"broker_block_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"TID\": \"成交号\",",
+          "      \"COI\": \"商品代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"TTM\": \"成交时间\",",
+          "      \"TY\": \"买卖方向，1买，2卖\",",
+          "      \"TP\": \"成交价格\",",
+          "      \"TQ\": \"成交数量\",",
+          "      \"UFD\": \"解冻资金\",",
+          "      \"TF\": \"交易手续费\",",
+          "      \"ACF\": \"加收手续费\",",
+          "      \"CPL\": \"卖出盈亏(利润)\",",
+          "      \"CAT\": \"增值税\",",
+          "      \"PR\": \"用户代码\",",
+          "      \"PT\": \"用户类型，0 客户，1 会员\",",
+          "      \"PNM\": \"用户名称\",",
+          "      \"APR\": \"对方用户代码\",",
+          "      \"APT\": \"对方用户类型，0 客户，1 会员\",",
+          "      \"APNM\": \"对方用户名称\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为协议交易查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_block_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，小于 0 表示查询之前记录。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_block_query",
+          "U": "{{login_user_u}}",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "协议交易查询(历史)",
+        "name": "broker_block_history_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "供货会员协议交易历史查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。开始时间与结束时间不能为空，且区间不能超过 3 个月。",
+        "response_description": [
+          "供货会员下协议交易查询(历史)返回包说明：",
+          "{",
+          "  \"name\": \"broker_block_history_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"TID\": \"成交号\",",
+          "      \"COI\": \"商品代码\",",
+          "      \"CON\": \"商品名称\",",
+          "      \"TTM\": \"成交时间\",",
+          "      \"TY\": \"买卖方向，1买，2卖\",",
+          "      \"TP\": \"成交价格\",",
+          "      \"TQ\": \"成交数量\",",
+          "      \"UFD\": \"解冻资金\",",
+          "      \"TF\": \"交易手续费\",",
+          "      \"ACF\": \"加收手续费\",",
+          "      \"CPL\": \"卖出盈亏(利润)\",",
+          "      \"CAT\": \"增值税\",",
+          "      \"PR\": \"用户代码\",",
+          "      \"PT\": \"用户类型，0 客户，1 会员\",",
+          "      \"PNM\": \"用户名称\",",
+          "      \"APR\": \"对方用户代码\",",
+          "      \"APT\": \"对方用户类型，0 客户，1 会员\",",
+          "      \"APNM\": \"对方用户名称\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为协议交易历史查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_block_history_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，小于 0 表示查询之前记录。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SDT",
+            "label": "开始时间",
+            "description": "日期格式为 2020-12-12，且与结束时间区间不能超过 3 个月。",
+            "widget": "date",
+            "default": "{{today}}"
+          },
+          {
+            "name": "EDT",
+            "label": "结束时间",
+            "description": "日期格式为 2020-12-12，且不能早于开始时间。",
+            "widget": "date",
+            "default": "{{yesterday}}"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_block_history_query",
+          "U": "{{login_user_u}}",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SDT": "",
+          "EDT": "",
+          "SI": "{{login_retcode}}"
+        }
+      }
+    ],
+    "broker": [
+      {
+        "display_name": "登录接口示例",
+        "name": "logon",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "当前仅预置登录接口示例，后续经济会员接口可继续按该格式补充。",
+        "response_description": [
+          "登录返回包说明：",
+          "{",
+          "  \"name\": \"logon\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码，>=0 成功，其他为失败，错误描述在 MESSAGE 中\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"SYI\": \"当前登录系统编号\",",
+          "    \"JSI\": \"有权限的系统编号，多个用英文分号分隔，例如 201;301\",",
+          "    \"FUT\": \"资金账户类型，0 主账户，1 附属账户\",",
+          "    \"LT\": \"上次登录时间\",",
+          "    \"LI\": \"上次登录 IP\",",
+          "    \"CP\": \"是否需要修改密码，1 是，2 否\",",
+          "    \"CFP\": \"是否需要修改资金密码，1 是，2 否\",",
+          "    \"RST\": \"实名状态，0 未实名，1 审核中，2 已实名\",",
+          "    \"I\": \"用户身份，0 客户，1 会员\",",
+          "    \"N\": \"登录用户名称\",",
+          "    \"NN\": \"昵称\",",
+          "    \"ISNN\": \"是否设置过昵称，1 已设置，2 未设置\",",
+          "    \"U\": \"登录用户ID\",",
+          "    \"UT\": \"交易员类型，1 超级交易员，2 高级交易员，3 普通交易员\",",
+          "    \"RK\": \"随机串\",",
+          "    \"UPL\": \"用户头像图片地址\",",
+          "    \"TR\": \"服务端登录过程中每个操作的耗时信息\"",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为登录接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "logon"
+          },
+          {
+            "name": "U",
+            "label": "登录账号",
+            "description": "默认带入当前账号，可按需修改。",
+            "widget": "entry",
+            "default": "{{account}}"
+          },
+          {
+            "name": "P",
+            "label": "密码密文",
+            "description": "默认带入当前登录密码加密结果。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{encrypted_password}}"
+          },
+          {
+            "name": "LT",
+            "label": "登录类型",
+            "description": "可选 web 或 pc。",
+            "widget": "select",
+            "default": "{{lt}}",
+            "options": [
+              {
+                "label": "web",
+                "value": "web"
+              },
+              {
+                "label": "pc",
+                "value": "pc"
+              }
+            ]
+          }
+        ],
+        "params": {
+          "name": "logon",
+          "U": "{{account}}",
+          "P": "{{encrypted_password}}",
+          "LT": "{{lt}}"
+        }
+      },
+      {
+        "display_name": "出入金流水查询",
+        "name": "broker_cash_flow",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "经纪会员出入金流水查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。RECCNT 大于 0 向上查最新记录，小于 0 向下查之前记录。",
+        "response_description": [
+          "经纪会员下出入金流水查询返回包说明：",
+          "{",
+          "  \"name\": \"broker_cash_flow\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"IFD\": \"出入金流水编号\",",
+          "      \"FCID\": \"资金结算账号\",",
+          "      \"RGID\": \"签约账号\",",
+          "      \"ANM\": \"账户名\",",
+          "      \"UD\": \"用户代码\",",
+          "      \"BNM\": \"银行名称\",",
+          "      \"TP\": \"转账类型，0 入金，1 出金\",",
+          "      \"ANT\": \"转账金额\",",
+          "      \"FE\": \"手续费\",",
+          "      \"S\": \"状态，0 待审核，1 转账成功，-1 转账失败，2 银行处理中，3 银行结果未知，4 被冲正，5 审核拒绝\",",
+          "      \"OPT\": \"操作人类型，0 市场管理员，1 会员管理员，2 经纪人管理员，3 交易员，4 银行\",",
+          "      \"OP\": \"操作人\",",
+          "      \"BFID\": \"银行流水号\",",
+          "      \"AID\": \"市场流水号\",",
+          "      \"CTP\": \"转账发起端，M 市场，B 银行\",",
+          "      \"CTM\": \"转账时间\",",
+          "      \"BTM\": \"银行处理时间\",",
+          "      \"ATM\": \"市场处理时间\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为出入金流水查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_cash_flow"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，小于 0 表示查询之前记录。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_cash_flow",
+          "U": "{{login_user_u}}",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "出入金流水查询(历史)",
+        "name": "broker_cash_history_flow",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "经纪会员出入金流水历史查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。开始时间与结束时间不能为空，且区间不能超过 3 个月。",
+        "response_description": [
+          "经纪会员下出入金流水查询(历史)返回包说明：",
+          "{",
+          "  \"name\": \"broker_cash_history_flow\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"TC\": \"总记录数\",",
+          "    \"MAXID\": \"最大号ID\",",
+          "    \"MINID\": \"最小号ID\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"IFD\": \"出入金流水编号\",",
+          "      \"FCID\": \"资金结算账号\",",
+          "      \"RGID\": \"签约账号\",",
+          "      \"ANM\": \"账户名\",",
+          "      \"UD\": \"用户代码\",",
+          "      \"BNM\": \"银行名称\",",
+          "      \"TP\": \"转账类型，0 入金，1 出金\",",
+          "      \"ANT\": \"转账金额\",",
+          "      \"FE\": \"手续费\",",
+          "      \"S\": \"状态，0 待审核，1 转账成功，-1 转账失败，2 银行处理中，3 银行结果未知，4 被冲正，5 审核拒绝\",",
+          "      \"OPT\": \"操作人类型，0 市场管理员，1 会员管理员，2 经纪人管理员，3 交易员，4 银行\",",
+          "      \"OP\": \"操作人\",",
+          "      \"BFID\": \"银行流水号\",",
+          "      \"AID\": \"市场流水号\",",
+          "      \"CTP\": \"转账发起端，M 市场，B 银行\",",
+          "      \"CTM\": \"转账时间\",",
+          "      \"BTM\": \"银行处理时间\",",
+          "      \"ATM\": \"市场处理时间\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为出入金流水历史查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_cash_history_flow"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "LTI",
+            "label": "基准号ID",
+            "description": "第一次填写 0。RECCNT 大于 0 查最新记录时，下一次 LTI 建议填上次返回的 MAXID；RECCNT 小于 0 查历史记录时，下一次 LTI 建议填上次返回的 MINID。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "RECCNT",
+            "label": "记录条数",
+            "description": "大于 0 表示查询最新记录，小于 0 表示查询之前记录。",
+            "widget": "entry",
+            "default": "20"
+          },
+          {
+            "name": "SDT",
+            "label": "开始时间",
+            "description": "日期格式为 2020-12-12，且与结束时间区间不能超过 3 个月。",
+            "widget": "date",
+            "default": "{{today}}"
+          },
+          {
+            "name": "EDT",
+            "label": "结束时间",
+            "description": "日期格式为 2020-12-12，且不能早于开始时间。",
+            "widget": "date",
+            "default": "{{yesterday}}"
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_cash_history_flow",
+          "U": "{{login_user_u}}",
+          "LTI": "0",
+          "RECCNT": "20",
+          "SDT": "",
+          "EDT": "",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "客户列表",
+        "name": "broker_user_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "经纪会员客户列表查询。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。BT 第一次传 0，后续可使用上次返回的 MAXBT 做增量查询；UD、UMN、MNO 为可选查询条件。",
+        "response_description": [
+          "经纪会员客户列表返回包说明：",
+          "{",
+          "  \"name\": \"broker_user_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\",",
+          "    \"MAXBT\": \"最大基准时间\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"UD\": \"客户代码\",",
+          "      \"UNM\": \"客户名称\",",
+          "      \"S\": \"状态，0 已开户(Create)，1 正常(Normal，已签约)，2 已解约，3 已注销\",",
+          "      \"FNG\": \"是否冻结，Y 已冻结，N 未冻结\",",
+          "      \"CTM\": \"开户时间\",",
+          "      \"FCID\": \"资金结算账号\",",
+          "      \"CTO\": \"证件号\",",
+          "      \"TFN\": \"电话号码\",",
+          "      \"CMN\": \"联系人\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为客户列表查询接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_user_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "BT",
+            "label": "基准时间 BT",
+            "description": "第一次传 0。后续增量查询时，建议填入上次返回的 MAXBT。",
+            "widget": "entry",
+            "default": "0"
+          },
+          {
+            "name": "UD",
+            "label": "用户代码",
+            "description": "查询条件，可不传。",
+            "widget": "entry",
+            "default": ""
+          },
+          {
+            "name": "UMN",
+            "label": "姓名",
+            "description": "查询条件，可不传。",
+            "widget": "entry",
+            "default": ""
+          },
+          {
+            "name": "MNO",
+            "label": "手机号",
+            "description": "查询条件，可不传。",
+            "widget": "entry",
+            "default": ""
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_user_query",
+          "U": "{{login_user_u}}",
+          "BT": "0",
+          "UD": "",
+          "UMN": "",
+          "MNO": "",
+          "SI": "{{login_retcode}}"
+        }
+      },
+      {
+        "display_name": "客户资金信息列表",
+        "name": "broker_user_funds_query",
+        "method": "POST",
+        "request_mode": "json",
+        "description": "经纪会员客户资金信息列表。U 取登录成功返回的 U，SI 取登录成功返回的 RETCODE。BR 为用户代码查询条件，可不传。",
+        "response_description": [
+          "经纪会员客户资金信息列表返回包说明：",
+          "{",
+          "  \"name\": \"broker_user_funds_query\",",
+          "  \"RESULT\": {",
+          "    \"RETCODE\": \"返回码 >=0 成功，其他为失败，错误描述在 MESSAGE\",",
+          "    \"ARGS\": \"返回提示信息中的参数列表，使用 | 分割参数\"",
+          "  },",
+          "  \"RESULTLIST\": {",
+          "    \"REC\": [{",
+          "      \"PR\": \"用户代码\",",
+          "      \"PNM\": \"用户名称\",",
+          "      \"PT\": \"用户类型，0 客户，1 会员\",",
+          "      \"LTBL\": \"上日余额\",",
+          "      \"TYBL\": \"当日余额\",",
+          "      \"TYUFD\": \"当日可用\",",
+          "      \"TYIN\": \"当日划入\",",
+          "      \"TYOUT\": \"当日划出\",",
+          "      \"ORFRN\": \"挂单冻结\",",
+          "      \"SELLMENT\": \"当日卖出货款\",",
+          "      \"BUYMENT\": \"当日买入货款\",",
+          "      \"FEE\": \"交易手续费\"",
+          "    }]",
+          "  }",
+          "}"
+        ],
+        "fields": [
+          {
+            "name": "name",
+            "label": "接口名",
+            "description": "固定为客户资金信息列表接口标识。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "broker_user_funds_query"
+          },
+          {
+            "name": "U",
+            "label": "会员代码 U",
+            "description": "登录成功后返回的 U，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_user_u}}"
+          },
+          {
+            "name": "BR",
+            "label": "用户代码 BR",
+            "description": "查询条件，可不传。",
+            "widget": "entry",
+            "default": ""
+          },
+          {
+            "name": "SI",
+            "label": "会话标识 SI",
+            "description": "登录成功返回的 RETCODE，后续接口统一取这个值。",
+            "widget": "entry",
+            "readonly": true,
+            "default": "{{login_retcode}}"
+          }
+        ],
+        "params": {
+          "name": "broker_user_funds_query",
+          "U": "{{login_user_u}}",
+          "BR": "",
+          "SI": "{{login_retcode}}"
+        }
+      }
+    ]
+  }
+}

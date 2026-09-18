@@ -1,0 +1,72 @@
+main.py:92:1: redefinition of unused 'threading' from line 89
+main.py:138:1: 'qa_work_log_db.QAWorkLogDB' imported but unused
+main.py:140:1: 'tools_page.ToolsPage' imported but unused
+main.py:141:1: 'adb_page.AdbPage' imported but unused
+main.py:151:1: 'ui_components.create_info_label' imported but unused
+main.py:151:1: 'ui_components.create_metric_card' imported but unused
+main.py:151:1: 'ui_components.create_section_frame' imported but unused
+main.py:151:1: 'ui_components.create_ttk_card' imported but unused
+main.py:151:1: 'ui_components.create_ttk_section_header' imported but unused
+main.py:159:1: 'page_components.add_toolbar_buttons' imported but unused
+main.py:159:1: 'page_components.create_content_frame' imported but unused
+main.py:159:1: 'page_components.create_page_toolbar' imported but unused
+main.py:159:1: 'page_components.create_preview_sidebar' imported but unused
+main.py:159:1: 'page_components.create_status_bar' imported but unused
+main.py:159:1: 'page_components.create_summary_card' imported but unused
+main.py:159:1: 'page_components.create_two_pane_layout' imported but unused
+main.py:903:17: undefined name 'PIL'
+main.py:1942:13: local variable 'cursor' is assigned to but never used
+main.py:4098:39: undefined name 'openpyxl'
+main.py:4098:60: undefined name 'openpyxl'
+main.py:5015:39: undefined name 'openpyxl'
+main.py:5015:60: undefined name 'openpyxl'
+tools_page.py:18:1: 'struct' imported but unused
+tools_page.py:21:1: 'tempfile' imported but unused
+tools_page.py:23:1: 'tkinter.colorchooser' imported but unused
+tools_page.py:23:1: 'tkinter.simpledialog' imported but unused
+tools_page.py:26:1: 'datetime.datetime' imported but unused
+tools_page.py:34:5: 'tkinterdnd2.TkinterDnD' imported but unused
+tools_page.py:547:19: f-string is missing placeholders
+tools_page.py:1183:17: undefined name 'logger'
+tools_page.py:1954:9: local variable 'current_cols' is assigned to but never used
+tools_page.py:2692:9: local variable 'row_cfg' is assigned to but never used
+adb_page.py:17:1: 'os' imported but unused
+adb_page.py:756:43: f-string is missing placeholders
+study_notes_window.py:41:1: 'base64' imported but unused
+study_notes_window.py:43:1: 'json' imported but unused
+study_notes_window.py:44:1: 'os' imported but unused
+study_notes_window.py:46:1: 'subprocess' imported but unused
+study_notes_window.py:49:1: 'uuid' imported but unused
+study_notes_window.py:53:1: 'tkinter.simpledialog' imported but unused
+study_notes_window.py:57:1: 'study_notes_db.StudyNote' imported but unused
+study_notes_window.py:1344:17: local variable 'parent_cat' is assigned to but never used
+study_notes_window.py:1570:9: local variable 'dlg' is assigned to but never used
+study_notes_window.py:1585:9: local variable 'dlg' is assigned to but never used
+study_notes_db.py:26:1: 're' imported but unused
+study_notes_db.py:28:1: 'copy.deepcopy' imported but unused
+study_demo_window.py:11:1: 'time' imported but unused
+study_demo_window.py:11:1: 'json' imported but unused
+study_demo_window.py:13:1: 'tkinter.scrolledtext' imported but unused
+study_demo_window.py:396:21: local variable 'start' is assigned to but never used
+study_demo_window.py:826:33: f-string is missing placeholders
+study_demo_db.py:6:1: 'datetime.datetime' imported but unused
+study_demo_db.py:7:1: 'pathlib.Path' imported but unused
+qa_work_log_page.py:12:1: 'typing.Optional' imported but unused
+qa_work_log_page.py:14:1: 'qa_work_log_db.WeeklyLog' imported but unused
+qa_work_log_page.py:15:1: 'qa_extras._save_image' imported but unused
+qa_work_log_page.py:15:1: 'qa_extras._ensure_images_dir' imported but unused
+qa_work_log_page.py:15:1: 'qa_extras.parse_tags' imported but unused
+qa_extras.py:22:1: 'qa_work_log_db.GlobalSearchResult' imported but unused
+system_toolbox_page.py:7:1: 'typing.Optional' imported but unused
+console_page.py:4:1: 'tkinter.messagebox' imported but unused
+console_page.py:234:40: f-string is missing placeholders
+embedded_admin_tools/api_demo_window.py:2:1: 'sys' imported but unused
+embedded_admin_tools/api_demo_window.py:5:1: 'pathlib.Path' imported but unused
+embedded_admin_tools/api_demo_window.py:1193:17: local variable 'cal_window' defined in enclosing scope on line 1154 referenced before assignment
+embedded_admin_tools/api_demo_window.py:1194:17: local variable 'cal_window' is assigned to but never used
+embedded_admin_tools/crypto_window.py:1:1: 'sys' imported but unused
+embedded_admin_tools/crypto_window.py:3:1: 'pathlib.Path' imported but unused
+embedded_admin_tools/login_checker_window.py:2:1: 'sys' imported but unused
+embedded_admin_tools/login_checker_window.py:4:1: 'pathlib.Path' imported but unused
+embedded_admin_tools/market_quote_window.py:3:1: 'sys' imported but unused
+embedded_admin_tools/market_quote_window.py:6:1: 'pathlib.Path' imported but unused
