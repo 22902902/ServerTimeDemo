@@ -8,7 +8,10 @@
 3. 反向：程序化 switch_module（如 open_account_ledger）→ 侧栏高亮也同步
 4. 分组可折叠 / 展开（子行随之增删）
 5. 选中态 / 悬停态配色符合敲定规则
-6. 旧的黄色文件夹图标已彻底移除
+6. 导航图标：每个模块行都有独立图标、图标槽等宽（各级严格对齐）、
+   分组行用 chevron 且折叠时换向
+7. 旧的黄色文件夹图标已彻底移除
+8. 顶栏左上角有品牌标记位图
 
 用法：
     python scripts/test_shell_ui.py
@@ -25,6 +28,7 @@ try:
 except Exception:
     pass
 
+import app_icons  # noqa: E402
 import main  # noqa: E402
 from nav_sidebar import NAV_MODEL, SidebarNav  # noqa: E402
 from ui_theme import MAIN_PALETTE  # noqa: E402
@@ -105,9 +109,6 @@ def main_test():
     check("选中行左侧强调条 = 近黑强调色",
           widgets["accent"].cget("bg") == palette.accent,
           f"实际 {widgets['accent'].cget('bg')}")
-    check("选中行圆点 = 近黑强调色",
-          widgets["dot"].cget("bg") == palette.accent,
-          f"实际 {widgets['dot'].cget('bg')}")
     check("选中行文字加深为 text_primary",
           widgets["label"].cget("fg") == palette.text_primary,
           f"实际 {widgets['label'].cget('fg')}")
@@ -117,6 +118,8 @@ def main_test():
     check("未选中行底色 = sidebar_bg",
           other["row"].cget("bg") == palette.sidebar_bg,
           f"实际 {other['row'].cget('bg')}")
+    check("选中态与未选中态用的是不同配色的图标",
+          widgets["icon"].cget("image") != other["icon"].cget("image"))
 
     # ---------------------------------------------------------------- 3
     print("\n[3] 悬停态")
@@ -158,13 +161,38 @@ def main_test():
     check("嵌套组恢复展开", "module_admin_backend" in nav._rows)
 
     # ---------------------------------------------------------------- 6
-    print("\n[6] 旧风格残留清理")
+    print("\n[6] 导航图标")
+    module_rows = [k for k, w in nav._rows.items() if w["kind"] == "module"]
+    no_icon = [k for k in module_rows if not nav._rows[k]["icon"].cget("image")]
+    check("每个模块行都挂了图标", not no_icon, f"缺图标 {no_icon}")
+    check("模块行数与图标登记表一致",
+          len(module_rows) == len(app_icons.NAV_GLYPHS),
+          f"行 {len(module_rows)} 图标 {len(app_icons.NAV_GLYPHS)}")
+    check("8 个模块各有独立图标（无重复误配）",
+          len({app_icons.NAV_GLYPHS.get(k) for k in module_rows}) == len(module_rows))
+    slot_widths = {str(nav._rows[k]["slot"].cget("width")) for k in nav._rows}
+    check("图标槽等宽 —— 各级标记与文字对齐的前提", len(slot_widths) == 1,
+          f"实际宽度集合 {slot_widths}")
+    check("图标位尺寸 = 逻辑 15 × 当前缩放",
+          nav._icon_px == app_icons.scaled_px(nav, app_icons.ICON_LOGICAL),
+          f"实际 {nav._icon_px}")
+    check("分组行用 chevron，不占用模块图标",
+          nav._rows["grp_api"]["icon"].cget("image")
+          != nav._rows["module_ops_expiry"]["icon"].cget("image"))
+    chevron_open = nav._rows["grp_api"]["icon"].cget("image")
+    nav._on_click("grp_api")
+    check("折叠后 chevron 换向（位图不同）",
+          nav._rows["grp_api"]["icon"].cget("image") != chevron_open)
+    nav._on_click("grp_api")
+
+    # ---------------------------------------------------------------- 7
+    print("\n[7] 旧风格残留清理")
     check("已移除 nav_folder_icon（黄色文件夹）",
           not hasattr(app, "nav_folder_icon"))
     check("已移除 nav_file_icon", not hasattr(app, "nav_file_icon"))
     check("已移除 nav_tree（原生 Treeview）", not hasattr(app, "nav_tree"))
 
-    print("\n[7] 顶栏")
+    print("\n[8] 顶栏")
     topbar_labels = []
 
     def collect(widget):
@@ -179,6 +207,17 @@ def main_test():
     ]
     for expected in ("修改密码", "备份", "恢复备份", "初始化密码"):
         check(f"顶栏含动作「{expected}」", expected in texts)
+
+    image_labels = [
+        w for w in topbar_labels
+        if w.winfo_class() == "Label" and str(w.cget("image")) != ""
+    ]
+    check("顶栏左上角有品牌标记位图", len(image_labels) >= 1,
+          f"含位图的 Label 数 = {len(image_labels)}")
+    mark = app_icons.brand_mark(app)
+    check("品牌标记尺寸 = 逻辑 20 × 当前缩放",
+          mark.width() == app_icons.scaled_px(app, app_icons.BRAND_LOGICAL),
+          f"实际 {mark.width()}")
 
     app.destroy()
 

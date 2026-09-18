@@ -51,6 +51,22 @@ from PIL import Image
 
 from study_notes_db import StudyNotesDB, StudyCategory
 from baidu_disk_window import BaiduDiskWindow
+from ui_theme import MAIN_PALETTE as PALETTE
+
+# 排版常量：字体族沿用全站 token，避免同一页出现两个「雅黑」
+FONT_FAMILY = "Microsoft YaHei UI"
+MONO_FAMILY = "Consolas"
+
+# 行内 Markdown 语法（预览区混排用）。**分支顺序即优先级**：先认行内代码，
+# 再认图片 / 链接，最后才是加粗与斜体 —— 顺序反了 `code` 里带星号、
+# 或 `**粗体**` 里嵌反引号这类写法就会切错。
+_INLINE_PATTERN = re.compile(
+    r"(`[^`]+`)"
+    r"|(!\[[^\]]*\]\([^)]*\))"
+    r"|(\[[^\]]+\]\([^)]*\))"
+    r"|(\*\*[^*]+\*\*)"
+    r"|(\*[^*]+\*)"
+)
 
 
 # =============================================================================
@@ -306,11 +322,11 @@ class NoteEditorDialog(tk.Toplevel):
         # 操作提示
         tip = ttk.Label(
             editor_frame,
-            text="📝 Markdown 编辑区  |  "
+            text="Markdown 编辑区  |  "
                  "Ctrl+V 粘贴截图自动插入  |  "
                  "支持本地图片路径或 Base64",
-            foreground="#888888",
-            font=("Microsoft YaHei", 9),
+            foreground=PALETTE.text_muted,
+            font=(FONT_FAMILY, 9),
         )
         tip.pack(anchor="w", pady=(0, 4))
 
@@ -324,11 +340,15 @@ class NoteEditorDialog(tk.Toplevel):
         self.text_area = tk.Text(
             text_frame,
             wrap="word",              # 自动换行（按单词边界）
-            font=("Consolas", 11),    # 等宽字体，适合 Markdown 书写
-            relief="solid",
-            borderwidth=1,
-            padx=8,
-            pady=8,
+            font=(MONO_FAMILY, 11),   # 等宽字体，适合 Markdown 书写
+            relief="flat",            # 不用立体边框：改 1px 发丝线（见 highlight*）
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=PALETTE.input_border,
+            highlightcolor=PALETTE.input_focus,
+            insertbackground=PALETTE.text_primary,
+            padx=10,
+            pady=10,
             undo=True,                # 开启撤销/重做（最多50步）
             maxundo=50,
         )
@@ -347,8 +367,8 @@ class NoteEditorDialog(tk.Toplevel):
         preview_header.pack(fill="x", padx=6, pady=(4, 0))
         ttk.Label(
             preview_header, text="渲染预览（Markdown 效果）",
-            foreground="#666",
-            font=("Microsoft YaHei", 9, "bold"),
+            foreground=PALETTE.text_secondary,
+            font=(FONT_FAMILY, 9, "bold"),
         ).pack(side="left")
 
         preview_text_frame = ttk.Frame(self.preview_frame)
@@ -357,12 +377,14 @@ class NoteEditorDialog(tk.Toplevel):
         self.preview_area = tk.Text(
             preview_text_frame,
             wrap="word",
-            font=("Microsoft YaHei", 10),
-            relief="solid",
-            borderwidth=1,
-            padx=10,
-            pady=10,
-            background="#fafafa",
+            font=(FONT_FAMILY, 10),
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=PALETTE.border,
+            padx=18,
+            pady=16,
+            background=PALETTE.surface,  # 预览区当纸看，纯白最接近 Typora 的观感
             state="disabled",        # 只读
         )
         preview_vbar = ttk.Scrollbar(
@@ -408,7 +430,8 @@ class NoteEditorDialog(tk.Toplevel):
             else "  [新建笔记]  "
         )
         self.status_var = tk.StringVar(value=status_text)
-        ttk.Label(btn_frame, textvariable=self.status_var, foreground="#888888").pack(side="left", padx=8)
+        ttk.Label(btn_frame, textvariable=self.status_var,
+                  foreground=PALETTE.text_muted).pack(side="left", padx=8)
 
     # ── 下拉框数据填充 ────────────────────────────────────────────────────────
 
@@ -666,40 +689,57 @@ class NoteEditorDialog(tk.Toplevel):
         为预览 Text 控件配置 Markdown 渲染所需的 tag 样式。
         """
         p = self.preview_area
-        # 标题 H1~H6
-        p.tag_configure("h1", font=("Microsoft YaHei", 20, "bold"), spacing1=10, spacing3=6, foreground="#1a1a1a")
-        p.tag_configure("h2", font=("Microsoft YaHei", 16, "bold"), spacing1=8, spacing3=4, foreground="#222")
-        p.tag_configure("h3", font=("Microsoft YaHei", 14, "bold"), spacing1=6, spacing3=3, foreground="#333")
-        p.tag_configure("h4", font=("Microsoft YaHei", 12, "bold"), spacing1=4, spacing3=2, foreground="#444")
-        p.tag_configure("h5", font=("Microsoft YaHei", 11, "bold"), spacing1=3, spacing3=2, foreground="#555")
-        p.tag_configure("h6", font=("Microsoft YaHei", 11, "bold"), spacing1=2, spacing3=1, foreground="#666")
-        # 段落
-        p.tag_configure("p", font=("Microsoft YaHei", 10), spacing3=6, lmargin1=4, lmargin2=4)
-        # 加粗/斜体/删除线
-        p.tag_configure("bold", font=("Microsoft YaHei", 10, "bold"))
-        p.tag_configure("italic", font=("Microsoft YaHei", 10, "italic"))
-        p.tag_configure("strike", font=("Microsoft YaHei", 10, "overstrike"), foreground="#888")
-        # 行内代码
-        p.tag_configure("code", font=("Consolas", 10), background="#f0f0f0", foreground="#c7254e")
-        # 代码块
-        p.tag_configure("codeblock", font=("Consolas", 10), background="#f4f4f4", foreground="#333",
-                        lmargin1=12, lmargin2=12, spacing1=4, spacing3=4,
-                        borderwidth=1, relief="solid")
-        # 引用
-        p.tag_configure("quote", font=("Microsoft YaHei", 10, "italic"), foreground="#666",
-                        lmargin1=20, lmargin2=20, background="#f9f9f9",
-                        spacing1=4, spacing3=4)
-        # 水平线
-        p.tag_configure("hr", font=("Microsoft YaHei", 10), foreground="#ccc", justify="center")
-        # 图片占位
-        p.tag_configure("image", font=("Microsoft YaHei", 10, "italic"), foreground="#0366d6",
-                        background="#eef", lmargin1=4, lmargin2=4)
-        # 链接
-        p.tag_configure("link", font=("Microsoft YaHei", 10, "underline"), foreground="#0366d6")
-        # 列表项
-        p.tag_configure("li", font=("Microsoft YaHei", 10), lmargin1=20, lmargin2=28, spacing3=2)
-        # 普通文本
-        p.tag_configure("text", font=("Microsoft YaHei", 10))
+        # ★ tag 优先级 = 创建顺序（后建的覆盖先建的）。因此**容器 tag 必须
+        #   先建、行内 tag 必须后建**：否则列表项里的 `code` 会被 li 的字体
+        #   盖掉，反引号里的字就不会变等宽。
+        # ── 容器 ──────────────────────────────────────────────────────────
+        p.tag_configure("text", font=(FONT_FAMILY, 10))
+        # 段间距交给 spacing3，不靠空行，读起来才有 Typora 那种松弛感
+        p.tag_configure("p", font=(FONT_FAMILY, 10), spacing1=2, spacing3=10,
+                        lmargin1=2, lmargin2=2)
+        p.tag_configure("li", font=(FONT_FAMILY, 10), lmargin1=18, lmargin2=30, spacing3=5)
+        # tk.Text 不能给 tag 画左边框，引用块的书脊线由渲染时插入的「▎」承担
+        p.tag_configure("quote", font=(FONT_FAMILY, 10), foreground=PALETTE.text_secondary,
+                        lmargin1=14, lmargin2=14, background="#f7f7f7",
+                        spacing1=6, spacing3=6)
+        p.tag_configure("quote_bar", font=(FONT_FAMILY, 10), foreground="#cfcfcf",
+                        lmargin1=14, lmargin2=14, background="#f7f7f7",
+                        spacing1=6, spacing3=6)
+        # 去掉 relief="solid"：Tk 的 tag 边框色不可控，一律渲染成深色硬边
+        p.tag_configure("codeblock", font=(MONO_FAMILY, 10), background=PALETTE.surface_alt,
+                        foreground=PALETTE.text_primary,
+                        lmargin1=12, lmargin2=12, spacing1=8, spacing3=8)
+        p.tag_configure("hr", font=(FONT_FAMILY, 9), foreground="#dcdcdc",
+                        justify="center", spacing1=12, spacing3=12)
+        # ── 标题 H1~H6 ────────────────────────────────────────────────────
+        # 旧版给六级标题配了六个不同灰度，层级全靠"变灰"表达 —— 那既不好看，
+        # 也让正文一多就分不出主次。改为：字色统一 text_primary，层级只用
+        # 「字号 + 段间距」，只把最末两级降为次级 / 弱化色。
+        p.tag_configure("h1", font=(FONT_FAMILY, 16, "bold"), spacing1=18, spacing3=8,
+                        foreground=PALETTE.text_primary)
+        p.tag_configure("h2", font=(FONT_FAMILY, 14, "bold"), spacing1=16, spacing3=6,
+                        foreground=PALETTE.text_primary)
+        p.tag_configure("h3", font=(FONT_FAMILY, 12, "bold"), spacing1=14, spacing3=5,
+                        foreground=PALETTE.text_primary)
+        p.tag_configure("h4", font=(FONT_FAMILY, 11, "bold"), spacing1=12, spacing3=4,
+                        foreground=PALETTE.text_primary)
+        p.tag_configure("h5", font=(FONT_FAMILY, 10, "bold"), spacing1=10, spacing3=3,
+                        foreground=PALETTE.text_secondary)
+        p.tag_configure("h6", font=(FONT_FAMILY, 10, "bold"), spacing1=10, spacing3=3,
+                        foreground=PALETTE.text_muted)
+        # ── 行内（优先级最高，必须最后建）──────────────────────────────────
+        p.tag_configure("bold", font=(FONT_FAMILY, 10, "bold"))
+        p.tag_configure("italic", font=(FONT_FAMILY, 10, "italic"))
+        p.tag_configure("strike", font=(FONT_FAMILY, 10, "overstrike"),
+                        foreground=PALETTE.text_muted)
+        # 旧版是 #c7254e 品红前景 + 灰底，全站仅有的彩色之一；改为一律正文色，
+        # 靠浅灰底表达"这是代码"就够了。
+        p.tag_configure("code", font=(MONO_FAMILY, 10), background=PALETTE.surface_alt,
+                        foreground=PALETTE.text_primary)
+        # 链接色取 palette.link（极低饱和墨蓝）——纯灰链接在正文里只剩"可点"
+        # 没有"可辨"，高饱和蓝又和纯灰阶冲突，这个值是两个极端之间的落点。
+        p.tag_configure("image", font=(FONT_FAMILY, 10, "italic"), foreground=PALETTE.link)
+        p.tag_configure("link", font=(FONT_FAMILY, 10, "underline"), foreground=PALETTE.link)
 
     def _toggle_preview(self):
         """
@@ -772,14 +812,16 @@ class NoteEditorDialog(tk.Toplevel):
             if not list_buffer:
                 return
             for item in list_buffer:
-                text_widget.insert("end", f"• {item}\n", "li")
+                text_widget.insert("end", "• ", "li")
+                self._insert_inline(text_widget, item, "li")
+                text_widget.insert("end", "\n", "li")
             list_buffer.clear()
 
         for line in lines:
             stripped = line.strip()
             if _re.match(r"^-{3,}$", stripped):
                 flush_list()
-                text_widget.insert("end", "─" * 40 + "\n\n", "hr")
+                text_widget.insert("end", "─" * 40 + "\n", "hr")
                 continue
             m = _re.match(r"^(#{1,6})\s+(.+)$", stripped)
             if m:
@@ -787,43 +829,65 @@ class NoteEditorDialog(tk.Toplevel):
                 level = len(m.group(1))
                 text = m.group(2).strip()
                 tag = f"h{level}"
-                text_widget.insert("end", text + "\n\n", tag)
+                self._insert_inline(text_widget, text, tag)
+                text_widget.insert("end", "\n\n", tag)
                 continue
             if stripped.startswith(">"):
                 flush_list()
                 quote_text = _re.sub(r"^>\s?", "", stripped)
-                text_widget.insert("end", f"❝ {quote_text}\n", "quote")
+                # tk.Text 无法给 tag 画左边框，用「▎」当书脊线；两段共用同一组
+                # lmargin/背景/间距，拼在同一行里看不出接缝。
+                text_widget.insert("end", "▎ ", ("quote", "quote_bar"))
+                self._insert_inline(text_widget, quote_text, "quote")
+                text_widget.insert("end", "\n", "quote")
                 continue
             m = _re.match(r"^[-*+]\s+(.+)$", stripped)
             if m:
-                list_buffer.append(self._inline_md(m.group(1)))
+                list_buffer.append(m.group(1))
                 continue
             m = _re.match(r"^\d+\.\s+(.+)$", stripped)
             if m:
-                list_buffer.append(self._inline_md(m.group(1)))
+                list_buffer.append(m.group(1))
                 continue
             if stripped == "":
                 flush_list()
                 text_widget.insert("end", "\n", "p")
                 continue
             flush_list()
-            rendered = self._inline_md(stripped)
-            text_widget.insert("end", rendered + "\n", "p")
+            self._insert_inline(text_widget, stripped, "p")
+            text_widget.insert("end", "\n", "p")
 
         flush_list()
 
-    def _inline_md(self, text: str) -> str:
+    def _insert_inline(self, text_widget, text: str, base_tag: str) -> None:
         """
-        处理行内 Markdown 语法（粗体、斜体、代码、图片、链接）。
-        为简化渲染（tk.Text 单 tag 难以混排），去除标记符号保留文本。
+        把一行文本按行内 Markdown 语法**分段插入**，让加粗 / 斜体 / 行内代码 /
+        链接 / 图片占位真正带上各自的 tag。
+
+        旧实现 `_inline_md()` 只是把标记符号删掉后返回纯字符串，也就是那些
+        行内 tag 配了却从来没被使用过 —— 预览里加粗和正文长得一模一样。
+        改成逐段插入后，混排才有可能。
         """
-        import re as _re
-        text = _re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-        text = _re.sub(r"\*(.+?)\*", r"\1", text)
-        text = _re.sub(r"`([^`]+)`", r"\1", text)
-        text = _re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"[图片: \1]", text)
-        text = _re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)
-        return text
+        pos = 0
+        for m in _INLINE_PATTERN.finditer(text):
+            if m.start() > pos:
+                text_widget.insert("end", text[pos:m.start()], base_tag)
+            seg = m.group(0)
+            if seg.startswith("`"):
+                text_widget.insert("end", seg[1:-1], ("code", base_tag))
+            elif seg.startswith("!["):
+                label = re.match(r"!\[([^\]]*)\]", seg).group(1)
+                text_widget.insert("end", f"[图片: {label}]", ("image", base_tag))
+            elif seg.startswith("["):
+                label = re.match(r"\[([^\]]+)\]", seg).group(1)
+                text_widget.insert("end", label, ("link", base_tag))
+            elif seg.startswith("**"):
+                text_widget.insert("end", seg[2:-2], ("bold", base_tag))
+            else:
+                text_widget.insert("end", seg[1:-1], ("italic", base_tag))
+            pos = m.end()
+        if pos < len(text):
+            text_widget.insert("end", text[pos:], base_tag)
 
     def _preview_markdown(self):
         """
@@ -906,23 +970,33 @@ class NoteEditorDialog(tk.Toplevel):
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   body {{
-    font-family: "Microsoft YaHei", sans-serif;
-    max-width: 860px;
-    margin: 40px auto;
-    padding: 0 20px;
-    background: #fafafa;
-    color: #222;
-    line-height: 1.8;
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    max-width: 760px;
+    margin: 48px auto;
+    padding: 0 24px;
+    background: #ffffff;
+    color: #1c1c1c;
+    line-height: 1.75;
+    font-size: 15px;
   }}
-  h1,h2,h3 {{ border-bottom: 2px solid #eee; padding-bottom: 6px; margin-top: 1.5em; color: #1a1a1a }}
-  pre {{ background: #f4f4f4; border: 1px solid #ddd; border-radius: 6px;
-        padding: 14px; overflow-x: auto }}
-  code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: .9em }}
+  h1,h2,h3,h4,h5,h6 {{ font-weight: 600; color: #1c1c1c; margin: 1.6em 0 .6em }}
+  h1 {{ font-size: 1.7em; padding-bottom: .35em; border-bottom: 1px solid #ececec }}
+  h2 {{ font-size: 1.4em; padding-bottom: .3em; border-bottom: 1px solid #f0f0f0 }}
+  h3 {{ font-size: 1.2em }}
+  h4,h5,h6 {{ font-size: 1em }}
+  h5 {{ color: #6b6b6b }}
+  h6 {{ color: #9a9a9a }}
+  p {{ margin: .8em 0 }}
+  pre {{ background: #f7f7f7; border: 1px solid #efefef; border-radius: 8px;
+        padding: 16px; overflow-x: auto }}
+  code {{ background: #f4f4f4; padding: 2px 5px; border-radius: 4px; font-size: .9em;
+         font-family: Consolas, "Courier New", monospace }}
   pre code {{ background: none; padding: 0 }}
-  img {{ max-width: 100%; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,.1) }}
-  a {{ color: #0366d6 }}
-  hr {{ border: none; border-top: 2px solid #eee; margin: 24px 0 }}
-  blockquote {{ border-left: 4px solid #ddd; margin: 0; padding: 4px 16px; color: #666 }}
+  img {{ max-width: 100%; border-radius: 8px }}
+  a {{ color: #4f6b85 }}
+  hr {{ border: none; border-top: 1px solid #ececec; margin: 28px 0 }}
+  blockquote {{ border-left: 3px solid #e2e2e2; margin: 1em 0;
+               padding: .2em 18px; color: #6b6b6b }}
 </style>
 </head>
 <body>
@@ -1017,7 +1091,7 @@ class NoteEditorDialog(tk.Toplevel):
         messagebox.showinfo(
             "笔记编辑",
             "笔记已保存。\n\n"
-            "💡 提示：保存后 Ctrl+V 粘贴的截图会存到对应笔记目录下。",
+            "提示：保存后 Ctrl+V 粘贴的截图会存到对应笔记目录下。",
             parent=self,
         )
 
@@ -1124,7 +1198,7 @@ class StudyNotesPage(ttk.Frame):
         # ── 标题栏 ──────────────────────────────────────────────────────────
         header = ttk.Frame(frame, padding=(8, 8, 8, 4))
         header.pack(fill="x")
-        ttk.Label(header, text="📂 笔记分类", font=("Microsoft YaHei", 10, "bold")).pack(side="left")
+        ttk.Label(header, text="笔记分类", font=(FONT_FAMILY, 10, "bold")).pack(side="left")
         ttk.Button(header, text="网盘", command=self.open_baidu_disk, width=6).pack(side="right", padx=2)
         ttk.Button(header, text="+ 新分类", command=self.add_category).pack(side="right", padx=2)
 
@@ -1173,7 +1247,7 @@ class StudyNotesPage(ttk.Frame):
 
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
 
-        ttk.Label(toolbar, text="🔍").pack(side="left", padx=(0, 4))
+        # 原处有个 🔍 emoji：紧跟着就是「搜索」按钮，图标是冗余的，且是彩色的
         self.search_var = tk.StringVar()
         ttk.Entry(toolbar, textvariable=self.search_var, width=28).pack(side="left", padx=4)
         ttk.Button(toolbar, text="搜索", command=self.do_search).pack(side="left", padx=3)
@@ -1210,7 +1284,9 @@ class StudyNotesPage(ttk.Frame):
         for col in columns:
             text, width = col_meta[col]
             self.notes_tree.heading(col, text=text)
-            self.notes_tree.column(col, width=width, anchor="w")
+            # 定长编号列居中，文本列左对齐（与全站表格规则一致）
+            anchor = "center" if col == "id" else "w"
+            self.notes_tree.column(col, width=width, anchor=anchor)
 
         vbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.notes_tree.yview)
         self.notes_tree.configure(yscrollcommand=vbar.set)
@@ -1232,10 +1308,11 @@ class StudyNotesPage(ttk.Frame):
             wrap="word",
             relief="flat",
             state="disabled",   # 只读模式
-            font=("Microsoft YaHei", 10),
-            bg="#f9f9f9",
+            font=(FONT_FAMILY, 10),
+            bg=PALETTE.surface_alt,
             height=12,
         )
+        self._setup_page_preview_tags()
         pvbar = ttk.Scrollbar(preview_inner, orient="vertical", command=self.preview_text.yview)
         self.preview_text.configure(yscrollcommand=pvbar.set)
         self.preview_text.pack(side="left", fill="both", expand=True)
@@ -1480,6 +1557,18 @@ class StudyNotesPage(ttk.Frame):
         self._selected_note_id = note_id
         self._show_preview(note_id)
 
+    def _setup_page_preview_tags(self):
+        """底部预览面板的 tag：标题 / 元信息 / 发丝线 / 正文，纯灰阶。"""
+        p = self.preview_text
+        p.tag_configure("pv_title", font=(FONT_FAMILY, 12, "bold"),
+                        foreground=PALETTE.text_primary, spacing3=6)
+        p.tag_configure("pv_meta", font=(FONT_FAMILY, 9),
+                        foreground=PALETTE.text_muted, spacing3=2)
+        p.tag_configure("pv_rule", font=(FONT_FAMILY, 9),
+                        foreground="#e2e2e2", spacing1=6, spacing3=6)
+        p.tag_configure("pv_body", font=(FONT_FAMILY, 10),
+                        foreground=PALETTE.text_primary, spacing1=4)
+
     def _show_preview(self, note_id: int):
         """
         在底部只读 Text 中渲染笔记内容。
@@ -1490,9 +1579,9 @@ class StudyNotesPage(ttk.Frame):
             标签：空格分隔的标签
 
             ─────────────────────────
-            📦 来源：[ID] 标题
-            🔗 链接：https://...
-            🔑 提取码：xxxx
+            来源：[ID] 标题
+            链接：https://...
+            提取码：xxxx
 
             ─────────────────────────
             正文内容（Markdown）
@@ -1504,33 +1593,31 @@ class StudyNotesPage(ttk.Frame):
             self.preview_text.configure(state="disabled")
             return
 
-        lines = [
-            f"# {note.title}",
-            "",
-            f"分类：{note.category_code} {note.category_name}".strip() or "未分类",
-            f"标签：{' '.join(note.tags) if note.tags else '无'}",
-            "",
-            "─" * 60,
-            "",
-        ]
+        # 旧版是把 Markdown 原文（含 "# 标题"）整段倒出来，没有排版。
+        # 改为逐段带 tag 插入，让这块面板也读起来像一篇文档。
+        P = self.preview_text
+        P.insert("end", f"{note.title}\n", "pv_title")
+        meta_cat = f"分类：{note.category_code} {note.category_name}".strip() or "未分类"
+        P.insert("end", meta_cat, "pv_meta")
+        P.insert("end", "\n")
+        tags = " ".join(note.tags) if note.tags else "无"
+        P.insert("end", f"标签：{tags}\n", "pv_meta")
+        P.insert("end", "\n")
+        P.insert("end", "─" * 60 + "\n", "pv_rule")
 
         # 附加来源信息（如果有关联的网盘资料）
         if note.source_id:
             src = self.db.get_baidu_source(note.source_id)
             if src:
-                src_lines = [
-                    f"📦 来源：[{src.id}] {src.title}",
-                    f"🔗 链接：{src.link_url}",
-                    f"🔑 提取码：{src.access_code}",
-                    "",
-                    "─" * 60,
-                    "",
-                ]
-                lines.extend(src_lines)
+                P.insert("end", f"来源：[{src.id}] {src.title}\n", "pv_meta")
+                P.insert("end", f"链接：{src.link_url}\n", "pv_meta")
+                P.insert("end", f"提取码：{src.access_code}\n", "pv_meta")
+                P.insert("end", "\n")
+                P.insert("end", "─" * 60 + "\n", "pv_rule")
 
-        lines.append(note.content)
-        self.preview_text.insert("1.0", "\n".join(lines))
-        self.preview_text.configure(state="disabled")
+        P.insert("end", "\n")
+        P.insert("end", note.content, "pv_body")
+        P.configure(state="disabled")
 
     def do_search(self):
         """

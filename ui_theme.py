@@ -74,8 +74,10 @@ class Palette:
     sidebar_hover: str = "#eaeaea"
     sidebar_active: str = "#e3e3e3"
     nav_text: str = "#3d3d3d"
-    nav_dot: str = "#c4c4c4"
-    nav_dot_hover: str = "#a8a8a8"
+    # 线性图标的描边色：比正文浅一档，让文字主导；选中时才压到近黑
+    nav_icon: str = "#8f8f8f"
+    nav_icon_hover: str = "#525252"
+    nav_icon_active: str = "#1c1c1c"
 
 
 MAIN_PALETTE = Palette(
@@ -108,8 +110,9 @@ MAIN_PALETTE = Palette(
     sidebar_hover="#eaeaea",
     sidebar_active="#e3e3e3",
     nav_text="#3d3d3d",
-    nav_dot="#c4c4c4",
-    nav_dot_hover="#a8a8a8",
+    nav_icon="#8f8f8f",
+    nav_icon_hover="#525252",
+    nav_icon_active="#1c1c1c",
 )
 
 TOOLBOX_PALETTE = Palette(

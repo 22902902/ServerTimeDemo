@@ -11,7 +11,10 @@ Treeview 的缩进连线、三角展开器、整行反白选中都是随主题�
 
 1. 浅灰侧栏与白色内容区靠**色差**分隔，不画竖线
 2. 悬停 / 选中用极浅灰填充表达；选中额外加 2px 左侧近黑细条
-3. 层级用「缩进 + 5px 圆点」表达，不使用图标（旧版的黄色文件夹图标已移除）
+3. 层级用「缩进 + 线性图标」表达；图标与分组指示共用左侧一个等宽槽位，
+   因此**每一级的标记与文字都严格对齐**（旧版的黄色文件夹图标已移除）
+
+图标的绘制与缓存见 ``app_icons``；图标按 Tk 缩放渲染，高清屏下不糊。
 
 对外接口
 ------------------------------------------------------------------------------
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import tkinter as tk
 
+import app_icons
 from ui_theme import MAIN_PALETTE, TYPOGRAPHY
 
 
@@ -73,11 +77,11 @@ NAV_MODEL = [
 # 尺寸 token（保持 4 的倍数节奏）
 SECTION_GAP_TOP = 16
 ROW_PAD_Y = 7
-DOT_SIZE = 5
-INDENT_STEP = 14
 ACCENT_WIDTH = 2
-DOT_LEFT_GAP = 6
-DOT_TEXT_GAP = 9
+# 图标槽左缘 = ACCENT_WIDTH + ICON_LEFT_GAP = 12，与分组标题的 padx=12 对齐
+ICON_LEFT_GAP = 10
+ICON_TEXT_GAP = 8
+INDENT_STEP = 14
 
 
 class SidebarNav(tk.Frame):
@@ -98,6 +102,9 @@ class SidebarNav(tk.Frame):
         self.palette = palette
         self.typography = typography
         self.on_select = on_select
+
+        # 图标按当前 Tk 缩放渲染成位图，因此要在建窗口之后才能定尺寸
+        self._icon_px = app_icons.scaled_px(self, app_icons.ICON_LOGICAL)
 
         self._inner = tk.Frame(self, bg=palette.sidebar_bg)
         self._inner.pack(fill="both", expand=True, padx=10, pady=6)
@@ -176,7 +183,7 @@ class SidebarNav(tk.Frame):
     def _make_row(self, node, *, level: int, kind: str) -> None:
         palette = self.palette
         key = node["key"]
-        indent = DOT_LEFT_GAP + max(0, level - 1) * INDENT_STEP
+        indent = ICON_LEFT_GAP + max(0, level - 1) * INDENT_STEP
 
         row = tk.Frame(self._inner, bg=palette.sidebar_bg, cursor="hand2")
         row.pack(fill="x")
@@ -185,8 +192,24 @@ class SidebarNav(tk.Frame):
         accent = tk.Frame(row, width=ACCENT_WIDTH, bg=palette.sidebar_bg)
         accent.pack(side="left", fill="y")
 
-        dot = tk.Frame(row, width=DOT_SIZE, height=DOT_SIZE, bg=palette.nav_dot)
-        dot.pack(side="left", padx=(indent, DOT_TEXT_GAP))
+        # 等宽图标槽：模块行放模块图标，分组行放展开指示，两者尺寸一致，
+        # 因此每级的「标记 → 文字」间距恒定，缩进看上去是整齐的阶梯。
+        slot = tk.Frame(row, width=self._icon_px, height=self._icon_px,
+                        bg=palette.sidebar_bg)
+        slot.pack(side="left", padx=(indent, ICON_TEXT_GAP))
+        slot.pack_propagate(False)
+
+        if kind == "group":
+            image = app_icons.chevron(
+                key not in self._collapsed, palette.nav_icon,
+                app_icons.scaled_px(self, app_icons.CHEVRON_PX),
+            )
+        else:
+            image = app_icons.nav_icon(key, palette.nav_icon, self._icon_px)
+
+        icon = tk.Label(slot, image=image, bg=palette.sidebar_bg, bd=0,
+                        highlightthickness=0, cursor="hand2")
+        icon.pack(fill="both", expand=True)
 
         label = tk.Label(
             row,
@@ -199,22 +222,7 @@ class SidebarNav(tk.Frame):
         )
         label.pack(side="left", fill="x", expand=True, pady=ROW_PAD_Y)
 
-        chevron = None
-        if kind == "group":
-            chevron = tk.Label(
-                row,
-                text=self._chevron_text(key),
-                bg=palette.sidebar_bg,
-                fg=palette.text_muted,
-                font=self.typography.nav_group,
-                cursor="hand2",
-            )
-            chevron.pack(side="right", padx=(6, 10))
-
-        widgets = [row, accent, dot, label]
-        if chevron is not None:
-            widgets.append(chevron)
-        for widget in widgets:
+        for widget in (row, accent, slot, icon, label):
             widget.bind("<Enter>", lambda _e, k=key: self._on_enter(k))
             widget.bind("<Leave>", lambda _e, k=key: self._on_leave(k))
             widget.bind("<Button-1>", lambda _e, k=key: self._on_click(k))
@@ -222,14 +230,11 @@ class SidebarNav(tk.Frame):
         self._rows[key] = {
             "row": row,
             "accent": accent,
-            "dot": dot,
+            "slot": slot,
+            "icon": icon,
             "label": label,
-            "chevron": chevron,
             "kind": kind,
         }
-
-    def _chevron_text(self, key: str) -> str:
-        return "▾" if key not in self._collapsed else "▸"
 
     # ------------------------------------------------------------------
     # 状态刷新
@@ -240,22 +245,29 @@ class SidebarNav(tk.Frame):
             if key == self._selected:
                 bg, fg = palette.sidebar_active, palette.text_primary
                 font = self.typography.nav_item_active
-                dot_bg, accent_bg = palette.accent, palette.accent
+                icon_color, accent_bg = palette.nav_icon_active, palette.accent
             elif key == self._hovered:
                 bg, fg = palette.sidebar_hover, palette.nav_text
                 font = self.typography.nav_item
-                dot_bg, accent_bg = palette.nav_dot_hover, palette.sidebar_hover
+                icon_color, accent_bg = palette.nav_icon_hover, palette.sidebar_hover
             else:
                 bg, fg = palette.sidebar_bg, palette.nav_text
                 font = self.typography.nav_item
-                dot_bg, accent_bg = palette.nav_dot, palette.sidebar_bg
+                icon_color, accent_bg = palette.nav_icon, palette.sidebar_bg
 
             widgets["row"].configure(bg=bg)
             widgets["accent"].configure(bg=accent_bg)
-            widgets["dot"].configure(bg=dot_bg)
+            widgets["slot"].configure(bg=bg)
             widgets["label"].configure(bg=bg, fg=fg, font=font)
-            if widgets["chevron"] is not None:
-                widgets["chevron"].configure(bg=bg)
+
+            if widgets["kind"] == "group":
+                image = app_icons.chevron(
+                    key not in self._collapsed, icon_color,
+                    app_icons.scaled_px(self, app_icons.CHEVRON_PX),
+                )
+            else:
+                image = app_icons.nav_icon(key, icon_color, self._icon_px)
+            widgets["icon"].configure(bg=bg, image=image)
 
     # ------------------------------------------------------------------
     # 事件
@@ -267,7 +279,7 @@ class SidebarNav(tk.Frame):
         self._refresh_states()
 
     def _on_leave(self, key: str) -> None:
-        # 指针从行移到子控件（圆点/文字）时父行也会收到 Leave，
+        # 指针从行移到子控件（图标/文字）时父行也会收到 Leave，
         # 因此延迟到空闲时用指针实际坐标复核，避免悬停态闪烁。
         self.after_idle(lambda k=key: self._confirm_leave(k))
 

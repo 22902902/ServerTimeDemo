@@ -128,6 +128,9 @@ from PIL import Image, ImageTk, UnidentifiedImageError  # 图片预览与缩放
 #  日志基建：其他模块的 logger 输出目标由它决定，需在入口处先初始化
 import log_setup
 
+#  应用图形资产（应用标记 / 导航图标，Pillow 超采样渲染）
+import app_icons
+
 #  左侧分组导航（自绘侧栏，替代原生 Treeview）
 from nav_sidebar import SidebarNav
 
@@ -3203,6 +3206,16 @@ class ExpiryManagerApp(TkinterDnD.Tk):
 
         inner = tk.Frame(shell_top, bg=palette.surface)
         inner.pack(fill="x", padx=18, pady=12)
+
+        # 品牌标记：与窗口图标同源（app_icons.draw_brand_tile），
+        # 给顶栏左端一个视觉锚点。位图由 app_icons 内部缓存持有引用。
+        tk.Label(
+            inner,
+            image=app_icons.brand_mark(inner),
+            bg=palette.surface,
+            bd=0,
+            highlightthickness=0,
+        ).pack(side="left", padx=(0, 10))
 
         tk.Label(
             inner,
