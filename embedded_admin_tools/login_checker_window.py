@@ -1,7 +1,5 @@
 import json
-import sys
 import tkinter as tk
-from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 

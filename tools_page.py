@@ -15,16 +15,13 @@
 import os
 import sys
 import shutil
-import struct
 import hashlib
 import logging
 import subprocess
-import tempfile
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, colorchooser, simpledialog
+from tkinter import ttk, messagebox, filedialog
 from pathlib import Path
 from typing import Optional
-from datetime import datetime
 
 import tools_db
 from dialog_form_style import apply_dialog_form_style, create_form_checkbutton, create_form_entry, create_form_frame, create_form_label
@@ -32,7 +29,7 @@ from ui_theme import PACKAGE_ACCENT_COLORS, THEME, TOOLBOX_PALETTE
 
 # ★ tkdnd 拖拽支持（全局导入，确保打包包含）
 try:
-    from tkinterdnd2 import DND_FILES, TkinterDnD
+    from tkinterdnd2 import DND_FILES
     HAS_TKDND = True
 except Exception:
     HAS_TKDND = False
@@ -549,7 +546,7 @@ class ToolsPage(ttk.Frame):
                 print("[FTP Sync] FTP 连接失败或无可用文件，保留现有 tools_dir 内容")
         else:
             # 无 FTP：用户手动加了工具，保留
-            print(f"[Tools Self-Check] 检测到自定义内容（hash 变化），保留现有 Tools（无 FTP 配置）")
+            print("[Tools Self-Check] 检测到自定义内容（hash 变化），保留现有 Tools（无 FTP 配置）")
 
     # ------------------------------------------------------------------
     # 设置加载

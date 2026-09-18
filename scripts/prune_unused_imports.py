@@ -170,27 +170,66 @@ def apply_edits(path, removals):
             continue
 
         is_multi = "\n" in block.rstrip("\r\n") or node.end_lineno > node.lineno
-        kw = "import" if isinstance(node, ast.Import) else "import"
-        head = f"{kw} " if isinstance(node, ast.Import) else f"from {module} import "
+        head = ("import " if isinstance(node, ast.Import)
+                else f"from {module} import ")
+        base_indent = _indent_of(parts[start])
 
         if is_multi:
             if len(keep) == 1:
-                new = f"{_indent_of(parts[start])}{head}{_alias_text(keep[0])}{eol}"
+                new = f"{base_indent}{head}{_alias_text(keep[0])}{eol}"
                 note = (f"折叠为单行，保留 {_alias_text(keep[0])}；"
                         f"删除 {', '.join(dropped_names)}")
             else:
-                indent = _indent_of(parts[start]) + "    "
-                body = "".join(f"{indent}{_alias_text(a)},{eol}" for a in keep)
-                new = (f"{_indent_of(parts[start])}{head}({eol}{body}"
-                       f"{_indent_of(parts[start])}){eol}")
-                note = f"保留 {len(keep)} 个名字；删除 {', '.join(dropped_names)}"
+                # 原位保留原有折行：只把被删的名字从它所在的那一行摘掉，
+                # 其余行原样不动。这样最小化 diff，也保住作者的分组意图。
+                joined = "".join(parts[start:end])
+                lp, rp = joined.index("("), joined.rindex(")")
+                inner_lines = joined[lp + 1:rp].split("\n")
+
+                # 逐行按逗号切分，按出现顺序对应 node.names 的下标
+                line_of = []          # 每个 alias 下标 -> 所在行号
+                for li, line in enumerate(inner_lines):
+                    for tok in line.split(","):
+                        if tok.strip():
+                            line_of.append(li)
+
+                if len(line_of) != len(node.names):
+                    # 切分与 AST 对不上（含嵌套括号等）→ 退回保险的展开写法
+                    indent = base_indent + "    "
+                    body = "".join(f"{indent}{_alias_text(a)},{eol}" for a in keep)
+                    new = f"{base_indent}{head}({eol}{body}{base_indent}){eol}"
+                    note = (f"保留 {len(keep)} 个名字（原折行无法安全保留，已重排）；"
+                            f"删除 {', '.join(dropped_names)}")
+                else:
+                    keep_set = {i for i, a in enumerate(node.names) if a in keep}
+                    per_line = {li: [i for i in keep_set if line_of[i] == li]
+                                for li in range(len(inner_lines))}
+                    emit = []
+                    for li, idxs in per_line.items():
+                        if not idxs:
+                            continue
+                        indent = inner_lines[li][:len(inner_lines[li])
+                                                 - len(inner_lines[li].lstrip(" \t"))]
+                        emit.append(indent + ", ".join(_alias_text(node.names[i])
+                                                       for i in idxs) + ",")
+                    if not emit:
+                        edits.append((start, end, "",
+                                      f"删除整条 import（{', '.join(dropped_names)} 全部未使用）"))
+                        continue
+                    body = eol.join(emit)
+                    new = f"{base_indent}{head}({eol}{body}{eol}{base_indent}){eol}"
+                    note = (f"保留 {len(keep)} 个名字（原位保留原折行）；"
+                            f"删除 {', '.join(dropped_names)}")
         else:
             orig = parts[start]
             _code, comment = _split_comment(orig.rstrip("\r\n"))
             names = ", ".join(_alias_text(a) for a in keep)
             gap = "  " if comment else ""
-            new = f"{head}{names}{gap}{comment}{eol}"
-            note = f"保留 {', '.join(_alias_text(a) for a in keep)}；删除 {', '.join(dropped_names)}"
+            # 必须保留原缩进：缩进的 import 通常位于 try / if 块内，
+            # 去掉缩进会把块体挖空（已由本脚本的语法校验拦下过一次）
+            new = f"{base_indent}{head}{names}{gap}{comment}{eol}"
+            note = (f"保留 {', '.join(_alias_text(a) for a in keep)}；"
+                    f"删除 {', '.join(dropped_names)}")
 
         edits.append((start, end, new, note))
 

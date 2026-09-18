@@ -9,12 +9,11 @@ Q&A 问答 + 每周工作纪要 + 练习记录 页面
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from datetime import datetime, timedelta
-from typing import Optional
 
-from qa_work_log_db import QAWorkLogDB, QAWorkLogDBExt, QAItem, WeeklyLog, PracticeLog
+from qa_work_log_db import QAWorkLogDB, QAWorkLogDBExt, QAItem, PracticeLog
 from qa_extras import (
     GlobalSearchBarMixin, WorkNotePanel, ReviewPanel,
-    PracticeImageMixin, _save_image, _ensure_images_dir, parse_tags
+    PracticeImageMixin,
 )
 
 

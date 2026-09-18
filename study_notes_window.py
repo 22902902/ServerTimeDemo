@@ -38,23 +38,18 @@
 ================================================================================
 """
 
-import base64
 import io
-import json
-import os
 import re
-import subprocess
 import tempfile
 import tkinter as tk
-import uuid
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image
 
-from study_notes_db import StudyNotesDB, StudyNote, StudyCategory
+from study_notes_db import StudyNotesDB, StudyCategory
 from baidu_disk_window import BaiduDiskWindow
 
 

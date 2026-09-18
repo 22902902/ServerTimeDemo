@@ -14,7 +14,6 @@ ADB 工具箱
 ===============================================================================
 """
 
-import os
 import re
 import shlex
 import subprocess
@@ -753,7 +752,7 @@ class AdbPage(ttk.Frame):
 
         cmd = ["adb", "-s", self.current_device, "logcat", "-v", "time", f"*:{level}"]
         if tag:
-            cmd.extend([f"{tag}:{level}", f"*:S"])
+            cmd.extend([f"{tag}:{level}", "*:S"])
         try:
             self.logcat_process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

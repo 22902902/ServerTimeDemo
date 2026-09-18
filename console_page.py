@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """console_page.py - 控制台页面(日志输出 + 命令执行 + 工具维护)"""
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, scrolledtext
 import subprocess
 import sys
 import threading
@@ -231,7 +231,7 @@ class ConsolePage(ttk.Frame):
                 for i, tool in enumerate(tools, 1):
                     # * 检测终止信号
                     if not self._extracting:
-                        self._log_main(f"用户终止抽取", "warning")
+                        self._log_main("用户终止抽取", "warning")
                         break
 
                     name = tool["name"]

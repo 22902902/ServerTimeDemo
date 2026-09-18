@@ -4,7 +4,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, filedialog
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 import subprocess
 from tools_page import ToolsPage
 from adb_page import AdbPage

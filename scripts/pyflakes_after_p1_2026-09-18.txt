@@ -1,0 +1,26 @@
+# pyflakes 快照 —— P1（依赖清单 + 未使用导入）完成后
+# 生成：2026-09-18  解释器：Python312  工具：pyflakes（隔离环境）
+#
+# 脉络：原始基线 72 条 → 修 4 个 P0 Bug 后 64 条 → 本轮清理后 7 条
+#   原始基线见 scripts/pyflakes_baseline_2026-09-18.txt
+#
+# 剩余 7 条全部是「未使用局部变量」，已逐个人工确认过，属刻意保留，不是遗漏：
+#   main.py:1929 cursor          execute() 返回值无用，删赋值即可（低价值，未动）
+#   study_demo_window.py:396  start  重构残留（下一行 idx 才是真正在用的）
+#   study_notes_window.py:1339 parent_cat  冗余，pcat 已持有同一对象
+#   study_notes_window.py:1565/1580 dlg  ← 不是漏写逻辑：NoteEditorDialog 保存后
+#        会自己调 parent_window.refresh_notes()（第 1015 行），无需 wait_window。
+#        保留赋值是有意的 —— 持有 Toplevel 引用可避免被 GC 回收的经典坑。
+#   tools_page.py:1956 current_cols  未完成功能的痕迹：右键菜单本应标出当前图标尺寸
+#   tools_page.py:2694 row_cfg       重构后被 fields 循环内联取代的孤儿配置
+#
+# 校验命令（照抄即可复现）：
+#   $PY -m pyflakes $(ls *.py embedded_admin_tools/*.py embedded_admin_tools/services/*.py)
+
+main.py:1929:13: local variable 'cursor' is assigned to but never used
+tools_page.py:1956:9: local variable 'current_cols' is assigned to but never used
+tools_page.py:2694:9: local variable 'row_cfg' is assigned to but never used
+study_notes_window.py:1339:17: local variable 'parent_cat' is assigned to but never used
+study_notes_window.py:1565:9: local variable 'dlg' is assigned to but never used
+study_notes_window.py:1580:9: local variable 'dlg' is assigned to but never used
+study_demo_window.py:396:21: local variable 'start' is assigned to but never used

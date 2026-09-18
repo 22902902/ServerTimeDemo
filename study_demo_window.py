@@ -8,9 +8,9 @@ study_demo_window.py
   3. 样式：编辑器浅色（白底黑字 IDE 风），输出区白底，关键操作按钮置顶
   4. 占位提示：未选章节/未选片段时给出明确提示
 """
-import os, sys, subprocess, threading, time, traceback, json
+import os, sys, subprocess, threading, traceback
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog
 from pathlib import Path
 from typing import Optional
 
@@ -823,7 +823,7 @@ class StudyDemoPage(ttk.Frame):
 
         rc = proc.returncode
         if rc == 0:
-            self._append_output(f"\n[完成] 退出码 0\n", "ok")
+            self._append_output("\n[完成] 退出码 0\n", "ok")
         else:
             self._append_output(f"\n[失败] 退出码 {rc}\n", "error")
 

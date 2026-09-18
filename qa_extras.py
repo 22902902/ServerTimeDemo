@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from qa_work_log_db import (
-    QAWorkLogDBExt, WorkNote, PracticeReview, GlobalSearchResult, _today
+    QAWorkLogDBExt, WorkNote, PracticeReview, _today,
 )
 
 

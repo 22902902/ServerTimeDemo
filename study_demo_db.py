@@ -3,8 +3,6 @@ Python 学习模块数据库层
 study_demo_db.py
 """
 import sqlite3, os
-from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 DEMO_DB_PATH = os.path.join(os.path.dirname(__file__), "study_demo.db")

@@ -1,9 +1,7 @@
 import csv
 import json
-import sys
 import tkinter as tk
 from datetime import datetime
-from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 

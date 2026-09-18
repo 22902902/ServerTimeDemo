@@ -86,7 +86,7 @@ expiry_manager.db                ← SQLite 主数据库（所有数据）
 # -----------------------------------------------------------------------------
 # 01. 标准库导入
 # -----------------------------------------------------------------------------
-import zipfile, threading, datetime as _dt
+import zipfile, datetime as _dt
 import re          # 正则：日期文本解析、Excel 序列号转换
 import sqlite3     # SQLite 数据库驱动
 import threading    # 系统托盘独立线程
@@ -135,10 +135,8 @@ from embedded_admin_tools.services.login_memory_service import LoginMemoryServic
 from study_notes_window import StudyNotesPage   # 学习笔记页面
 from study_notes_db import StudyNotesDB          # 笔记数据库操作
 from qa_work_log_page import QAWorkLogPage       # Q&A + 纪要 + 练习记录页面
-from qa_work_log_db import QAWorkLogDB, QAWorkLogDBExt  # Q&A + 纪要数据库操作
+from qa_work_log_db import QAWorkLogDBExt  # Q&A + 纪要数据库操作
 from system_toolbox_page import SystemToolboxPage  # 系统工具箱页面
-from tools_page import ToolsPage                       # 工具包页面
-from adb_page import AdbPage                          # ADB 工具箱页面
 from study_demo_window import StudyDemoPage           # Python 学习辅助模块
 from study_demo_db import get_conn as get_study_demo_conn  # 学习模块数据库
 from account_windows import AccountManagerDialog as SharedAccountManagerDialog
@@ -148,23 +146,7 @@ from expiry_dialogs import AssetDialog, DetailDialog, SettingsDialog
 from expiry_page import ExpiryPage
 from credentials_page import CredentialsPage
 from process_page import ProcessPage
-from ui_components import (
-    create_flat_action_button,
-    create_info_label,
-    create_metric_card,
-    create_section_frame,
-    create_ttk_card,
-    create_ttk_section_header,
-)
-from page_components import (
-    add_toolbar_buttons,
-    create_content_frame,
-    create_page_toolbar,
-    create_preview_sidebar,
-    create_status_bar,
-    create_summary_card,
-    create_two_pane_layout,
-)
+from ui_components import create_flat_action_button
 from ui_theme import MAIN_PALETTE, THEME, TYPOGRAPHY
 from dialog_form_style import apply_dialog_form_style, create_form_entry, create_form_frame, create_form_label
 
