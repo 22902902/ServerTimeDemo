@@ -547,9 +547,28 @@ pyinstaller>=6.10.0
 
 建议顺手固定版本（`pip freeze` 生成 `requirements.lock.txt`），避免某次 `pip install` 后界面崩了却查不出原因。
 
-### 3.7 未使用导入 / 死抽象层（约 45 处）
+#### ✅ 已完成（2026-09-18）
 
-pyflakes 实测（`tmp_debug/_pyflakes.txt` 有完整清单）。重点：
+补齐后的 `requirements.txt` 按**依赖强度**分组，而不是简单堆列表——这是本次补全才发现的信息：9 个依赖里有 5 个是**硬依赖**（代码里没加 `try`），缺一个程序直接起不来；另 4 个在 `try` 内，缺失只静默降级。分组依据是全项目 import 的静态盘点（`scripts/dep_inventory.py`）。
+
+| 依赖 | 强度 | 位置 | 缺失后果 |
+|---|---|---|---|
+| `tkinterdnd2` | **硬** | `main.py:120`（未加 try） | **启动直接 ImportError** —— 新环境跑不起来的首要原因 |
+| `Pillow` | **硬** | `main.py:122` | 图片预览/截图功能崩 |
+| `requests` | **硬** | `services/api_client.py:4` | 接口工具不可用 |
+| `pycryptodome` | **硬** | `services/crypto_service.py:3` | DES 加解密崩 |
+| `tkcalendar` | **硬** | `api_demo_window.py:1124` | 日期选择器崩 |
+| `openpyxl` | 可选 | 函数内导入 | Excel 导入导出不可用 |
+| `pystray` | 可选 | `main.py:2920` | 无系统托盘 |
+| `pygments` | 可选 | `study_demo_window.py:21` | 无语法高亮 |
+
+关于 `requirements.lock.txt`：没有用 `pip freeze`，而是**只锁本项目的 9 个直接依赖**。因为这个解释器是全局环境，`pip freeze` 会把一堆与本项目无关的包写进去，那是误导而不是复现能力。
+
+> ⚠️ **实测发现 `pygments` 当前并未安装**（`pip list` 无此项、`import pygments` 报 ModuleNotFoundError）。`study_demo_window.py:21` 的 try 保护让它静默降级——不报错，但没有语法高亮。已写进 `requirements.txt` 并标注，装上即可恢复。逐条 import 验证结果：8/9 可导入。
+
+### 3.7 未使用导入 / 死抽象层（约 45 处） — ✅ 已完成
+
+pyflakes 完整清单见 `scripts/pyflakes_baseline_2026-09-18.txt`（原始 72 条）。重点：
 
 | 文件 | 数量 | 值得单独说的 |
 |---|---|---|
@@ -561,25 +580,142 @@ pyflakes 实测（`tmp_debug/_pyflakes.txt` 有完整清单）。重点：
 | `qa_work_log_page.py` | 4 | 含 `qa_extras` 的 3 个函数 |
 | 其余 6 个文件 | 7 | `api_demo_window` / `crypto_window` / `login_checker_window` / `market_quote_window` 各 2 个（`sys`、`Path`） |
 
-**关于 `page_components` / `ui_components`**：这两个模块总计 160 行（88 + 72），`main.py` 一次性导入了其中 12 个函数却一个没用。要么是**抽了一半的抽象层**，要么是**已经废弃的中间产物**。建议二选一：
-- 若模块里还有其他地方在用 → 保留，但把 `main.py` 的无用导入删掉；
-- 若无人使用 → 整个删除，减少读者困惑（「这堆 create_xxx 到底谁在用？」）。
+**关于 `page_components` / `ui_components`**：这两个模块总计 160 行（88 + 72），`main.py` 一次性导入了其中 12 个函数却一个没用。
 
-顺带修掉 `main.py:89` 与 `main.py:92` 的 **`threading` 重复导入**（`redefinition of unused 'threading'`）。
-
-### 3.8 未使用的局部变量（7 处）
+**✅ 已定论：两个模块都是活的，不能删。** 它们被 4 个页面模块使用：
 
 ```
-main.py:1942            cursor        赋值后未使用
-tools_page.py:1954      current_cols  赋值后未使用
-tools_page.py:2692      row_cfg       赋值后未使用
-study_notes_window.py:1344  parent_cat 赋值后未使用
-study_notes_window.py:1570  dlg       赋值后未使用
-study_notes_window.py:1585  dlg       赋值后未使用
-study_demo_window.py:396    start     赋值后未使用
+process_page.py      from page_components import (...) / from ui_components import create_ttk_section_header
+credentials_page.py  同上
+backend_page.py      from ui_components import (...)
+expiry_page.py       from page_components import add_toolbar_buttons, create_content_frame, ...
+page_components.py   from ui_components import create_ttk_card
 ```
 
-`study_notes_window.py:1570/1585` 的 `dlg` 值得留意——对话框对象被赋值却不使用，可能原本要 `wait_window()` 或读 `dlg.result`，属于**疑似漏写逻辑**，建议逐个确认，不要直接删。
+所以采取的是「保留模块，删掉 `main.py` 的无用导入」这一支。这也说明它**不是**抽了一半的废弃抽象层，而是一套在用的页面骨架组件 —— 只是 `main.py` 顺手多导了 12 个。
+
+顺带修掉 `main.py:89` 与 `main.py:92` 的 **`threading` 重复导入**（`redefinition of unused 'threading'`）——去掉了第 89 行那个组合导入里的 `threading`，保留第 92 行（它带注释「系统托盘独立线程」，信息量更大）。
+
+#### ✅ 已完成（2026-09-18）
+
+**pyflakes 72 → 7 条**，清理 15 个文件、53 个导入名，**零新增**。消除的条目与预期完全对应，其余差异仅是行号位移。
+
+删之前逐项排除了「看似未使用实为必要」的情况，这几条如果直接照搬 pyflakes 就会出事：
+
+- `main.py:138` 的 `QAWorkLogDB` 确实没用，**但同一行导入的 `QAWorkLogDBExt` 在用**（第 3088 行）→ 只删前者。这种「一行里删一半」是机械删除最容易搞错的地方。
+- `ToolsPage` / `AdbPage` 在 `main.py` 里没用，但由 `system_toolbox_page.py` 直接从各自模块导入 → 删 `main.py` 的导入不影响功能（已用绑定检查验证 `system_toolbox_page.ToolsPage is tools_page.ToolsPage`）。
+- 全项目无 `from main import ...`、无 `__all__`、无 `globals()`/`eval` 动态取名 → 静态分析结论可信。
+
+另外修掉 4 处无占位符的 f-string（`tools_page` / `adb_page` / `study_demo_window` / `console_page`）。修前逐个确认字符串内不含 `{{`/`}}` 转义 —— 若有转义，去掉 `f` 前缀会改变输出，不能盲改。
+
+**做法上的一处改进**：没有手工改 15 个文件，而是写了 `scripts/prune_unused_imports.py` 按 pyflakes 结果做裁剪，**字节级保留行尾与 BOM**。原因是 `main.py` 是 CRLF+LF 混排，文本编辑会把 21 行的改动写成整文件重写（上一轮已经踩过一次）。这个脚本的语法安全校验当场拦下一个真 bug：单行分支没保留原缩进，会把 `try:` 块体挖空（`tools_page.py` 的 `try: from tkinterdnd2 import ...`）—— 修复后重跑才通过。
+
+验证：33 个正式 `.py` 语法 0 错误；`check_name_scope.py` 0 FAIL；`runtime_smoke.py` 18/18；`main.py` 行尾 CRLF 5012→4994 与净删 18 行完全吻合，无任何整文件改写。
+
+### 3.8 未使用的局部变量（7 处）— 已逐个人工定性，刻意保留
+
+这是清理未使用导入后 pyflakes 仅剩的 7 条。**没有删除**，因为逐条查过之后，它们的成因各不相同，其中一处本报告原先的判断是错的。
+
+| 位置 | 变量 | 定性 |
+|---|---|---|
+| `main.py:1930` | `cursor` | `conn.execute()` 的返回值本就无用，赋给变量是习惯写法。无害，删除价值低 |
+| `study_demo_window.py:396` | `start` | 重构残留：下一行 `idx = "1.0"` 才是真正在用的起点 |
+| `study_notes_window.py:1339` | `parent_cat` | 冗余：`pcat` 已持有同一对象，下一行用的是 `pcat.code` |
+| `study_notes_window.py:1565` `:1580` | `dlg` | 见下 |
+| `tools_page.py:1956` | `current_cols` | **未完成功能的痕迹**：右键菜单本应标出当前图标尺寸，取到了值却没用上 |
+| `tools_page.py:2694` | `row_cfg` | 重构后被 `fields` 循环内联取代的孤儿配置字典 |
+
+#### ⚠️ 更正：`study_notes_window.py` 的两处 `dlg` 不是漏写逻辑
+
+本报告初版写的是「可能原本要 `wait_window()` 或读 `dlg.result`，属于疑似漏写逻辑」。**实测查证后这个判断不成立**，两点：
+
+1. **`NoteEditorDialog` 保存后会自己刷新父窗口** —— `study_notes_window.py:1015` 有 `self.parent_window.refresh_notes()`。所以 `add_note` / `edit_note` 里创建完对话框就返回是**正确的**，不需要 `wait_window(dlg)` + 读结果。同文件另外三处（第 90、1354、1382 行）用了 `wait_window`，是因为那三个对话框是「取返回值再决定做什么」的模式，流程本就不同。
+2. **保留赋值是有意的** —— 不持有 Toplevel 的 Python 引用，在 Tkinter 里是经典的踩坑点。虽然 `BaseWidget._setup` 会把控件登记进父级的 `children`，实践中一般不回收，但保留一个显式引用是更稳妥的写法。
+
+唯一的小冗余是：`add_note`/`edit_note` 里紧跟的 `self.refresh_notes()` 会在对话框还开着时先刷一次（此时数据无变化，属空刷），保存后由对话框再刷一次。无害，但如果要动，应该删的是那行**多余的 refresh**，而不是 `dlg` 赋值。
+
+### 3.9 日志基建（`log_setup.py`）— ✅ 已完成
+
+原计划是「抽 `log_setup.py`，各模块统一改成 `logger = get_logger(__name__)`，24 个模块都接入」。**实际做下来发现那样是错的**，改成了更小也更有效的方案，理由如下。
+
+#### 先纠正一个前提：不是 24 个模块，是 2 个
+
+全项目实际使用日志的模块只有两个 —— `main.py`（8 处 `logger.exception`）和 `tools_page.py`（1 处）。其余 22 个模块从来没有一行日志调用。往这 22 个文件里各插一个 `logger = get_logger(__name__)` 只会造出 22 个空壳，是**新增死抽象层**，与 3.7 节刚清理的东西同类。
+
+#### 真正没做完的事：发布版一条日志都留不下来
+
+顺着「日志到底写到哪」查下去，发现了比「模块没接入」严重得多的问题：
+
+```
+ExpiryManager_fixed.spec:36   console=False
+```
+
+打包出来是**无控制台的窗口程序**，`sys.stderr` 没有可写目标。而原来的写法是：
+
+```python
+# main.py:104-108（改前）
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+_handler = logging.StreamHandler(sys.stderr)      # ← 发布版这里写向虚空
+_handler.setFormatter(...)
+logger.addHandler(_handler)
+```
+
+两个具体后果：
+
+1. **那 9 处 `logger.exception` 在正式 exe 里全部丢失** —— 而它们的用途正是事后排查。上一个重构「统一异常日志」的目标在最关键的环境里没有达成。
+2. **其余模块的日志也无处可去**。`logging.getLogger(__name__)` 是标准做法，但没配 root，消息只会落到 `logging.lastResort`（WARNING 级、无格式化、仅 stderr）—— 同样在发布版丢失。
+
+（附带一处：main 的 logger 设成了 DEBUG，但它只调用 `logger.exception`（ERROR 级），这个 DEBUG 从未起过作用。）
+
+#### 改法：配置 root，而不是逐模块接入
+
+```python
+# log_setup.py
+def setup_logging(log_dir=None, level=None, *, console=None, filename="app.log"):
+    """配置 root logger，重复调用幂等。"""
+```
+
+关键在「配 **root**」：只要入口调用一次，任意模块（包括将来新增的）用标准的 `logging.getLogger(__name__)` 就自动获得同一套 handler 和格式，**不需要任何模块改代码**。这才是「全项目接入」最省事也最不容易做错的方式。
+
+配套的四点：
+
+| 措施 | 为什么 |
+|---|---|
+| 加 `RotatingFileHandler` → `ExpiryManager_Data/logs/app.log`（1 MB × 4） | 发布版唯一可靠的落地点，日志能撑过多次运行 |
+| 控制台 handler **先探测再挂** | `console=False` 时 `sys.stderr` 是 `None`，照旧装 StreamHandler 会在每次 emit 抛 `AttributeError` 并被 logging 自己吞掉 —— 表面平静、实际无输出。这类静默失败最难查 |
+| 级别默认 INFO，支持 `EXPIRY_LOG_LEVEL` 环境变量覆盖 | 临时抓详细日志不用改代码；避免 DEBUG 淹没有效信息 |
+| 目录创建失败只降级不抛异常 | 只读介质/权限不足时，日志基建不该成为程序起不来的原因 |
+
+顺带把控制台流的编码错误策略设为 `replace`（`sys.stderr.reconfigure(errors="replace")`）—— 中文提示打到 cp936 控制台时，不会因为个别字符编码不了就丢掉整条日志。（项目里曾有一个专门修这个的临时脚本，说明这坑踩过。）
+
+入口接入（`main.py`，仅 3 行）：
+
+```python
+import log_setup
+...
+def main():
+    # 放在最前：应用构造阶段出的问题也要能落盘（发布版没有控制台可看）
+    log_setup.setup_logging(DATA_DIR / "logs")
+    mutex, already_exists = acquire_single_instance_mutex()
+```
+
+`main.py` 原有那 5 行自装 handler 的代码删除 —— **留着会导致重复输出**（自己的 handler + root 的 handler 各写一次）。`tools_page.py` **一行都不用改**，它的 `logging.getLogger(__name__)` 现在自动生效。
+
+#### 验证（`scripts/test_log_setup.py`，17/17）
+
+不是「能 import 就算过」，逐条都是真实写文件再读回：
+
+- 配 root 后，`tools_page` 模块自己的 logger 和任意新模块的 logger 都落进同一个文件（证明「无需逐模块装 handler」这个核心承诺）
+- 模拟 `sys.stderr = None`（打包版场景）：自动探测到无控制台、不挂 StreamHandler、日志仍落盘
+- 幂等：重复调用 handler 数量不变，同一条日志只写一次
+- **导入 `main` 不产生日志文件**（初始化只在入口 `main()` 里，import 无副作用）
+- 日志目录不可写时降级不抛异常
+- `RotatingFileHandler` 的尺寸/份数/utf-8 编码确实生效
+
+另做端到端验证：按 `main()` 里那一行真实调用，日志确实落到 `ExpiryManager_Data/logs/app.log`，`main.py` 自己的 logger 与探针 logger 都写入同一文件。
+
+`ExpiryManager_fixed.spec` 的 `hiddenimports` 已补上 `log_setup`，确保打包时一定带上（它会影响启动，值得显式列出而不是依赖自动分析）。
 
 ---
 
@@ -767,8 +903,8 @@ main.py        仅入口
 |---|---|---|
 | **第 1 步** | `git init` + `.gitignore` + 首次提交 | 后面所有改动都需要回退能力 | ✅ **已完成**（2.2） |
 | **第 2 步** | 修 4 个真 Bug（2.1）；删改源码脚本（2.3） | 影响功能正确性与数据安全，且改动小、风险低 | 🟡 脚本清理 **已完成**；4 个真 Bug **待修** |
-| **第 3 步** | 补 `requirements.txt`（3.6）+ 删未使用导入（3.7） | 半小时的事，立刻降低理解成本 |
-| **第 4 步** | 抽 `log_setup.py`，全项目接入（2.1 Bug 3 的根因） | 后续所有异常排查都靠它 |
+| **第 3 步** | 补 `requirements.txt`（3.6）+ 删未使用导入（3.7） | 半小时的事，立刻降低理解成本 | ✅ **已完成** |
+| **第 4 步** | 抽 `log_setup.py`，全项目接入（3.9） | 后续所有异常排查都靠它 | ✅ **已完成** |
 | **第 5 步** | `tools_db.py` 迁移逻辑表驱动（3.4）+ SQL 标识符白名单（3.5） | 改动集中在一个文件，收益明确 |
 | **第 6 步** | 拆 `main.py`（3.1），每搬一块验一次 | 最大的一刀，有了 git 和日志才敢动 |
 | **第 7 步** | `Database` Mixin 拆分（3.2）、主题接入（4.3）、抽公共窗口主题（4.2） | 结构收敛 |
@@ -838,4 +974,16 @@ ruff format . --exclude dist,build
 过程中 `git rm` 触发了一次误删事故（见 2.3），已用 `git checkout -- .` 完全恢复并逐项验证无损——
 这也再次印证了第 1 步的价值：**先有回退能力，才敢动刀。**
 
+**P1 已完成（第六节第 3、4 步）**：
+
+| 项 | 结果 |
+|---|---|
+| 3.6 依赖清单 | 4 → 9 个，按 [硬]/[可选] 标注；新增只锁直接依赖的 `requirements.lock.txt`；实测发现 `pygments` 未安装 |
+| 3.7 未使用导入 | pyflakes **72 → 7 条**，15 个文件 53 个名字，零新增；`main.py` 行尾零改写 |
+| 3.9 日志基建 | 新增 `log_setup.py`（配 root，不逐模块改），补上文件落盘 —— 原来 9 处 `logger.exception` 在 `console=False` 的发布版里**全部丢失** |
+
+三件事的共同点值得记一笔：**都发现了报告初版没看到的事实** —— `ui_components`/`page_components` 是在用的活模块（不是废弃抽象层）、`pygments` 实际未安装、`study_notes_window` 的 `dlg` 不是漏写逻辑、以及最关键的那条：日志基建的缺口不在「模块没接入」，而在「接入的出口在发布版不存在」。**报告是地图，不是实景，施工前必须实地核对。**
+
 **特别提醒**：2.1 的 4 个 Bug 全部是上一轮「异常处理具体化 + 统一日志」重构引入或遗留的 **回归**（`PIL`/`openpyxl` 引用写进了 except 子句、`logger` 只加在 `main.py`）。这也印证了第六节第 4 步的必要性 —— 没有测试和静态检查兜底，重构本身就在制造新问题。
+
+**下一步（第六节第 5 步）**：`tools_db.py` 迁移逻辑表驱动（3.4，5 份几乎一样的建表样板）+ SQL 标识符白名单（3.5，7 处拼接）。改动集中在一个文件、收益明确，是敢动 `main.py` 那 5,166 行之前最合适的一刀。

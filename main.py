@@ -98,14 +98,12 @@ import json         # 凭证截图序列化（JSON 数组格式）
 import shutil      # 文件复制：图片导入存储
 import os          # 启动外部程序：os.startfile
 import webbrowser  # 浏览器打开链接
-import logging       # 统一异常日志
+import logging       # 统一异常日志（配置见 log_setup.py，在 main() 中初始化）
 
-# 全局 logger
+# 全局 logger：级别与输出目标由 log_setup.setup_logging() 统一配置。
+# 这里不再自行装 handler —— 那样只有本模块的日志有出口，且发布版（spec 里
+# console=False，无控制台）会全部丢失，详见 log_setup.py 的模块说明。
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-_handler = logging.StreamHandler(sys.stderr)
-_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
-logger.addHandler(_handler)
 
 # -----------------------------------------------------------------------------
 # 02. 第三方库（需 pip install -r requirements.txt）
@@ -124,6 +122,9 @@ from PIL import Image, ImageTk, UnidentifiedImageError  # 图片预览与缩放
 # -----------------------------------------------------------------------------
 # 03. 项目内部模块导入
 # -----------------------------------------------------------------------------
+#  日志基建：其他模块的 logger 输出目标由它决定，需在入口处先初始化
+import log_setup
+
 #  后台工具集（内嵌 adminDemo 的 4 个核心功能）
 from embedded_admin_tools.api_demo_window import ApiDemoWindow
 from embedded_admin_tools.crypto_window import CryptoToolWindow
@@ -5146,6 +5147,8 @@ class ExpiryManagerApp(TkinterDnD.Tk):
 
 
 def main():
+    # 放在最前：应用构造阶段出的问题也要能落盘（发布版没有控制台可看）
+    log_setup.setup_logging(DATA_DIR / "logs")
     mutex, already_exists = acquire_single_instance_mutex()
     if already_exists:
         signal_existing_instance_show()
