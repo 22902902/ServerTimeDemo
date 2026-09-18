@@ -65,9 +65,10 @@ class CredentialsPage:
             state="readonly",
             width=14,
         ).pack(side="left", padx=4)
-        ttk.Entry(credentials_top, textvariable=self.app.credential_search_var, width=32).pack(side="right", padx=4)
-        ttk.Button(credentials_top, text="搜索", command=self.app.refresh_credentials_table).pack(side="right", padx=4)
-        ttk.Label(credentials_top, text="关键词").pack(side="right")
+        ttk.Button(credentials_top, text="搜索", command=self.app.refresh_credentials_table).pack(
+            side="right", padx=4
+        )
+        ttk.Entry(credentials_top, textvariable=self.app.credential_search_var, width=28).pack(side="right", padx=4)
         ttk.Button(filter_bar, text="应用筛选", command=self.app.refresh_credentials_table).pack(side="left", padx=(8, 0))
 
         self.app.credentials_summary_var = tk.StringVar(value="")
@@ -107,9 +108,14 @@ class CredentialsPage:
             "phone": ("手机号", 120),
             "note": ("备注", 220),
         }
+        short_labels = {"source_label", "group_label"}
         for column in credential_columns:
-            self.app.credentials_tree.heading(column, text=credential_meta[column][0])
-            self.app.credentials_tree.column(column, width=credential_meta[column][1], anchor="center")
+            self.app.credentials_tree.heading(column, text=credential_meta[column][0], anchor="w")
+            self.app.credentials_tree.column(
+                column,
+                width=credential_meta[column][1],
+                anchor="center" if column in short_labels else "w",
+            )
         self.app.credentials_tree.pack(side="left", fill="both", expand=True)
         self.app.credentials_tree.bind("<Double-1>", lambda event: self.app.edit_credential_item())
         self.app.credentials_tree.bind("<<TreeviewSelect>>", lambda event: self.app.refresh_credential_preview())

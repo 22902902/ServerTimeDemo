@@ -204,7 +204,7 @@ class SystemToolboxPage(ttk.Frame):
         h=ttk.Frame(self,padding=(8,6)); h.pack(fill="x")
         ttk.Label(h,text="系统工具箱",font=("",13,"bold")).pack(side="left")
         ttk.Label(h,text="  工具管理/批处理脚本/ADB调试/控制台",foreground="#6b7280").pack(side="left",padx=8)
-        nb=ttk.Notebook(self); nb.pack(fill="both",expand=True,padx=8,pady=(0,8))
+        nb=ttk.Notebook(self); nb.pack(fill="both",expand=True,padx=24,pady=(0,8))
         self.tools_page=ToolsPage(nb,self.db_adapter,project_root=self.root)
         nb.add(self.tools_page,text="工具包")
         self.cmd_page=CmdToolboxPage(nb,self.db_adapter,project_root=self.root)

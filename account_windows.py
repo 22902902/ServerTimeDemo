@@ -87,8 +87,12 @@ class AccountManagerDialog(tk.Toplevel):
             "note": ("备注", 180),
         }
         for column in columns:
-            self.tree.heading(column, text=meta[column][0])
-            self.tree.column(column, width=meta[column][1], anchor="center")
+            self.tree.heading(column, text=meta[column][0], anchor="w")
+            self.tree.column(
+                column,
+                width=meta[column][1],
+                anchor="center" if column == "id" else "w",
+            )
         self.tree.pack(fill="both", expand=True, pady=6)
         self.tree.bind("<Double-1>", lambda event: self.edit_account())
         self.tree.bind("<<TreeviewSelect>>", lambda event: self.refresh_account_preview())
@@ -403,9 +407,10 @@ class AccountLedgerDialog(tk.Toplevel):
             "note": ("备注", 220),
         }
         for column in columns:
-            self.tree.heading(column, text=meta[column][0])
-            self.tree.column(column, width=meta[column][1], anchor="center")
-        self.tree.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+            self.tree.heading(column, text=meta[column][0], anchor="w")
+            numeric = column in ("account_count", "asset_count")
+            self.tree.column(column, width=meta[column][1], anchor="e" if numeric else "w")
+        self.tree.pack(fill="both", expand=True, pady=(0, 12))
         self.tree.bind("<Double-1>", lambda event: self.open_group_manager())
 
     def refresh_groups(self):

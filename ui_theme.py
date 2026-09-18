@@ -97,7 +97,7 @@ MAIN_PALETTE = Palette(
     input_border="#e6e6e6",
     input_focus="#c4c4c4",
     badge_bg="#eeeeee",
-    link="#1c1c1c",
+    link="#4f6b85",
     success="#2e6b46",
     warn="#8a6a2f",
     danger="#a3372f",
@@ -131,7 +131,7 @@ TOOLBOX_PALETTE = Palette(
     input_border="#e6e6e6",
     input_focus="#c4c4c4",
     badge_bg="#f0f0f0",
-    link="#1c1c1c",
+    link="#4f6b85",
     success="#2e6b46",
     warn="#8a6a2f",
     danger="#a3372f",
@@ -159,7 +159,7 @@ ADMIN_TOOL_PALETTE = Palette(
     input_border="#e6e6e6",
     input_focus="#c4c4c4",
     badge_bg="#f0f0f0",
-    link="#1c1c1c",
+    link="#4f6b85",
     success="#2e6b46",
     warn="#8a6a2f",
     danger="#a3372f",
@@ -169,15 +169,15 @@ ADMIN_TOOL_PALETTE = Palette(
 )
 
 PACKAGE_ACCENT_COLORS = [
-    "#2563eb",
-    "#0ea5e9",
-    "#10b981",
-    "#f59e0b",
-    "#ef4444",
-    "#8b5cf6",
-    "#ec4899",
-    "#14b8a6",
-    "#6b7280",
+    "#5b7c99",
+    "#5f8a94",
+    "#6b8f74",
+    "#a8865c",
+    "#a06a62",
+    "#7d739a",
+    "#9c7089",
+    "#5e8a84",
+    "#7c7c7c",
 ]
 
 
@@ -199,61 +199,129 @@ class ThemeManager:
             "Card.TFrame",
             background=palette.surface,
             borderwidth=1,
-            relief="solid",
-            bordercolor=palette.border,
-            lightcolor=palette.border,
-            darkcolor=palette.border,
+            relief="flat",
+            bordercolor=palette.border_soft,
+            lightcolor=palette.border_soft,
+            darkcolor=palette.border_soft,
         )
         style.configure("TLabel", background=palette.bg, foreground=palette.text_primary, font=self.typography.body)
         style.configure("Muted.TLabel", background=palette.bg, foreground=palette.text_muted, font=self.typography.body)
         style.configure("Title.TLabel", background=palette.bg, foreground=palette.text_primary, font=self.typography.title)
         style.configure("SectionTitle.TLabel", background=palette.bg, foreground=palette.text_primary, font=self.typography.section)
-        style.configure("TLabelframe", background=palette.bg, foreground=palette.text_primary)
+        style.configure(
+            "TLabelframe",
+            background=palette.bg,
+            foreground=palette.text_primary,
+            borderwidth=1,
+            relief="flat",
+            bordercolor=palette.border_soft,
+            lightcolor=palette.border_soft,
+            darkcolor=palette.border_soft,
+        )
         style.configure("TLabelframe.Label", background=palette.bg, foreground=palette.text_primary, font=self.typography.section)
+        # 标签页：去掉 clam 默认的立体边框；选中靠「白底 + 深字」与灰底 tab 栏区分
+        style.configure(
+            "TNotebook",
+            background=palette.surface_alt,
+            borderwidth=0,
+            tabmargins=(12, 6, 12, 0),
+        )
+        style.configure(
+            "TNotebook.Tab",
+            background=palette.surface_alt,
+            foreground=palette.text_secondary,
+            padding=(14, 8),
+            font=self.typography.body,
+            borderwidth=0,
+            bordercolor=palette.surface_alt,
+            lightcolor=palette.surface_alt,
+            darkcolor=palette.surface_alt,
+            focuscolor=palette.surface_alt,
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", palette.bg), ("active", palette.notebook_hover)],
+            foreground=[("selected", palette.text_primary), ("active", palette.text_primary)],
+            bordercolor=[("selected", palette.bg)],
+            lightcolor=[("selected", palette.bg)],
+            darkcolor=[("selected", palette.bg)],
+        )
         style.configure(
             "Card.TLabelframe",
             background=palette.surface,
             borderwidth=1,
-            relief="solid",
-            bordercolor=palette.border,
-            lightcolor=palette.border,
-            darkcolor=palette.border,
+            relief="flat",
+            bordercolor=palette.border_soft,
+            lightcolor=palette.border_soft,
+            darkcolor=palette.border_soft,
         )
         style.configure("Card.TLabelframe.Label", background=palette.surface, foreground=palette.text_primary, font=self.typography.section)
         style.configure(
             "TButton",
-            background=palette.button_bg,
+            background=palette.surface_alt,
             foreground=palette.text_primary,
             font=self.typography.body,
-            borderwidth=1,
-            relief="solid",
-            padding=(10, 5),
+            borderwidth=0,
+            relief="flat",
+            focusthickness=0,
+            focuscolor=palette.surface_alt,
+            padding=(12, 6),
         )
         style.map(
             "TButton",
             background=[("active", palette.button_hover), ("pressed", palette.button_pressed)],
-            relief=[("pressed", "sunken")],
+            foreground=[("disabled", palette.text_muted)],
         )
-        style.configure("TEntry", fieldbackground=palette.surface, foreground=palette.text_primary, padding=4)
-        style.configure("TCombobox", fieldbackground=palette.surface, foreground=palette.text_primary, padding=4)
+        style.configure(
+            "TEntry",
+            fieldbackground=palette.input_bg,
+            foreground=palette.text_primary,
+            bordercolor=palette.input_border,
+            lightcolor=palette.input_border,
+            darkcolor=palette.input_border,
+            insertcolor=palette.text_primary,
+            borderwidth=1,
+            padding=(10, 6),
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=palette.input_bg,
+            background=palette.input_bg,
+            foreground=palette.text_primary,
+            bordercolor=palette.input_border,
+            lightcolor=palette.input_border,
+            darkcolor=palette.input_border,
+            borderwidth=1,
+            padding=(8, 5),
+            arrowsize=14,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", palette.input_bg)],
+            background=[("readonly", palette.input_bg)],
+            foreground=[("readonly", palette.text_primary)],
+            selectbackground=[("readonly", palette.input_bg)],
+            selectforeground=[("readonly", palette.text_primary)],
+            arrowcolor=[("readonly", palette.text_primary)],
+        )
         style.configure(
             "Treeview",
             background=palette.surface,
             fieldbackground=palette.surface,
             foreground=palette.text_primary,
             font=self.typography.body,
-            rowheight=26,
+            rowheight=28,
             borderwidth=0,
             relief="flat",
         )
         style.configure(
             "Treeview.Heading",
-            background=palette.surface,
+            background=palette.surface_alt,
             foreground=palette.text_muted,
             font=self.typography.badge,
             borderwidth=0,
             relief="flat",
-            padding=(6, 8),
+            padding=(8, 9),
         )
         style.map(
             "Treeview",
@@ -336,10 +404,10 @@ class ThemeManager:
                 "Card.TLabelframe",
                 background=palette.surface,
                 borderwidth=1,
-                relief="solid",
-                bordercolor=palette.border,
-                lightcolor=palette.border,
-                darkcolor=palette.border,
+                relief="flat",
+                bordercolor=palette.border_soft,
+                lightcolor=palette.border_soft,
+                darkcolor=palette.border_soft,
             )
             style.configure("Card.TLabelframe.Label", background=palette.surface, foreground=palette.text_primary, font=self.typography.section)
 
@@ -348,10 +416,10 @@ class ThemeManager:
                 "Card.TFrame",
                 background=palette.surface,
                 borderwidth=1,
-                relief="solid",
-                bordercolor=palette.border,
-                lightcolor=palette.border,
-                darkcolor=palette.border,
+                relief="flat",
+                bordercolor=palette.border_soft,
+                lightcolor=palette.border_soft,
+                darkcolor=palette.border_soft,
             )
 
         if include_card_inset:
@@ -359,10 +427,10 @@ class ThemeManager:
                 "CardInset.TFrame",
                 background=palette.surface,
                 borderwidth=1,
-                relief="solid",
-                bordercolor=palette.border,
-                lightcolor=palette.border,
-                darkcolor=palette.border,
+                relief="flat",
+                bordercolor=palette.border_soft,
+                lightcolor=palette.border_soft,
+                darkcolor=palette.border_soft,
             )
 
         style.configure(
@@ -431,18 +499,18 @@ class ThemeManager:
             fieldbackground=palette.surface,
             foreground=palette.text_primary,
             font=self.typography.body,
-            rowheight=26,
+            rowheight=28,
             borderwidth=0,
             relief="flat",
         )
         style.configure(
             "Treeview.Heading",
-            background=palette.surface,
+            background=palette.surface_alt,
             foreground=palette.text_muted,
             font=self.typography.badge,
             borderwidth=0,
             relief="flat",
-            padding=(6, 8),
+            padding=(8, 9),
         )
         style.map(
             "Treeview",

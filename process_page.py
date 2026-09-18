@@ -4,6 +4,7 @@
 from tkinter import scrolledtext, ttk
 
 from page_components import (
+    GUTTER,
     add_toolbar_buttons,
     create_content_frame,
     create_page_toolbar,
@@ -45,15 +46,14 @@ class ProcessPage:
             state="readonly",
             width=18,
         ).pack(side="left", padx=4)
-        ttk.Entry(process_top, textvariable=self.app.process_search_var, width=32).pack(side="right", padx=4)
         ttk.Button(process_top, text="搜索", command=self.app.refresh_process_flows).pack(side="right", padx=4)
-        ttk.Label(process_top, text="关键词").pack(side="right")
+        ttk.Entry(process_top, textvariable=self.app.process_search_var, width=28).pack(side="right", padx=4)
 
         _, process_left, process_right = create_two_pane_layout(
             self.app.process_page,
-            left_width=360,
-            right_pad=(10, 0),
-            padding=(10, 0, 10, 10),
+            left_width=430,
+            right_pad=(16, 0),
+            padding=(GUTTER, 0, GUTTER, 16),
         )
         create_ttk_section_header(process_left, "流程列表").pack(anchor="w", pady=(0, 6))
         self.app.process_flow_tree = ttk.Treeview(
@@ -64,14 +64,18 @@ class ProcessPage:
             selectmode="browse",
         )
         process_flow_meta = {
-            "title": ("流程名称", 150),
-            "category": ("分类", 90),
-            "platform": ("平台", 90),
-            "updated_at": ("更新时间", 130),
+            "title": ("流程名称", 130),
+            "category": ("分类", 80),
+            "platform": ("平台", 80),
+            "updated_at": ("更新时间", 120),
         }
         for column, meta in process_flow_meta.items():
-            self.app.process_flow_tree.heading(column, text=meta[0])
-            self.app.process_flow_tree.column(column, width=meta[1], anchor="center")
+            self.app.process_flow_tree.heading(column, text=meta[0], anchor="w")
+            self.app.process_flow_tree.column(
+                column,
+                width=meta[1],
+                anchor="center" if column == "updated_at" else "w",
+            )
         self.app.process_flow_tree.pack(side="left", fill="both", expand=True)
         self.app.process_flow_tree.bind("<<TreeviewSelect>>", lambda event: self.app.refresh_process_steps())
         self.app.process_flow_tree.bind("<Double-1>", lambda event: self.app.edit_process_flow())
@@ -82,7 +86,7 @@ class ProcessPage:
 
         create_summary_card(process_right, "流程概览", self.app.process_flow_summary_var, wraplength=860, padding=(16, 12))
 
-        step_toolbar = ttk.Frame(process_right, padding=(0, 10, 0, 6))
+        step_toolbar = ttk.Frame(process_right, padding=(0, 12, 0, 8))
         step_toolbar.pack(fill="x")
         add_toolbar_buttons(
             step_toolbar,
@@ -104,13 +108,17 @@ class ProcessPage:
             selectmode="browse",
         )
         process_step_meta = {
-            "step_no": ("步骤", 70),
-            "title": ("步骤标题", 260),
-            "link_url": ("步骤链接", 360),
+            "step_no": ("步骤", 60),
+            "title": ("步骤标题", 220),
+            "link_url": ("步骤链接", 330),
         }
         for column, meta in process_step_meta.items():
-            self.app.process_step_tree.heading(column, text=meta[0])
-            self.app.process_step_tree.column(column, width=meta[1], anchor="center")
+            self.app.process_step_tree.heading(column, text=meta[0], anchor="w")
+            self.app.process_step_tree.column(
+                column,
+                width=meta[1],
+                anchor="center" if column == "step_no" else "w",
+            )
         self.app.process_step_tree.pack(fill="x")
         self.app.process_step_tree.bind("<<TreeviewSelect>>", lambda event: self.app.refresh_process_step_detail())
         self.app.process_step_tree.bind("<Double-1>", lambda event: self.app.edit_process_step())

@@ -36,7 +36,9 @@ def add_toolbar_buttons(toolbar, items, *, side="left", padx=4, style="Quiet.TBu
     for item in items:
         text, command = item[0], item[1]
         item_style = item[2] if len(item) > 2 else style
-        button = ttk.Button(toolbar, text=text, command=command, style=item_style)
+        # width=0 让按钮按文字自适应：ttk 默认宽度非 0，会把所有按钮撑成同宽，
+        # 在窄栏里挤掉末尾按钮
+        button = ttk.Button(toolbar, text=text, command=command, style=item_style, width=0)
         button.pack(side=side, padx=padx)
         buttons.append(button)
     return buttons

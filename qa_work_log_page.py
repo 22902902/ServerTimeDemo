@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from datetime import datetime, timedelta
 
+from page_components import GUTTER
 from qa_work_log_db import QAWorkLogDB, QAWorkLogDBExt, QAItem, PracticeLog
 from qa_extras import (
     GlobalSearchBarMixin, WorkNotePanel, ReviewPanel,
@@ -34,7 +35,7 @@ class QAWorkLogPage(ttk.Frame, GlobalSearchBarMixin, PracticeImageMixin):
         self.build_global_search_bar(self)
 
         self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.notebook.pack(fill="both", expand=True, padx=GUTTER, pady=(0, 8))
 
         # === Q&A 标签页 ===
         self.qa_frame = ttk.Frame(self.notebook)
@@ -95,7 +96,7 @@ class QAWorkLogPage(ttk.Frame, GlobalSearchBarMixin, PracticeImageMixin):
 
         # 列表
         list_frame = ttk.Frame(self.qa_frame)
-        list_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        list_frame.pack(fill="both", expand=True, pady=(0, 8))
 
         cols = ("scope", "category", "ref_name", "question", "created_at")
         self.qa_tree = ttk.Treeview(list_frame, columns=cols, show="headings", height=12)
@@ -117,7 +118,7 @@ class QAWorkLogPage(ttk.Frame, GlobalSearchBarMixin, PracticeImageMixin):
 
         # 详情预览
         detail_frame = ttk.LabelFrame(self.qa_frame, text="答案详情", padding=8)
-        detail_frame.pack(fill="x", padx=8, pady=(0, 8))
+        detail_frame.pack(fill="x", pady=(0, 8))
         self.qa_detail_text = scrolledtext.ScrolledText(detail_frame, wrap="word", height=6, state="disabled")
         self.qa_detail_text.pack(fill="both", expand=True)
 
@@ -202,7 +203,7 @@ class QAWorkLogPage(ttk.Frame, GlobalSearchBarMixin, PracticeImageMixin):
 
         # 周一到周五输入区
         days_frame = ttk.Frame(self.weekly_frame)
-        days_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        days_frame.pack(fill="both", expand=True, pady=(0, 8))
 
         self.weekly_texts = {}
         day_names = ["周一", "周二", "周三", "周四", "周五"]
@@ -216,7 +217,7 @@ class QAWorkLogPage(ttk.Frame, GlobalSearchBarMixin, PracticeImageMixin):
 
         # 保存按钮
         btn_frame = ttk.Frame(self.weekly_frame)
-        btn_frame.pack(fill="x", padx=8, pady=(0, 8))
+        btn_frame.pack(fill="x", pady=(0, 8))
         ttk.Button(btn_frame, text="保存本周纪要", command=self.save_weekly).pack(side="right")
 
     def refresh_weekly(self):
@@ -277,7 +278,7 @@ class QAWorkLogPage(ttk.Frame, GlobalSearchBarMixin, PracticeImageMixin):
 
         # 列表
         list_frame = ttk.Frame(self.practice_frame)
-        list_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        list_frame.pack(fill="both", expand=True, pady=(0, 8))
 
         cols = ("date", "category", "title", "tags")
         self.practice_tree = ttk.Treeview(list_frame, columns=cols, show="headings", height=10)
@@ -297,7 +298,7 @@ class QAWorkLogPage(ttk.Frame, GlobalSearchBarMixin, PracticeImageMixin):
 
         # 详情
         detail_frame = ttk.LabelFrame(self.practice_frame, text="练习详情", padding=8)
-        detail_frame.pack(fill="x", padx=8, pady=(0, 8))
+        detail_frame.pack(fill="x", pady=(0, 8))
         self.practice_detail_text = scrolledtext.ScrolledText(detail_frame, wrap="word", height=8, state="disabled")
         self.practice_detail_text.pack(fill="both", expand=True)
 
@@ -306,14 +307,14 @@ class QAWorkLogPage(ttk.Frame, GlobalSearchBarMixin, PracticeImageMixin):
             self.practice_frame,
             get_practice_id=lambda: self._current_practice_id
         )
-        self.practice_image_panel.pack(fill="x", padx=8, pady=(0, 8))
+        self.practice_image_panel.pack(fill="x", pady=(0, 8))
 
         self.practice_tree.bind("<<TreeviewSelect>>", self.on_practice_select)
         self.practice_tree.bind("<Double-1>", lambda e: self.edit_practice())
 
         # 快速模板按钮
         template_frame = ttk.LabelFrame(self.practice_frame, text="快速模板", padding=8)
-        template_frame.pack(fill="x", padx=8, pady=(0, 8))
+        template_frame.pack(fill="x", pady=(0, 8))
         ttk.Button(template_frame, text="记忆宫殿", command=lambda: self.quick_practice("记忆宫殿")).pack(side="left", padx=2)
         ttk.Button(template_frame, text="Git", command=lambda: self.quick_practice("Git")).pack(side="left", padx=2)
         ttk.Button(template_frame, text="Linux", command=lambda: self.quick_practice("Linux")).pack(side="left", padx=2)

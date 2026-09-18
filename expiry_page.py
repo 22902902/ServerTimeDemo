@@ -9,6 +9,17 @@ from ui_theme import MAIN_PALETTE
 
 COLOR_BADGE_BG = MAIN_PALETTE.badge_bg
 
+# 列对齐：文本左对齐，定长的编号/日期/操作居中，纯数字右对齐。
+# 整表居中会让长文本（资源详情、链接）参差不齐，是表格可读性的大忌。
+COLUMN_ALIGN = {
+    "id": "center",
+    "record_no": "center",
+    "expiry_date": "center",
+    "days_left": "e",
+    "detail_action": "center",
+    "accounts_action": "center",
+}
+
 
 class ExpiryPage:
     def __init__(self, app, container, *, tree_columns, column_meta):
@@ -36,21 +47,28 @@ class ExpiryPage:
             ],
         )
 
-        ttk.Entry(top, textvariable=self.app.search_var, width=32).pack(side="right", padx=4)
+        # 工具栏按钮已占满一行，再放「关键词」标签只会被压成 0 宽（实测不可见），
+        # 而「搜索」按钮本身已表明输入框用途，故省略标签。
+        # 注意 pack(side="right") 为逆序堆积：先写的靠最右，所以先写按钮、再写输入框。
         ttk.Button(top, text="搜索", command=self.app.refresh_table).pack(side="right", padx=4)
-        ttk.Label(top, text="关键词").pack(side="right")
+        ttk.Entry(top, textvariable=self.app.search_var, width=28).pack(side="right", padx=4)
 
         table_frame = create_content_frame(self.app.expiry_page, padding=(24, 0, 24, 0))
 
         self.app.tree = ttk.Treeview(table_frame, columns=self.tree_columns, show="headings", height=22)
         for column in self.tree_columns:
-            self.app.tree.heading(column, text=self.column_meta[column]["title"])
-            self.app.tree.column(column, width=self.column_meta[column]["width"], anchor="center")
+            self.app.tree.heading(column, text=self.column_meta[column]["title"], anchor="w")
+            self.app.tree.column(
+                column,
+                width=self.column_meta[column]["width"],
+                anchor=COLUMN_ALIGN.get(column, "w"),
+            )
         self.app.tree.bind("<ButtonRelease-1>", self.app.on_tree_click)
 
-        self.app.tree.tag_configure("overdue", background="#ffe6e6")
-        self.app.tree.tag_configure("due_15", background="#fff2cc")
-        self.app.tree.tag_configure("due_30", background=COLOR_BADGE_BG)
+        # 状态底色一律降饱和：保留「一眼看出紧急」的功能，去掉刺眼的粉/黄块
+        self.app.tree.tag_configure("overdue", background="#fbeeec")
+        self.app.tree.tag_configure("due_15", background="#fdf6e3")
+        self.app.tree.tag_configure("due_30", background="#f6f6f6")
 
         y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.app.tree.yview)
         x_scroll = ttk.Scrollbar(self.app.expiry_page, orient="horizontal", command=self.app.tree.xview)

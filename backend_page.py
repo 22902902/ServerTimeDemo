@@ -4,6 +4,7 @@
 import tkinter as tk
 from tkinter import ttk
 
+from page_components import GUTTER
 from ui_components import (
     create_flat_action_button,
     create_info_label,
@@ -30,7 +31,7 @@ class BackendPage:
     def build(self):
         self.app.backend_page = tk.Frame(self.container, bg=COLOR_BG)
 
-        backend_top = tk.Frame(self.app.backend_page, bg=COLOR_BG, padx=10, pady=10)
+        backend_top = tk.Frame(self.app.backend_page, bg=COLOR_BG, padx=GUTTER, pady=10)
         backend_top.pack(fill="x")
         for button_text, button_command in [
             ("刷新概览", self.app.refresh_backend_tools_page),
@@ -50,7 +51,7 @@ class BackendPage:
             textvariable=self.app.backend_summary_var,
             tone="muted",
             wraplength=920,
-        ).pack(anchor="w", padx=14, pady=(0, 10))
+        ).pack(anchor="w", padx=GUTTER, pady=(0, 8))
 
         self.app.backend_status_var = tk.StringVar(
             value="当前已内嵌 4 个功能模块    正在打开 0 个窗口    默认环境：测试环境    功能来源：当前项目 embedded_admin_tools"
@@ -59,9 +60,9 @@ class BackendPage:
             self.app.backend_page,
             textvariable=self.app.backend_status_var,
             tone="muted",
-        ).pack(anchor="w", padx=14, pady=(0, 6))
+        ).pack(anchor="w", padx=GUTTER, pady=(0, 8))
 
-        backend_strip = tk.Frame(self.app.backend_page, bg=COLOR_BG, padx=10, pady=8)
+        backend_strip = tk.Frame(self.app.backend_page, bg=COLOR_BG, padx=GUTTER, pady=4)
         backend_strip.pack(fill="x")
         for strip_index in range(3):
             backend_strip.columnconfigure(strip_index, weight=1)
@@ -78,7 +79,7 @@ class BackendPage:
             strip_card.grid(row=0, column=index, sticky="nsew", padx=4)
             create_info_label(strip_card, textvariable=value_var, tone="primary", wraplength=280).pack(anchor="w")
 
-        backend_metrics = tk.Frame(self.app.backend_page, bg=COLOR_BG, padx=10, pady=8)
+        backend_metrics = tk.Frame(self.app.backend_page, bg=COLOR_BG, padx=GUTTER, pady=4)
         backend_metrics.pack(fill="x")
         for metric_index in range(4):
             backend_metrics.columnconfigure(metric_index, weight=1)
@@ -97,7 +98,7 @@ class BackendPage:
             card.grid(row=0, column=index, sticky="nsew", padx=4)
 
         backend_overview = create_section_frame(self.app.backend_page, "联调概览")
-        backend_overview.pack(fill="x", padx=10, pady=(0, 8))
+        backend_overview.pack(fill="x", padx=GUTTER, pady=(0, 12))
         self.app.backend_login_memory_var = tk.StringVar(value="")
         self.app.backend_memory_tip_var = tk.StringVar(value="")
         self.app.backend_verified_var = tk.StringVar(
@@ -132,7 +133,7 @@ class BackendPage:
         ).pack(anchor="w", pady=6)
 
         backend_recent = create_section_frame(self.app.backend_page, "最近记录")
-        backend_recent.pack(fill="x", padx=10, pady=(0, 8))
+        backend_recent.pack(fill="x", padx=GUTTER, pady=(0, 12))
         self.app.backend_recent_account_var = tk.StringVar(value="最近登录账号：无    会员类型：-    环境：-    最近写入：-")
         self.app.backend_recent_feature_var = tk.StringVar(value="最近打开功能：无    最近打开时间：-")
         self.app.backend_recent_action_var = tk.StringVar(value="最近联调动作：无    动作时间：-")
@@ -156,7 +157,7 @@ class BackendPage:
         ).pack(anchor="w", pady=6)
 
         backend_quick = create_section_frame(self.app.backend_page, "常用入口")
-        backend_quick.pack(fill="x", padx=10, pady=(0, 8))
+        backend_quick.pack(fill="x", padx=GUTTER, pady=(0, 12))
         quick_grid = tk.Frame(backend_quick, bg=COLOR_BG)
         quick_grid.pack(fill="x")
         for quick_index in range(3):
@@ -176,11 +177,13 @@ class BackendPage:
                 command=lambda target_key=feature_key: self.app.open_backend_feature(target_key),
             ).pack(anchor="w", pady=(10, 0))
 
-        backend_cards = tk.Frame(self.app.backend_page, bg=COLOR_BG, padx=10, pady=10)
+        backend_cards = tk.Frame(self.app.backend_page, bg=COLOR_BG, padx=GUTTER, pady=0)
         backend_cards.pack(fill="both", expand=True)
         self.app.backend_tool_rows = {}
         for tool in self.backend_feature_items:
-            card = ttk.LabelFrame(backend_cards, text=tool["title"], padding=(12, 10))
+            card = ttk.LabelFrame(
+                backend_cards, text=tool["title"], padding=(16, 14), style="Card.TLabelframe"
+            )
             card.pack(fill="x", pady=6)
             summary_var = tk.StringVar(value=tool["summary"])
             ttk.Label(card, textvariable=summary_var, foreground=COLOR_TEXT, wraplength=880, justify="left").grid(

@@ -14,25 +14,20 @@ from ui_theme import MAIN_PALETTE, TYPOGRAPHY
 
 
 def create_flat_action_button(parent, text: str, command, *, side: str | None = None, padx: int = 4):
-    """★ 统一风格：与账号中心/后台接口测试的工具栏按钮保持一致（ttk.Button）。"""
-    button = ttk.Button(parent, text=text, command=command)
+    """★ 统一风格：与工具栏按钮保持一致（Quiet 样式，浅底无边框）。"""
+    button = ttk.Button(parent, text=text, command=command, style="Quiet.TButton", width=0)
     if side:
         button.pack(side=side, padx=padx)
     return button
 
 
-def create_section_frame(parent, title: str):
-    frame = tk.LabelFrame(
-        parent,
-        text=title,
-        bg=MAIN_PALETTE.bg,
-        fg=MAIN_PALETTE.text_primary,
-        padx=14,
-        pady=12,
-        bd=1,
-        relief="solid",
-    )
-    return frame
+def create_section_frame(parent, title: str, *, padding=(16, 14)):
+    """★ 统一卡片：走 Card.TLabelframe 样式，与 create_ttk_card 同一套外观。
+
+    原实现用 tk.LabelFrame(bd=1, relief="solid")，边框颜色由 Tk 系统默认值决定，
+    palette 管不到 —— 在 Windows 下渲染成深灰/黑边，这正是页面「硬」的主因。
+    """
+    return ttk.LabelFrame(parent, text=title, padding=padding, style="Card.TLabelframe")
 
 
 def create_info_label(
