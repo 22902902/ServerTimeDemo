@@ -25,7 +25,7 @@ class ExpiryPage:
             top,
             [
                 ("导入 Excel", self.app.import_excel),
-                ("新增记录", self.app.add_asset),
+                ("新增记录", self.app.add_asset, "Primary.TButton"),
                 ("编辑记录", self.app.edit_asset),
                 ("删除记录", self.app.delete_asset),
                 ("账户管理", self.app.open_selected_account_manager),
@@ -40,7 +40,7 @@ class ExpiryPage:
         ttk.Button(top, text="搜索", command=self.app.refresh_table).pack(side="right", padx=4)
         ttk.Label(top, text="关键词").pack(side="right")
 
-        table_frame = create_content_frame(self.app.expiry_page, padding=(10, 0, 10, 0))
+        table_frame = create_content_frame(self.app.expiry_page, padding=(24, 0, 24, 0))
 
         self.app.tree = ttk.Treeview(table_frame, columns=self.tree_columns, show="headings", height=22)
         for column in self.tree_columns:
@@ -58,7 +58,7 @@ class ExpiryPage:
 
         self.app.tree.pack(side="left", fill="both", expand=True)
         y_scroll.pack(side="right", fill="y")
-        x_scroll.pack(fill="x", padx=10)
+        x_scroll.pack(fill="x", padx=24)
         self.app.apply_visible_columns()
 
-        create_status_bar(self.app.expiry_page, self.app.status_var, padding=10)
+        create_status_bar(self.app.expiry_page, self.app.status_var, padding=(24, 12))

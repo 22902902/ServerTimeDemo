@@ -80,7 +80,7 @@ class ProcessPage:
         process_flow_scroll.pack(side="right", fill="y")
         self.app.process_flow_row_meta = {}
 
-        create_summary_card(process_right, "流程概览", self.app.process_flow_summary_var, wraplength=860, padding=(10, 10))
+        create_summary_card(process_right, "流程概览", self.app.process_flow_summary_var, wraplength=860, padding=(16, 12))
 
         step_toolbar = ttk.Frame(process_right, padding=(0, 10, 0, 6))
         step_toolbar.pack(fill="x")
@@ -116,10 +116,10 @@ class ProcessPage:
         self.app.process_step_tree.bind("<Double-1>", lambda event: self.app.edit_process_step())
         self.app.process_step_row_meta = {}
 
-        process_detail_frame = create_content_frame(process_right, padding=(0, 10, 0, 0))
+        process_detail_frame = create_content_frame(process_right, padding=(0, 12, 0, 0))
         process_text_frame = ttk.Frame(process_detail_frame)
         process_text_frame.pack(side="left", fill="both", expand=True)
-        process_preview_frame = create_preview_sidebar(process_detail_frame, "步骤截图", width=300, padding=(10, 10))
+        process_preview_frame = create_preview_sidebar(process_detail_frame, "步骤截图", width=300, padding=(16, 12))
 
         ttk.Label(process_text_frame, textvariable=self.app.process_step_title_var, style="SectionTitle.TLabel").pack(anchor="w")
         self.app.process_step_detail_text = scrolledtext.ScrolledText(
@@ -138,4 +138,4 @@ class ProcessPage:
         self.app.process_step_preview.build(process_preview_frame, title="步骤截图").pack(fill="x", pady=(0, 6))
         ttk.Button(process_preview_frame, text="查看大图", command=self.app.open_process_step_image).pack(fill="x")
 
-        create_status_bar(self.app.process_page, self.app.process_status_var, padding=(10, 0, 10, 10))
+        create_status_bar(self.app.process_page, self.app.process_status_var, padding=(24, 0, 24, 16))

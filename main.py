@@ -29,19 +29,22 @@ expiry_manager.db                ← SQLite 主数据库（所有数据）
 🎯 功能模块（导航树）
 ------------------------------------------------------------------------------
   工作
-  ├── 当前所有云服务到期时间  → 到期管理（Excel 导入 / 详情 / 账户 / 提醒）
+  ├── 到期管理              → 服务器/云服务到期（Excel 导入 / 详情 / 账户 / 提醒）
   ├── 账号中心              → 凭证管理（导入导出 / 截图 / 分组筛选）
   ├── 流程中心              → 流程记录（多步骤 / 链接 / 截图 / 必填选填）
-  ├── 接口测试 → 后台接口测试 → 4 个内嵌功能窗口
-  ├── Q&A与工作纪要         → Q&A + 每周纪要 + 练习记录
+  ├── 接口测试 / 文拍        → 后台接口测试（4 个内嵌功能窗口）
+  ├── Q&A 与工作纪要        → Q&A + 每周纪要 + 练习记录
   └── 系统工具箱           → 管理员 CMD / PowerShell / 批处理脚本
   生活
-  └── 笔记                  → 百度网盘 + Markdown + 标签 + 截图粘贴
+  ├── 笔记                  → 百度网盘 + Markdown + 标签 + 截图粘贴
+  └── Python 学习           → 视频课程代码学习
+
+  导航结构唯一数据源为 nav_sidebar.NAV_MODEL（改导航只需改那里）。
 
 🏗️ 核心架构：单窗口 + 多 Frame 切换
 ------------------------------------------------------------------------------
   主窗口（ExpiryManagerApp）使用【页面容器 + pack_forget/pack】模式：
-  1. 左侧：ttk.Treeview 导航树，按工作/生活分组
+  1. 左侧：SidebarNav 自绘分组侧栏（工作 / 生活），见 nav_sidebar.py
   2. 右侧：page_container，承载各模块 Frame
   3. 切换：switch_module() 统一管理页面切换
   4. 页面类型：
@@ -125,6 +128,9 @@ from PIL import Image, ImageTk, UnidentifiedImageError  # 图片预览与缩放
 #  日志基建：其他模块的 logger 输出目标由它决定，需在入口处先初始化
 import log_setup
 
+#  左侧分组导航（自绘侧栏，替代原生 Treeview）
+from nav_sidebar import SidebarNav
+
 #  后台工具集（内嵌 adminDemo 的 4 个核心功能）
 from embedded_admin_tools.api_demo_window import ApiDemoWindow
 from embedded_admin_tools.crypto_window import CryptoToolWindow
@@ -147,7 +153,6 @@ from expiry_dialogs import AssetDialog, DetailDialog, SettingsDialog
 from expiry_page import ExpiryPage
 from credentials_page import CredentialsPage
 from process_page import ProcessPage
-from ui_components import create_flat_action_button
 from ui_theme import MAIN_PALETTE, THEME, TYPOGRAPHY
 from dialog_form_style import apply_dialog_form_style, create_form_entry, create_form_frame, create_form_label
 
@@ -167,6 +172,8 @@ APP_MUTEX_NAME = "ServerTimeDemoPersonalSystemSingletonMutex"
 FONT_TITLE = TYPOGRAPHY.title
 FONT_SUBTITLE = TYPOGRAPHY.subtitle
 FONT_SECTION = TYPOGRAPHY.section
+FONT_PAGE_TITLE = TYPOGRAPHY.page_title
+FONT_CAPTION = TYPOGRAPHY.caption
 FONT_BASE = TYPOGRAPHY.body
 FONT_METRIC = TYPOGRAPHY.metric
 FONT_BADGE = TYPOGRAPHY.badge
@@ -3189,17 +3196,64 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         # 08 到期管理表格
         self._build_expiry_page()
     def _build_topbar(self):
-        """构建 topbar。"""
-        shell_top = ttk.Frame(self, padding=(12, 10, 12, 8))
+        """构建顶栏：左侧应用名 + 面包屑，右侧纯文字动作，底边一条发丝线。"""
+        palette = MAIN_PALETTE
+        shell_top = ttk.Frame(self, style="App.TFrame")
         shell_top.pack(fill="x")
-        ttk.Label(shell_top, text=APP_TITLE, font=FONT_TITLE).pack(side="left")
-        ttk.Label(shell_top, textvariable=self.module_path_var, foreground=COLOR_MUTED).pack(side="left", padx=16)
-        create_flat_action_button(shell_top, "修改密码", self.change_password, side="right")
-        create_flat_action_button(shell_top, "备份", self._backup_data, side="right")
-        create_flat_action_button(shell_top, "恢复备份", self._restore_backup, side="right")
 
-        create_flat_action_button(shell_top, "初始化密码", self.reset_password_from_app, side="right")
-        ttk.Label(shell_top, textvariable=self.current_user_var).pack(side="right", padx=12)
+        inner = tk.Frame(shell_top, bg=palette.surface)
+        inner.pack(fill="x", padx=18, pady=12)
+
+        tk.Label(
+            inner,
+            text=APP_TITLE,
+            bg=palette.surface,
+            fg=palette.text_primary,
+            font=FONT_TITLE,
+        ).pack(side="left")
+        tk.Label(
+            inner,
+            textvariable=self.module_path_var,
+            bg=palette.surface,
+            fg=palette.text_muted,
+            font=FONT_CAPTION,
+        ).pack(side="left", padx=12)
+        tk.Label(
+            inner,
+            textvariable=self.current_user_var,
+            bg=palette.surface,
+            fg=palette.text_muted,
+            font=FONT_CAPTION,
+        ).pack(side="right", padx=(12, 0))
+
+        for text, command in (
+            ("修改密码", self.change_password),
+            ("备份", self._backup_data),
+            ("恢复备份", self._restore_backup),
+            ("初始化密码", self.reset_password_from_app),
+        ):
+            self._make_topbar_action(inner, text, command)
+
+        tk.Frame(shell_top, bg=palette.border, height=1).pack(fill="x")
+
+    def _make_topbar_action(self, parent, text: str, command):
+        """顶栏动作做成纯文字：无边框，悬停才浮现浅底。"""
+        palette = MAIN_PALETTE
+        label = tk.Label(
+            parent,
+            text=text,
+            bg=palette.surface,
+            fg=palette.text_secondary,
+            font=FONT_BASE,
+            cursor="hand2",
+            padx=10,
+            pady=4,
+        )
+        label.pack(side="right")
+        label.bind("<Enter>", lambda _e: label.configure(bg=palette.button_hover, fg=palette.text_primary))
+        label.bind("<Leave>", lambda _e: label.configure(bg=palette.surface, fg=palette.text_secondary))
+        label.bind("<Button-1>", lambda _e: command())
+        return label
 
     def _backup_data(self):
         try:
@@ -3300,28 +3354,24 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         except Exception as ex:
             messagebox.showerror("恢复失败", "解压失败: " + str(ex), parent=self)
     def _build_navigation(self):
-        """构建 navigation。"""
-        self.body = ttk.Frame(self, padding=(10, 0, 10, 10))
+        """构建左侧分组导航（自绘侧栏，样式与结构见 nav_sidebar.py）。"""
+        palette = MAIN_PALETTE
+        self.body = tk.Frame(self, bg=palette.bg)
         self.body.pack(fill="both", expand=True)
 
-        self.init_nav_icons()
-        nav_frame = ttk.Frame(self.body, width=320, padding=(0, 0, 8, 0))
-        nav_frame.pack(side="left", fill="y")
-        ttk.Label(nav_frame, text="分组导航", font=FONT_SECTION).pack(anchor="w", pady=(0, 6))
-        self.nav_tree = ttk.Treeview(nav_frame, show="tree", selectmode="browse", height=30)
-        self.nav_tree.pack(fill="both", expand=True)
-        self.nav_tree.bind("<<TreeviewSelect>>", self.on_nav_select)
-        self.build_navigation_tree()
+        # 侧栏与内容区靠背景色差分栏，不画竖线
+        self.nav = SidebarNav(self.body, on_select=self.on_nav_select, width=212)
+        self.nav.pack(side="left", fill="y")
 
     def _build_right_panel(self):
         """构建 right panel。"""
         self.right = ttk.Frame(self.body)
         self.right.pack(side="left", fill="both", expand=True)
 
-        header = ttk.Frame(self.right, padding=(6, 0, 6, 8))
+        header = ttk.Frame(self.right, padding=(24, 22, 24, 14))
         header.pack(fill="x")
-        ttk.Label(header, textvariable=self.module_title_var, font=FONT_SUBTITLE).pack(anchor="w")
-        ttk.Label(header, textvariable=self.module_desc_var, foreground=COLOR_MUTED).pack(anchor="w", pady=(2, 0))
+        ttk.Label(header, textvariable=self.module_title_var, font=FONT_PAGE_TITLE).pack(anchor="w")
+        ttk.Label(header, textvariable=self.module_desc_var, foreground=COLOR_MUTED).pack(anchor="w", pady=(6, 0))
 
         self.page_container = ttk.Frame(self.right)
         self.page_container.pack(fill="both", expand=True)
@@ -3350,7 +3400,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         placeholder_box.pack(fill="both", expand=True)
         self.placeholder_title_var = tk.StringVar(value="功能规划中")
         self.placeholder_desc_var = tk.StringVar(value="请选择左侧模块。")
-        ttk.Label(placeholder_box, textvariable=self.placeholder_title_var, font=FONT_TITLE).pack(
+        ttk.Label(placeholder_box, textvariable=self.placeholder_title_var, font=FONT_PAGE_TITLE).pack(
             anchor="w"
         )
         ttk.Label(placeholder_box, textvariable=self.placeholder_desc_var, wraplength=760, foreground=COLOR_MUTED_2).pack(
@@ -3400,27 +3450,6 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             column_meta=COLUMN_META,
         ).build()
 
-    def init_nav_icons(self):
-        # 在高 DPI 环境下（Tk 自动 2x 缩放），把图标按 2x 像素预先生成，
-        # 避免打开 Toplevel 子窗口后图标视觉上"变小、变糊"。
-        # 所有坐标 *s，s 取自当前的 tk scaling 值。
-        try:
-            scaling = float(self.tk.call("tk", "scaling"))
-        except Exception:
-            scaling = 1.0
-        # 走 2x 高清取整，保证 150% / 200% 缩放下都显示清晰
-        s = max(2, int(round(scaling)))
-        self.nav_folder_icon = tk.PhotoImage(width=16 * s, height=16 * s)
-        self.nav_folder_icon.put("#f4c542", to=(2 * s, 5 * s, 14 * s, 13 * s))
-        self.nav_folder_icon.put("#e2b531", to=(4 * s, 3 * s, 9 * s, 6 * s))
-        self.nav_folder_icon.put("#c99610", to=(2 * s, 5 * s, 14 * s, 6 * s))
-
-        self.nav_file_icon = tk.PhotoImage(width=16 * s, height=16 * s)
-        self.nav_file_icon.put("#ffffff", to=(3 * s, 2 * s, 13 * s, 14 * s))
-        self.nav_file_icon.put("#c8c8c8", to=(3 * s, 2 * s, 13 * s, 3 * s))
-        self.nav_file_icon.put("#d7d7d7", to=(5 * s, 6 * s, 11 * s, 7 * s))
-        self.nav_file_icon.put("#d7d7d7", to=(5 * s, 9 * s, 11 * s, 10 * s))
-
     def _init_ttk_styles(self):
         """锁定 ttk 主题与基础控件样式。
 
@@ -3441,26 +3470,6 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         except Exception:
             self._locked_scaling = None
         THEME.apply_main_ttk_theme(self, _ttk.Style(self), MAIN_PALETTE)
-
-    def add_nav_item(self, parent: str, iid: str, text: str, is_module: bool, open_node: bool = False):
-        icon = self.nav_file_icon if is_module else self.nav_folder_icon
-        return self.nav_tree.insert(parent, "end", iid=iid, text=text, open=open_node, image=icon)
-
-    def build_navigation_tree(self):
-        work_id = self.add_nav_item("", "nav_work", "工作", is_module=False, open_node=True)
-        self.add_nav_item(work_id, "module_ops_expiry", "当前所有云服务到期时间", is_module=True)
-        self.add_nav_item(work_id, "module_work_credentials", "账号中心", is_module=True)
-        self.add_nav_item(work_id, "module_work_processes", "流程中心", is_module=True)
-        api_test_id = self.add_nav_item(work_id, "nav_api_test", "接口测试", is_module=False, open_node=True)
-        wenpai_id = self.add_nav_item(api_test_id, "nav_api_wenpai", "文拍", is_module=False, open_node=True)
-        self.add_nav_item(wenpai_id, "module_admin_backend", "后台接口测试", is_module=True)
-
-        self.add_nav_item(work_id, "module_qa_work", "Q&A与工作纪要", is_module=True)
-        self.add_nav_item(work_id, "module_system_toolbox", "系统工具箱", is_module=True)
-
-        life_id = self.add_nav_item("", "module_life_home", "生活", is_module=True)
-        self.add_nav_item(life_id, "module_study_notes", "笔记", is_module=True)
-        self.add_nav_item(life_id, "module_study_demo",   "🐍 Python 学习", is_module=True)
 
     def get_deletable_account_image_paths(
         self,
@@ -3555,17 +3564,12 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             self.after(CHECK_INTERVAL_MS, self.periodic_reminder_check)
 
     def select_default_module(self):
-        self.nav_tree.selection_set("module_ops_expiry")
-        self.nav_tree.focus("module_ops_expiry")
         self.switch_module("module_ops_expiry")
 
-    def on_nav_select(self, event):
-        selection = self.nav_tree.selection()
-        if not selection:
-            return
-        item_id = selection[0]
-        if item_id in self.module_items:
-            self.switch_module(item_id)
+    def on_nav_select(self, module_id: str):
+        """侧栏点击回调：SidebarNav 直接传模块 key（不再是 Treeview 事件）。"""
+        if module_id in self.module_items:
+            self.switch_module(module_id)
 
     def _show_page(self, page_id: str, config: dict, *extra_args):
         """隐藏所有页面，仅显示 page_id 对应的页面，并调用其 on_show 函数。"""
@@ -3594,6 +3598,8 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         if not config:
             return
         self.current_module = module_id
+        # 同步侧栏高亮。notify=False：高亮由这里驱动，避免回调再触发一次切换。
+        self.nav.select(module_id, notify=False)
         self.module_title_var.set(config["title"])
         self.module_path_var.set(config["path"])
         self.module_desc_var.set(config["desc"])

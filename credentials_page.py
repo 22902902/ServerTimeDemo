@@ -73,10 +73,10 @@ class CredentialsPage:
         self.app.credentials_summary_var = tk.StringVar(value="")
         create_summary_card(self.app.credentials_page, "账号中心概览", self.app.credentials_summary_var, wraplength=920)
 
-        credentials_frame = create_content_frame(self.app.credentials_page, padding=(10, 0, 10, 0))
+        credentials_frame = create_content_frame(self.app.credentials_page, padding=(24, 0, 24, 0))
         credentials_table_frame = create_ttk_card(credentials_frame, "账号列表", padding=(10, 10))
         credentials_table_frame.pack(side="left", fill="both", expand=True)
-        credentials_preview_frame = create_preview_sidebar(credentials_frame, "注册信息预览", width=300, padding=(10, 10))
+        credentials_preview_frame = create_preview_sidebar(credentials_frame, "注册信息预览", width=300, padding=(16, 12))
 
         credential_columns = (
             "source_label",
