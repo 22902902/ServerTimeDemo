@@ -124,6 +124,19 @@ print()
 print("=" * 76)
 print("4. 导入 main 不产生日志文件（只有入口 main() 才初始化）")
 print("=" * 76)
+# 用「导入前后状态比对」而不是「假定目录不存在」：
+# 日志目录可能因真实运行过而早已存在，断言应描述「无副作用」而非「不存在」。
+probe_log_file = Path(ROOT) / "ExpiryManager_Data" / "logs" / log_setup.LOG_FILENAME
+
+
+def _log_file_state():
+    if not probe_log_file.exists():
+        return (False, None, None)
+    stat = probe_log_file.stat()
+    return (True, stat.st_size, stat.st_mtime_ns)
+
+
+before_state = _log_file_state()
 probe = subprocess.run(
     [sys.executable, "-c",
      "import sys; sys.path.insert(0, r'%s'); import log_setup, main; "
@@ -134,8 +147,9 @@ out = (probe.stdout or "") + (probe.stderr or "")
 check("导入 main 后 log_setup 仍未配置",
       "CONFIGURED=False" in out,
       out.strip().splitlines()[-1] if out.strip() else "(无输出)")
-check("日志目录未被创建",
-      not (Path(ROOT) / "ExpiryManager_Data" / "logs" / log_setup.LOG_FILENAME).exists())
+check("导入 main 未改动日志文件（无初始化副作用）",
+      _log_file_state() == before_state,
+      f"导入前={before_state} 导入后={_log_file_state()}")
 
 # ---------------------------------------------------------------------------
 print()
