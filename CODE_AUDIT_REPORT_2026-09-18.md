@@ -150,62 +150,53 @@ def on_select(event=None):
 
 ---
 
-### 2.2 没有版本控制，没有 `.gitignore` 🔴
+### 2.2 没有版本控制，没有 `.gitignore` — ✅ 已完成
 
 ```
-.git           → 不存在
-.gitignore     → 不存在
+初始状态：.git → 不存在   .gitignore → 不存在
+修复后：  .git → main 分支，2 个提交   .gitignore → 已建
 ```
 
 这对一个 26K 行、且现场存在**直接重写源码文件的脚本**的项目来说是最高的单点风险。任何人（包括未来的你）手滑跑一次 `_fix_backup.py`，`main.py` 就被就地改写，且无法回退。
 
-**建议动作**（优先级高于本报告其他所有事项）：
+**已完成动作**：
 
-```bash
-cd F:/phpstudy_pro/WWW/ServerTimeDemo
-git init
-```
+| 项 | 结果 |
+|---|---|
+| 仓库 | `git init -b main` |
+| 基线提交 | `dee267d` — 87 文件 / 34,462 行 |
+| 清理提交 | `b19eed7` — 删 15 / 增 3 / 改 0 |
+| `core.autocrlf` | `false`（源码 CRLF 26 / LF 33 / 混合 3，关闭转换避免改写行尾） |
+| 身份 | 仓库级 `shaoy` / `shaoy@localhost`（未污染全局配置） |
+| 忽略核对 | `git check-ignore` 逐一验证，索引 0 个敏感文件 |
 
-`.gitignore` 建议内容：
+`.gitignore` 已落盘（比下方草案更完整，含编辑器目录、Python 缓存、`_audit_out.txt` 等），要点：
 
 ```gitignore
-# 构建产物
-dist/
-build/
-*.toc
-*.pkg
-*.pyz
-*.zip
-
-# 运行期数据（含敏感信息，绝不入库）
-ExpiryManager_Data/
-expiry_manager.db
-study_demo.db
-study_notes.db
-login_memory.json
+# 凭据与个人隐私（绝不入库）
+login_memory.json      # 含真实手机号 + DPAPI 密码密文
 remember_me.json
-account_images/
-process_flow_images/
-study_notes_images/
-study_notes_attachments/
-adb_history/
-excel/
-Tools/
 
-# 缓存
-__pycache__/
-*.pyc
+# 运行期数据
+ExpiryManager_Data/
+*.db
+Tools/  excel/  account_images/  process_flow_images/
+study_notes_images/  study_notes_attachments/  study_demo/  adb_history/
 
-# 备份
-*.bak
-*.bak.*
+# 构建产物
+dist/  build/  *.toc  *.pkg  *.pyz
+
+# 缓存与备份
+__pycache__/  *.py[cod]  *.bak  *.bak.*
 ```
 
-> ⚠️ `login_memory.json` 与 `account_images/` 涉及账号凭据（截图），请务必先确认 `.gitignore` 生效再 `git add`。
+> ⚠️ **`login_memory.json` 里是真实手机号 `18640092818` 加密码密文，绝不能入库。** 已确认被忽略。
+> 另外 `Tools/`（593 MB）、`dist/`（1.0 GB）、`build/`（40 MB）也已排除——首次提交仅 87 个文件，未把 1.6 GB 构建产物带进仓库。
+
 
 ---
 
-### 2.3 11 个「就地重写源码」的一次性脚本留在项目根目录 🔴
+### 2.3 「就地重写源码」的一次性脚本 — ✅ 已完成（含一次误删事故与完整恢复）
 
 这是**可以直接损坏代码库的地雷**。以下是实测清单（`open(...,'wb')` 写回源码）：
 
@@ -229,17 +220,91 @@ __pycache__/
 
 它们**没有任何一处被 import**（已逐一 grep 确认），是历史补丁的化石。里面还硬编码了绝对路径 `F:\phpstudy_pro\WWW\ServerTimeDemo\main.py`。
 
-**建议动作**：先 `git init` 建立安全网（见 2.2），然后整体删除。
+**已完成动作**：先建 git 安全网（见 2.2），再删除。**删 12 个补丁、迁 3 个生成器**。
+
+### ⚠️ 本机 `git rm` 有环境级缺陷——不要用它删子目录文件
+
+执行过程中触发了一次事故，值得单独记录，因为任何人照抄「用 `git rm` 清理」都会中招。
+
+在 Windows + PortableGit 环境（系统 gitconfig 含 `core.fscache=true`）实测**可 100% 复现**：
 
 ```bash
-rm -rf _build_backup_ui.py _fix_*.py _strip_emoji.py _insert_preview.py \
-       _migrate_data_dir.py _test_password_fix.py tmp_debug/ \
-       _check_all_db.py _check_tq2.py _check_triple_quotes.py _find_all_paths.py \
-       _gen_app_icon.py _gen_app_icon_service.py _inspect_tables.py _scan_strings.py \
-       embedded_admin_tools/_gen_icon_service.py embedded_admin_tools/_test_inline.py
+git rm sub/keep.py    # → 整个 sub/ 被清空
+                      #   连从未提及的 sub/deep/deeper.py 也一并删除 ❌
+git rm top.py         # → 安全，只删 top.py ✔
+rm sub/keep.py        # → 安全，只删该文件 ✔
 ```
 
-保留的例外：`_gen_app_icon_service.py` 是图标生成器，若仍要维护图标可移入 `scripts/`。全部一次性脚本共 **31 个 / 1,613 行**，清掉后根目录立刻从 45 个 `.py` 降到 25 个。
+**成因**：`git rm` 在路径含 `/` 时，会连带删掉该顶层目录下的全部已跟踪文件。
+本次事故中 `git rm embedded_admin_tools/_gen_icon_service.py` 与 `git rm tmp_debug/*`
+导致这两个目录下 **25 个文件**被误删（含 `embedded_admin_tools/__init__.py`、`services/*.py`）。
+
+**恢复**：已提交过基线，`git checkout -- .` 一条命令完全恢复。
+
+**安全操作规范（本机必须遵守）**：
+
+```bash
+# ✅ 正确：先 rm，再暂存
+rm path/to/old_script.py && git add -A
+
+# ❌ 禁止：会连带清空 path/to/ 整个目录
+git rm path/to/old_script.py
+```
+
+1. 删除前必须先提交、确认 `git status` 无输出
+2. 删除后立即 `git status --short` 核对，只应显示意图删除的文件
+3. 出现意外删除立刻 `git checkout -- .`
+
+**误删事件的完整验证记录**（证明恢复无损）：
+
+```
+git status --short              → 无输出（工作区干净）
+git fsck                        → 仅 2 个 dangling blob，无损坏
+文件数对账 dee267d → b19eed7    → 87 → 75（−15 删 +3 增），修改 0 个
+pyflakes 重跑 vs 基线           → 72 条逐行完全一致
+全项目语法检查                  → 58 个 .py，0 错误
+```
+
+### 12 个一次性补丁（已删除）
+
+| 脚本 | 覆写目标 |
+|---|---|
+| `_build_backup_ui.py` / `_fix_backup.py` / `_fix_backup_dialog.py` | `main.py` |
+| `_fix_datetime.py` / `_fix_dt2.py` / `_fix_indent.py` / `_fix_lines.py` | `main.py` |
+| `_fix_output.py` | `study_demo_window.py` |
+| `_insert_preview.py` / `_strip_emoji.py` | `study_notes_window.py` |
+| `tmp_debug/_fix_console_encoding.py` | `console_page.py` |
+| `tmp_debug/_test_overwrite.py` | 动态路径 |
+
+### 3 个资产生成器（已迁至 `scripts/`，保留能力）
+
+它们不是补丁而是必要工具——删掉就无法再生成图标资源。但原脚本用
+`Path(__file__).parent` 定位资源，直接搬到 `scripts/` 会失效，因此同时修了路径：
+
+| 原位置 | 新位置 | 作用 |
+|---|---|---|
+| `_gen_app_icon.py` | `scripts/gen_app_icon.py` | 生成 `app.ico` |
+| `_gen_app_icon_service.py` | `scripts/gen_app_icon_service.py` | `app.ico` → `services/app_icon_service.py` |
+| `embedded_admin_tools/_gen_icon_service.py` | `scripts/gen_icon_service.py` | `_ico_base64.txt` → `services/icon_service.py` |
+
+**等价性已验证**（在内存中生成内容与磁盘文件逐行比对，未执行覆写）：
+
+- `gen_app_icon_service.py` 输出与 `app_icon_service.py` **完全一致**
+- `gen_icon_service.py` 输出与 `icon_service.py` 一致，**仅差在去掉了 BOM** ——
+  原脚本以 `utf-8-sig` 写出，这正是 5.1 节 BOM 不一致问题的根源，新脚本已修正
+
+### 尚未处理（P3，可后续一并清扫）
+
+以下一次性脚本**只读、不改源码**，无风险，本次未动：
+
+```
+_check_all_db.py  _check_tq2.py  _check_triple_quotes.py  _find_all_paths.py
+_inspect_tables.py  _scan_strings.py  _migrate_data_dir.py  _test_password_fix.py
+embedded_admin_tools/_test_inline.py
+tmp_debug/{_audit.py, _audit_dup.py, _check_dnd_fix.py, _fix_dup.py, _verify_db.py}
+```
+
+其中 `_migrate_data_dir.py` 的迁移映射表已内置在 `main.py:286`，是重复逻辑，可安全删除。
 
 ---
 
@@ -664,8 +729,8 @@ main.py        仅入口
 
 | 阶段 | 动作 | 为什么这个顺序 |
 |---|---|---|
-| **第 1 步** | `git init` + `.gitignore` + 首次提交 | 后面所有改动都需要回退能力 |
-| **第 2 步** | 修 4 个真 Bug（2.1）；删 11 个改源码脚本（2.3） | 影响功能正确性与数据安全，且改动小、风险低 |
+| **第 1 步** | `git init` + `.gitignore` + 首次提交 | 后面所有改动都需要回退能力 | ✅ **已完成**（2.2） |
+| **第 2 步** | 修 4 个真 Bug（2.1）；删改源码脚本（2.3） | 影响功能正确性与数据安全，且改动小、风险低 | 🟡 脚本清理 **已完成**；4 个真 Bug **待修** |
 | **第 3 步** | 补 `requirements.txt`（3.6）+ 删未使用导入（3.7） | 半小时的事，立刻降低理解成本 |
 | **第 4 步** | 抽 `log_setup.py`，全项目接入（2.1 Bug 3 的根因） | 后续所有异常排查都靠它 |
 | **第 5 步** | `tools_db.py` 迁移逻辑表驱动（3.4）+ SQL 标识符白名单（3.5） | 改动集中在一个文件，收益明确 |
@@ -730,6 +795,11 @@ ruff format . --exclude dist,build
 
 **体检结论**：项目功能是完整的，`embedded_admin_tools/` 已展示出正确的分层思路，上次重构也确实见效（`main.py` 从 6,038 行降到 5,166 行、裸 `except` 从多处降到 1 处、`build_ui` 从 524 行降到 18 行）。
 
-当前最该做的不是继续重构，而是**先止损**：`git init` 拿到回退能力，修掉 4 个点了就崩的真 Bug，删掉 11 个能就地重写源码的脚本。这三件做完（约 1–2 小时），再按第六节的顺序推进结构性重构，每一步都安全可控。
+当前最该做的不是继续重构，而是**先止损**：`git init` 拿到回退能力 ✅、删掉能就地重写源码的脚本 ✅、修掉 4 个点了就崩的真 Bug ⏳。前两件已完成，只剩第 3 件（约半小时），做完再按第六节的顺序推进结构性重构，每一步都安全可控。
+
+**本轮已完成**：版本控制已建立（`dee267d` 基线 + `b19eed7` 清理，87 → 75 文件，修改 0 个），
+12 个破坏性补丁已删、3 个生成器已迁入 `scripts/` 并修正路径。
+过程中 `git rm` 触发了一次误删事故（见 2.3），已用 `git checkout -- .` 完全恢复并逐项验证无损——
+这也再次印证了第 1 步的价值：**先有回退能力，才敢动刀。**
 
 **特别提醒**：2.1 的 4 个 Bug 全部是上一轮「异常处理具体化 + 统一日志」重构引入或遗留的 **回归**（`PIL`/`openpyxl` 引用写进了 except 子句、`logger` 只加在 `main.py`）。这也印证了第六节第 4 步的必要性 —— 没有测试和静态检查兜底，重构本身就在制造新问题。
