@@ -900,7 +900,12 @@ class AccountImagePreview:
             self.current_index = len(self.image_items) - 1
             self.refresh()
             return True
-        except (PIL.UnidentifiedImageError, OSError, Exception) as exc:
+        except (UnidentifiedImageError, OSError) as exc:
+            messagebox.showerror(APP_TITLE, f"上传截图失败：\n{exc}", parent=parent or self.parent)
+            return False
+        except Exception as exc:
+            # 兜底：refresh() 等 Tk 调用可能抛出非 OSError 异常，不应逃逸出回调层
+            logger.exception("上传截图失败：%s", source_path)
             messagebox.showerror(APP_TITLE, f"上传截图失败：\n{exc}", parent=parent or self.parent)
             return False
 
@@ -4095,7 +4100,12 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             self.log_status(f"已导入 {len(items)} 条记录：{file_path.name}")
             if not silent:
                 messagebox.showinfo(APP_TITLE, f"导入成功，共 {len(items)} 条记录。", parent=self)
-        except (json.JSONDecodeError, openpyxl.BadZipFile, openpyxl.exceptions.InvalidFileException, OSError, Exception) as exc:
+        except (zipfile.BadZipFile, OSError) as exc:
+            # 实测：损坏或非 xlsx 的表格由 openpyxl 底层抛出 zipfile.BadZipFile
+            messagebox.showerror(APP_TITLE, f"导入失败：{exc}", parent=self)
+        except Exception as exc:
+            # 兜底：含 openpyxl.utils.exceptions.InvalidFileException、缺失依赖的 RuntimeError
+            logger.exception("导入 Excel 资产失败：%s", file_path)
             messagebox.showerror(APP_TITLE, f"导入失败：{exc}", parent=self)
 
     def refresh_table(self):
@@ -5012,7 +5022,12 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             self.refresh_credentials_table()
             self.log_status(f"已从 Excel 导入 {len(items)} 条账号记录。")
             messagebox.showinfo(APP_TITLE, f"导入成功，共新增 {len(items)} 条账号记录。", parent=self)
-        except (json.JSONDecodeError, openpyxl.BadZipFile, openpyxl.exceptions.InvalidFileException, OSError, Exception) as exc:
+        except (zipfile.BadZipFile, OSError) as exc:
+            # 实测：损坏或非 xlsx 的表格由 openpyxl 底层抛出 zipfile.BadZipFile
+            messagebox.showerror(APP_TITLE, f"导入失败：{exc}", parent=self)
+        except Exception as exc:
+            # 兜底：含 openpyxl.utils.exceptions.InvalidFileException、缺失依赖的 RuntimeError
+            logger.exception("导入账号 Excel 失败：%s", file_path)
             messagebox.showerror(APP_TITLE, f"导入失败：{exc}", parent=self)
 
     def export_credentials_excel(self):

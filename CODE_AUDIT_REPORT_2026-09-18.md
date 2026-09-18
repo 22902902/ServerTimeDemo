@@ -32,9 +32,13 @@
 
 ## 二、P0 —— 立即处理
 
-### 2.1 【真 Bug】四个未定义名 / 作用域错误 ⚠️ 最高优先级
+### 2.1 【真 Bug】四个未定义名 / 作用域错误 — ✅ 已全部修复
 
 这些不是风格问题，是**点了就崩**的运行时错误。pyflakes 扫出后我逐处读了源码确认。
+
+> **修复状态**：4 处已修复并逐项验证（见本节末尾的验证记录）。pyflakes 由 **72 条 → 64 条**，消失的 8 条正好是这 4 个 Bug 的全部条目，无新增。
+>
+> **⚠️ 本节初版的 Bug 2 改法是错的**，已在原处更正：`openpyxl` 并**没有** `BadZipFile` / `exceptions` 这两个属性，且模块级导入它会让启动慢 0.8 秒。写审计报告时未做实测，是本报告的一处教训。
 
 #### Bug 1：`main.py:903` — `PIL` 未绑定
 
@@ -75,16 +79,32 @@ except (json.JSONDecodeError, openpyxl.BadZipFile,
 
 全文 `grep` 确认：`main.py` 里**没有任何 `openpyxl` 导入**，只有这两处引用。Excel 导入/导出遇到损坏文件 → `NameError`。
 
-**改法**：
+**⚠️ 本报告初版的改法有误，已更正。** 初版建议 `import openpyxl` 后用 `openpyxl.BadZipFile` 与 `openpyxl.exceptions.InvalidFileException`。实测（openpyxl 3.1.5）：
+
+```
+openpyxl.BadZipFile                            → AttributeError ❌ 属性不存在
+openpyxl.exceptions                            → AttributeError ❌ 该子模块未挂到包上
+openpyxl.utils.exceptions.InvalidFileException → OK ✅ 但导入它要 829 ms
+import openpyxl                                → 800 ms
+```
+
+三个名字里**有两个根本不存在**；即使写对，把 `openpyxl` 提到模块级会让每次启动**慢 0.8 秒**——这正是原作者把 `load_workbook` 写成函数内导入的原因（`main.py:2286 / 2388 / 2432`）。
+
+进一步用真实的损坏 xlsx（非 zip 的假文件 + 截断的 zip 各一个）喂给 `load_excel_assets` 与 `import_credential_items_from_excel`，实测**两者都抛 `zipfile.BadZipFile`**，`InvalidFileException` 并未触发（它属兜底情形）。
+
+**改法**（✅ 已实施，`zipfile` 在 `main.py:89` 已导入，零额外成本）：
 
 ```python
-# 文件顶部
-import openpyxl
-
-# 两处 except 统一收口，去掉冗余的 Exception
-except (json.JSONDecodeError, openpyxl.BadZipFile,
-        openpyxl.exceptions.InvalidFileException, OSError) as exc:
+except (zipfile.BadZipFile, OSError) as exc:
+    # 实测：损坏或非 xlsx 的表格由 openpyxl 底层抛出 zipfile.BadZipFile
+    messagebox.showerror(APP_TITLE, f"导入失败：{exc}", parent=self)
+except Exception as exc:
+    # 兜底：含 openpyxl.utils.exceptions.InvalidFileException、缺失依赖的 RuntimeError
+    logger.exception("导入 Excel 资产失败：%s", file_path)
+    messagebox.showerror(APP_TITLE, f"导入失败：{exc}", parent=self)
 ```
+
+顺带去掉的 `json.JSONDecodeError`：两个加载函数都不解析 JSON，这个类型是复制粘贴残留，从未生效。
 
 #### Bug 3：`tools_page.py:1183` — `logger` 未定义
 
@@ -99,29 +119,16 @@ except Exception as e:
 
 **根因**：日志基建只在 `main.py` 里建了（`main.py:101-110`，含 `logger` + `_handler`）。其余 24 个模块**没有任何日志设施**，出现异常只能靠弹窗。这是「统一日志」重构只做了一半。
 
-**改法**：建一个 `log_setup.py`，各模块统一接入：
+**改法**（✅ 已按最小改动修复）：在 `tools_page.py` 补齐模块级日志基建：
 
 ```python
-# log_setup.py
-"""全局日志配置。各模块 import 后直接使用 logger。"""
-import logging, sys
-from pathlib import Path
-
-def init_logging(log_dir: Path) -> logging.Logger:
-    logger = logging.getLogger("expiry_manager")
-    if logger.handlers:
-        return logger
-    logger.setLevel(logging.INFO)
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    h = logging.FileHandler(log_dir / "app.log", encoding="utf-8")
-    h.setFormatter(fmt)
-    logger.addHandler(h)
-    return logger
-
-# 各模块顶部
-from log_setup import get_logger
-logger = get_logger(__name__)
+import logging
+...
+# 模块 logger — 统一走 logging（此前本模块无日志设施，logger.exception 会直接 NameError）
+logger = logging.getLogger(__name__)
 ```
+
+初版本报告建议的 `log_setup.py`（全局日志配置 + 各模块 `get_logger()`）**方向正确但留作 P1**：终态确实应该是统一日志设施，但那是一次涉及 24 个模块的迁移，不该塞进「修 4 个 Bug」里做一半。当前 `main.py` 与 `tools_page.py` 各自持有 `logging.getLogger(__name__)`，消息经 root logger 汇总，行为一致。
 
 #### Bug 4：`embedded_admin_tools/api_demo_window.py:1193` — 闭包变量未声明 `nonlocal`
 
@@ -147,6 +154,35 @@ def on_select(event=None):
     nonlocal cal_window          # ← 补这一行
     cal.get_date() 后取值、set、destroy、置 None 全部生效
 ```
+
+#### ✅ 修复验证记录
+
+改动的 5 处代码位置：
+
+| 位置 | 原写法 | 现写法 |
+|---|---|---|
+| `main.py:903` | `except (PIL.UnidentifiedImageError, OSError, Exception)` | `except (UnidentifiedImageError, OSError)` + `except Exception` 兜底 |
+| `main.py:4098` | `except (json.JSONDecodeError, openpyxl.BadZipFile, openpyxl.exceptions.InvalidFileException, OSError, Exception)` | `except (zipfile.BadZipFile, OSError)` + `except Exception` 兜底 |
+| `main.py:5015` | 同上 | 同上 |
+| `tools_page.py:1183` | `logger` 未定义 | 补 `import logging` + 模块级 `logger` |
+| `api_demo_window.py:1193` | `on_select` 缺 `nonlocal` | 补 `nonlocal cal_window` |
+
+四道验证，全部通过：
+
+**① 异常类型表达式真实求值** — 把全项目 49 个 `.py` 中 **210 个 `except` 类型表达式**全部抽出来真实 `eval`，0 个 NameError / AttributeError。同一脚本对修复前的版本（从 git `HEAD` 取原文件）跑出 **10 项 FAIL**，证明该检查有效而非橡皮图章。
+
+**② 闭包作用域分析** — 按「被读后又赋值、未声明 `nonlocal`、且外层函数存在同名绑定」三条同时成立来判定，全项目 0 命中；修复前精确命中 `api_demo_window.py:1193`。
+
+**③ 运行时冒烟测试（18 项全通过）** — 真实执行，非静态推断：
+
+- 真实的失败复制（源文件不存在）抛 `FileNotFoundError` → 被修复后的 `(UnidentifiedImageError, OSError)` 捕获
+- 真实构造损坏 xlsx（非 zip 的假文件 + 截断 zip），喂给两个加载函数 → 两者都抛 `zipfile.BadZipFile` → 被新处理器捕获
+- `import tools_page` 后 `logger.exception()` 真实可调用
+- **真实建出日期选择器、点开日历、触发选中事件** → 不再抛 `UnboundLocalError`，且 `on_date_changed('iface', 'field')` **真实被调用**（此前这条回调永远走不到）
+
+**④ pyflakes 基线比对** — 72 条 → 64 条，删掉的 8 条与 4 个 Bug 一一对应，其余差异只是行号位移，零新增。全项目 58 个 `.py` 语法检查 0 错误。
+
+> 复跑方式：`python scripts/check_name_scope.py`（检查 ①②，可对任意目录跑，传入路径参数即可对比修复前后）
 
 ---
 
@@ -795,7 +831,7 @@ ruff format . --exclude dist,build
 
 **体检结论**：项目功能是完整的，`embedded_admin_tools/` 已展示出正确的分层思路，上次重构也确实见效（`main.py` 从 6,038 行降到 5,166 行、裸 `except` 从多处降到 1 处、`build_ui` 从 524 行降到 18 行）。
 
-当前最该做的不是继续重构，而是**先止损**：`git init` 拿到回退能力 ✅、删掉能就地重写源码的脚本 ✅、修掉 4 个点了就崩的真 Bug ⏳。前两件已完成，只剩第 3 件（约半小时），做完再按第六节的顺序推进结构性重构，每一步都安全可控。
+当前最该做的不是继续重构，而是**先止损**：`git init` 拿到回退能力 ✅、删掉能就地重写源码的脚本 ✅、修掉 4 个点了就崩的真 Bug ✅。**三件止损事项已全部完成**，接下来按第六节的顺序推进结构性重构（从第 3 步补 `requirements.txt` 开始），每一步都安全可控。
 
 **本轮已完成**：版本控制已建立（`dee267d` 基线 + `b19eed7` 清理，87 → 75 文件，修改 0 个），
 12 个破坏性补丁已删、3 个生成器已迁入 `scripts/` 并修正路径。

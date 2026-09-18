@@ -1188,6 +1188,9 @@ class ApiDemoWindow(tk.Toplevel):
 
             # 选择日期后关闭
             def on_select(event=None):
+                # 必须声明 nonlocal：否则下面的赋值会让 cal_window 被当作闭包局部变量，
+                # 导致上一行 cal_window.destroy() 抛 UnboundLocalError
+                nonlocal cal_window
                 selected = cal.get_date()
                 textvariable.set(selected)
                 cal_window.destroy()

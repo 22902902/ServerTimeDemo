@@ -17,6 +17,7 @@ import sys
 import shutil
 import struct
 import hashlib
+import logging
 import subprocess
 import tempfile
 import tkinter as tk
@@ -42,6 +43,10 @@ try:
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
+
+
+# 模块 logger — 统一走 logging（此前本模块无日志设施，logger.exception 会直接 NameError）
+logger = logging.getLogger(__name__)
 
 
 # 颜色常量 — 统一映射到全局主题中的工具箱配色
