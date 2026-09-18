@@ -23,7 +23,9 @@
 
 - `main.py`：主程序入口
 - `expiry_manager.db`：运行后自动生成的本地数据库
-- `requirements.txt`：依赖列表
+- `requirements.txt`：依赖列表（含每项是 [硬] 还是 [可选] 依赖的标注）
+- `requirements.lock.txt`：当前验证过的精确版本快照，复现环境时用
+- `scripts/`：开发辅助脚本（体检、依赖盘点、图标生成、冒烟测试），不参与运行
 
 ## 本地运行
 
@@ -31,6 +33,8 @@
 pip install -r requirements.txt
 python main.py
 ```
+
+> 需要 Python 3.12（与 `build.bat` 中使用的解释器一致）。
 
 如果目录中存在 `服务器与云服务到期情况.xlsx`，程序首次启动会自动导入。
 

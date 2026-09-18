@@ -1,0 +1,28 @@
+# ============================================================
+#  requirements.lock.txt —— 实际可用版本的精确快照
+#  生成时间：2026-09-18 13:47
+#  来源环境：C:\Users\shaoy\AppData\Local\Programs\Python\Python312\python.exe
+#            （与 README.md、build.bat 中使用的解释器一致）
+#
+#  用途：需要完全复现当前可用环境时安装本文件（严格相等版本）：
+#      pip install -r requirements.lock.txt
+#
+#  与 requirements.txt 的分工：
+#      requirements.txt      声明「需要什么」+ 可接受的版本下界（给新环境用）
+#      requirements.lock.txt 锁定「当前验证过什么版本」（给复现/排查用）
+#
+#  注意：只收录本项目的直接依赖，不做全量 pip freeze ——
+#        该解释器是全局环境，freeze 会混入与本项目无关的包。
+# ============================================================
+
+Pillow==12.2.0
+tkinterdnd2==0.6.2
+pystray==0.19.5
+tkcalendar==1.6.1
+openpyxl==3.1.5
+requests==2.32.3
+pycryptodome==3.23.0
+pyinstaller==6.14.1
+
+# 以下直接依赖声明在 requirements.txt 中，但当前环境未安装：
+#   pygments（import 名 pygments）

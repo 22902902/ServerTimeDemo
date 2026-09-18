@@ -1,4 +1,45 @@
-openpyxl>=3.1.2
-pystray>=0.19.5
+# ============================================================
+#  ExpiryManager 依赖清单
+#  安装：pip install -r requirements.txt
+#
+#  本清单由 scripts/dep_inventory.py 静态盘点全项目 import 得出，
+#  标注含义：
+#    [硬]  代码里未加 try 保护，缺失会直接 ImportError（启动失败）
+#    [可选] 仅在 try/except 内使用，缺失会静默降级为简化实现
+# ============================================================
+
+# ---------- UI / 桌面 ----------
 Pillow>=10.3.0
+#   [硬] 图片预览与缩放、账号截图、托盘图标。main.py:122 / study_notes_window.py:55
+
+tkinterdnd2>=0.3.0
+#   [硬] 拖拽支持。main.py:120 未加 try 保护 —— 缺失时程序直接起不来，
+#        这是新环境按 README 安装后「跑不起来」的首要原因
+
+pystray>=0.19.5
+#   [可选] 系统托盘图标。main.py:2920（try 内）
+
+tkcalendar>=1.6.1
+#   [硬] 日期选择器控件。embedded_admin_tools/api_demo_window.py:1124
+
+# ---------- 数据 ----------
+openpyxl>=3.1.2
+#   [可选] Excel 导入导出。main.py:2291 / 2393 / 2437（函数内导入，
+#          刻意不提到模块级：import openpyxl 需约 800ms，会拖慢启动）
+
+# ---------- 网络与安全 ----------
+requests>=2.31.0
+#   [硬] HTTP 请求。embedded_admin_tools/services/api_client.py:4
+
+pycryptodome>=3.20.0
+#   [硬] DES 加解密（提供 Crypto 包）。services/crypto_service.py:3
+#        注意：是 pycryptodome，不是已停止维护的 pycrypto
+
+# ---------- 代码展示 ----------
+pygments>=2.17.0
+#   [可选] 笔记 / 示例窗口的语法高亮。study_demo_window.py:21（try 内）
+#        ⚠ 当前开发环境未安装此包，高亮功能处于静默降级状态（不报错但无高亮）
+
+# ---------- 打包（仅构建 exe 需要，运行不需要）----------
 pyinstaller>=6.10.0
+#   构建用：build.bat / build.ps1 依赖它读取 ExpiryManager_fixed.spec
