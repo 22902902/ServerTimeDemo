@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 # ----------------------------------------------------------------------
 # 尺寸与线型
@@ -250,6 +250,65 @@ def draw_brand_tile(size: int, *, tile=TILE_DARK, glyph=GLYPH_LIGHT,
     r = BRAND_RING_RADIUS
     g.arc(8, 8, r, RING_GAP_START, 360, caps=False)
     g.arc(8, 8, r, 0, RING_GAP_END, caps=False)
+    return g.image()
+
+
+# ----------------------------------------------------------------------
+# 无图标工具的占位底牌
+# ----------------------------------------------------------------------
+# 优先用能画中文的字体：工具名大多含汉字，拿 Arial 画中文会落成一堆方框。
+LETTER_FONT_CANDIDATES = ("msyhbd.ttc", "msyh.ttc", "simhei.ttf",
+                          "segoeui.ttf", "arial.ttf")
+
+_letter_font_cache: dict = {}
+
+
+def _letter_font(px: int):
+    """按像素取一个字体；系统字体一个都拿不到时退回 Pillow 内置位图字体。"""
+    font = _letter_font_cache.get(px)
+    if font is None:
+        font = None
+        for name in LETTER_FONT_CANDIDATES:
+            try:
+                font = ImageFont.truetype(name, px)
+                break
+            except Exception:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+        _letter_font_cache[px] = font
+    return font
+
+
+def letter_tile(text: str, px: int, *, tile=(247, 247, 247, 255),
+                glyph=(107, 107, 107, 255), edge=(236, 236, 236, 255)):
+    """没有图标时用的占位：圆角底牌 + 名称首字。
+
+    原先这里放的是一个 ``⚙`` emoji，两个问题：与全项目的线性图标语言不一致；
+    更实际的是，一屏几十个一模一样的齿轮完全没法扫读。换成一枚带首字的底牌后，
+    至少能靠字形认人，也能一眼看出「这个工具确实没有图标」而不是「程序坏了」。
+
+    ``tile`` / ``glyph`` / ``edge`` 接受 ``(R,G,B,A)`` 或 ``#rrggbb``。
+    """
+    g = Pen(px, glyph)
+    side = g.side
+    pad = max(0, int(side * 0.015))
+    box = [pad, pad, side - 1 - pad, side - 1 - pad]
+    radius = int(side * 0.235)          # 与品牌底牌同比例，观感一致
+    g.d.rounded_rectangle(box, radius=radius, fill=_rgb(tile),
+                          outline=_rgb(edge), width=max(1, int(side * 0.012)))
+
+    ch = (text or "?").strip()[:1].upper()
+    # 汉字比拉丁字母「胖」，同字号下要略小一点才不至于顶到圆角
+    ratio = 0.46 if ord(ch[0]) > 0x2E7F else 0.54
+    font = _letter_font(max(1, int(side * ratio)))
+    try:
+        bx0, by0, bx1, by1 = g.d.textbbox((0, 0), ch, font=font)
+        g.d.text((side / 2 - (bx1 - bx0) / 2 - bx0,
+                  side / 2 - (by1 - by0) / 2 - by0),
+                 ch, font=font, fill=g.fg)
+    except Exception:
+        pass
     return g.image()
 
 

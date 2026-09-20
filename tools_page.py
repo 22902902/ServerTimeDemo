@@ -25,10 +25,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import app_icons
 import tools_db
 import tools_launcher as launcher
 from dialog_form_style import apply_dialog_form_style, create_form_checkbutton, create_form_entry, create_form_frame, create_form_label
 from page_components import add_toolbar_buttons, create_page_toolbar, create_status_bar
+from ui_components import RoundedChip
 from ui_theme import PACKAGE_ACCENT_COLORS, THEME, TOOLBOX_PALETTE
 
 # ★ tkdnd 拖拽支持（全局导入，确保打包包含）
@@ -196,140 +198,359 @@ def _get_icon_cache_path(exe_path: str, size: int, cache_dir: Path) -> Path:
     return cache_dir / f"{exe.stem}_{file_hash}_{size}.png"
 
 
+# 两类进程内缓存，都按 (路径, mtime, 大小) 作键 —— exe 一被替换就自动失效。
+_usable_icon_cache: set = set()   # 已确认「这张 PNG 有内容」
+_icon_miss_cache: set = set()     # 已确认「这个 exe 根本抽不出图标」
+
+# PowerShell 兜底。路径里的单引号必须转成两个，否则路径含引号时脚本直接语法错。
+_PS_ICON_SCRIPT = (
+    "Add-Type -AssemblyName System.Drawing; "
+    "$icon = [System.Drawing.Icon]::ExtractAssociatedIcon('{path}'); "
+    "if ($icon) {{ $bmp = $icon.ToBitmap(); "
+    "$bmp.Save('{out}', [System.Drawing.Imaging.ImageFormat]::Png); "
+    "$icon.Dispose(); $bmp.Dispose(); exit 0 }} else {{ exit 1 }}"
+)
+
+
+def _file_stamp(path) -> tuple:
+    """(规范化路径, mtime 纳秒, 大小)。取不到 stat 时退化成 (路径, -1, -1)。"""
+    p = Path(path)
+    try:
+        st = p.stat()
+        return (str(p), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (str(p), -1, -1)
+
+
+def png_icon_is_usable(path) -> bool:
+    """判断一张图标 PNG 到底有没有「内容」。
+
+    只看「文件存在 + 大小 > 0」是不够的：全透明的空图同样是一张**合法 PNG**
+    （48×48 实测只有 88 字节）。这种文件一旦被写进缓存就会被永久命中，
+    图标再也显示不出来 —— 用户看到的就是「这个工具抽不到图标」。
+    所以缓存命中时也要验一次 alpha。
+
+    结果按 (路径, mtime, 大小) 缓存：网格每次刷新都会对同一批文件重复问同一句，
+    而带 mtime 的键让文件被重写后缓存自动失效，不会拿着旧结论误判。
+    """
+    p = Path(path)
+    stamp = _file_stamp(p)
+    if stamp[2] <= 0:
+        return False
+    if stamp in _usable_icon_cache:
+        return True
+    if not HAS_PIL:
+        return True      # 没有 Pillow 就没法验，乐观放行
+    try:
+        with Image.open(p) as im:
+            if im.mode in ("RGBA", "LA", "PA"):
+                if im.convert("RGBA").getchannel("A").getextrema()[1] == 0:
+                    return False
+    except Exception:
+        return False
+    _usable_icon_cache.add(stamp)
+    return True
+
+
+def _win_bitmap_api():
+    """建立 shell32 / gdi32 / user32 的函数签名，返回 (u32, g32, sh32, HANDLE)。
+
+    **必须显式声明 argtypes**：64 位下 HICON / HBITMAP 是 8 字节句柄，实际值经常
+    超过 2^31，而 ctypes 在没有 argtypes 时按 c_int 转换，会直接抛
+    ``OverflowError: int too long to convert``。老代码就在 DeleteObject(hbmMask)
+    上踩过这个坑 —— 还被外层 except 吞掉，表现为「抽到一半静默失败」。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    handle = ctypes.c_void_p
+    u32 = ctypes.windll.user32
+    g32 = ctypes.windll.gdi32
+    sh32 = ctypes.windll.shell32
+
+    sh32.ExtractIconExW.restype = wintypes.UINT
+    sh32.ExtractIconExW.argtypes = [
+        wintypes.LPCWSTR, wintypes.INT, ctypes.POINTER(handle),
+        ctypes.POINTER(handle), wintypes.UINT]
+    u32.GetIconInfo.argtypes = [handle, ctypes.c_void_p]
+    u32.GetIconInfo.restype = wintypes.BOOL
+    u32.DestroyIcon.argtypes = [handle]
+    u32.GetDC.argtypes = [handle]
+    u32.GetDC.restype = handle
+    u32.ReleaseDC.argtypes = [handle, handle]
+    g32.GetObjectW.argtypes = [handle, ctypes.c_int, ctypes.c_void_p]
+    g32.GetObjectW.restype = ctypes.c_int
+    g32.DeleteObject.argtypes = [handle]
+    g32.GetDIBits.argtypes = [handle, handle, wintypes.UINT, wintypes.UINT,
+                              ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+    g32.GetDIBits.restype = ctypes.c_int
+    return u32, g32, sh32, handle
+
+
+def _extract_icon_image(exe_path: str, size: int):
+    """用 shell32 抽出图标位图并转成 RGBA 图；抽不到或结果是空图时返回 None。
+
+    为什么不能像老代码那样 GetBitmapBits 一把梭
+    ------------------------------------------------------------------
+    1. ``GetIconInfo`` 交回来的 ``hbmColor`` 是一张 **DIB 段**，而 GetBitmapBits
+       只对 DDB 可靠；改走 GetDIBits、并按位图自身的色深取，才拿得稳。
+    2. 真正的坑在这里：很多老 exe（PuTTY 0.6x、Delphi 编的屏幕吸色器）的图标是
+       「32 位色但 alpha 通道全是 0」—— 透明度只存在于 **AND 蒙版位图**里。
+       照 BGRA 直读就是一张全透明空图：文件照样写得出、大小也正常，显示出来却
+       什么都没有。本机 Tools 目录实测 6 个 exe 栽在这上面。所以 alpha 全 0 时
+       必须回退到蒙版推透明度（蒙版位 = 1 表示透明，= 0 表示保留颜色）。
+    """
+    if not (HAS_PIL and sys.platform.startswith("win")):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u32, g32, sh32, handle = _win_bitmap_api()
+    except Exception:
+        return None
+
+    class ICONINFO(ctypes.Structure):
+        _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD),
+                    ("yHotspot", wintypes.DWORD),
+                    ("hbmMask", handle), ("hbmColor", handle)]
+
+    class BITMAP(ctypes.Structure):
+        _fields_ = [("bmType", wintypes.LONG), ("bmWidth", wintypes.LONG),
+                    ("bmHeight", wintypes.LONG), ("bmWidthBytes", wintypes.LONG),
+                    ("bmPlanes", wintypes.WORD), ("bmBitsPixel", wintypes.WORD),
+                    ("bmBits", ctypes.c_void_p)]
+
+    class BMIH(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD)]
+
+    class BMI(ctypes.Structure):
+        _fields_ = [("bmiHeader", BMIH), ("bmiColors", wintypes.DWORD * 256)]
+
+    def read_dib(hdc, hbm, w, h, bpp, palette=None):
+        """取位图数据（自上而下 / BI_RGB）。返回 (字节, 行跨距)，失败 (None, 0)。"""
+        bi = BMI()
+        bi.bmiHeader.biSize = ctypes.sizeof(BMIH)
+        bi.bmiHeader.biWidth = w
+        bi.bmiHeader.biHeight = -h        # 负数 = top-down，省得自己再翻一次
+        bi.bmiHeader.biPlanes = 1
+        bi.bmiHeader.biBitCount = bpp
+        bi.bmiHeader.biCompression = 0
+        for i, entry in enumerate(list(palette or [])[:256]):
+            bi.bmiColors[i] = entry
+        stride = ((w * bpp + 31) // 32) * 4
+        buf = (ctypes.c_ubyte * (stride * h))()
+        if g32.GetDIBits(hdc, hbm, 0, h, buf, ctypes.byref(bi), 0) == 0:
+            return None, 0
+        return bytes(buf), stride
+
+    def palette_of(hdc, hbm, w, h, bpp):
+        """把位图自带的调色板捞出来（BGRX 顺序的 DWORD 列表）。"""
+        bi = BMI()
+        bi.bmiHeader.biSize = ctypes.sizeof(BMIH)
+        bi.bmiHeader.biWidth = w
+        bi.bmiHeader.biHeight = -h
+        bi.bmiHeader.biPlanes = 1
+        bi.bmiHeader.biBitCount = bpp
+        bi.bmiHeader.biCompression = 0
+        g32.GetDIBits(hdc, hbm, 0, 0, None, ctypes.byref(bi), 0)
+        return [bi.bmiColors[i] for i in range(1 << bpp)]
+
+    def palette_bytes(entries):
+        out = bytearray()
+        for entry in entries:
+            out += bytes(((entry >> 16) & 0xFF, (entry >> 8) & 0xFF,
+                          entry & 0xFF))
+        return bytes(out)
+
+    hdc = None
+    hicon = None
+    info = ICONINFO()
+    try:
+        hdc = u32.GetDC(None)
+        large = (handle * 1)()
+        small = (handle * 1)()
+        if not sh32.ExtractIconExW(str(exe_path), 0, large, small, 1):
+            return None
+        hicon = large[0] or small[0]
+        if not hicon:
+            return None
+        if not u32.GetIconInfo(hicon, ctypes.byref(info)) or not info.hbmColor:
+            return None
+
+        bm = BITMAP()
+        if not g32.GetObjectW(info.hbmColor, ctypes.sizeof(bm),
+                              ctypes.byref(bm)):
+            return None
+        w, h, bpp = bm.bmWidth, bm.bmHeight, bm.bmBitsPixel
+        if not w or not h or not bpp:
+            return None
+
+        if bpp == 32:
+            data, stride = read_dib(hdc, info.hbmColor, w, h, 32)
+            if data is None:
+                return None
+            img = Image.frombytes("RGBA", (w, h), data, "raw", "BGRA", stride)
+        elif bpp == 24:
+            data, stride = read_dib(hdc, info.hbmColor, w, h, 24)
+            if data is None:
+                return None
+            img = Image.frombytes("RGB", (w, h), data, "raw", "BGR",
+                                  stride).convert("RGBA")
+        elif bpp in (1, 4):
+            # Pillow 的 raw 解码器只认每像素一个字节，1/4 位得自己拆
+            entries = palette_of(hdc, info.hbmColor, w, h, bpp)
+            data, stride = read_dib(hdc, info.hbmColor, w, h, bpp)
+            if data is None:
+                return None
+            per_byte = 8 // bpp
+            mask = (1 << bpp) - 1
+            unpacked = bytearray(w * h)
+            for y in range(h):
+                row = data[y * stride:(y + 1) * stride]
+                base = y * w
+                for x in range(w):
+                    byte = row[x // per_byte]
+                    shift = 8 - bpp * (x % per_byte + 1)
+                    unpacked[base + x] = (byte >> shift) & mask
+            img = Image.frombytes("P", (w, h), bytes(unpacked))
+            img.putpalette(palette_bytes(entries))
+            img = img.convert("RGBA")
+        elif bpp == 8:
+            entries = palette_of(hdc, info.hbmColor, w, h, 8)
+            data, stride = read_dib(hdc, info.hbmColor, w, h, 8)
+            if data is None:
+                return None
+            img = Image.frombytes("P", (w, h), data, "raw", "P", stride)
+            img.putpalette(palette_bytes(entries))
+            img = img.convert("RGBA")
+        else:
+            return None       # 16bpp 之类极其罕见，不值得为它写分支
+
+        # ★ 关键一步：alpha 全 0 说明透明度藏在 AND 蒙版里
+        if img.getchannel("A").getextrema()[1] == 0:
+            mb = BITMAP()
+            if not info.hbmMask or not g32.GetObjectW(
+                    info.hbmMask, ctypes.sizeof(mb), ctypes.byref(mb)):
+                return None
+            if mb.bmWidth != w or mb.bmHeight not in (h, 2 * h):
+                return None
+            mdata, mstride = read_dib(hdc, info.hbmMask, w, h, 1,
+                                      palette=(0x00000000, 0x00FFFFFF))
+            if mdata is None:
+                return None
+            alpha = bytearray(w * h)
+            for y in range(h):
+                row = mdata[y * mstride:(y + 1) * mstride]
+                base = y * w
+                for x in range(w):
+                    bit = (row[x >> 3] >> (7 - (x & 7))) & 1
+                    alpha[base + x] = 0 if bit else 255
+            img.putalpha(Image.frombytes("L", (w, h), bytes(alpha)))
+
+        if img.size != (size, size):
+            img = img.resize((size, size), Image.LANCZOS)
+        if img.getchannel("A").getextrema()[1] == 0:
+            # 推完蒙版还是全透明 —— 宁可让调用方走兜底，也不要一张看不见的图
+            return None
+        return img
+    finally:
+        if hdc is not None:
+            u32.ReleaseDC(None, hdc)
+        if info.hbmColor:
+            g32.DeleteObject(info.hbmColor)
+        if info.hbmMask:
+            g32.DeleteObject(info.hbmMask)
+        if hicon:
+            u32.DestroyIcon(hicon)
+
+
 def extract_exe_icon(exe_path: str, out_png: str, size: int = 48,
-                      cache_dir: Optional[Path] = None) -> bool:
+                     cache_dir: Optional[Path] = None) -> bool:
     """从 .exe/.dll 抽取图标保存为 PNG。
-    优先检查缓存，缓存命中直接复制；否则 ctypes 同步抽取，写入缓存永久保存。
-    ★ ctypes 优先（同步、<1秒），失败才回退 PowerShell。"""
+
+    顺序：内存负缓存 → 磁盘缓存（要验内容）→ ctypes 同步抽 → PowerShell 兜底。
+    两条抽取路径都必须保证「结果不是全透明」，否则宁可返回 False 让界面显示占位
+    底牌 —— 一张看不见的图比没有图更让人困惑。
+    """
     exe = Path(exe_path)
     if not exe.exists():
         return False
 
-    # ★ 确定缓存目录
     if cache_dir is None:
         try:
             cache_dir = exe.parent.parent.parent / "_图标"
         except Exception:
             cache_dir = exe.parent / "_图标"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        cache_dir = exe.parent
 
-    # ★ 检查缓存
+    # ★ 已知抽不到就别再抽了。没有这道闸，每次刷新网格都会为「本来就没有图标」
+    #   的 exe 重新跑一遍 PowerShell，一个 exe 一秒起，界面会明显发滞。
+    exe_stamp = _file_stamp(exe)
+    if exe_stamp in _icon_miss_cache:
+        return False
+
     cache_path = _get_icon_cache_path(exe_path, size, cache_dir)
-    if cache_path.exists() and cache_path.stat().st_size > 0:
+    if cache_path.exists():
+        if png_icon_is_usable(cache_path):
+            try:
+                Path(out_png).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cache_path, out_png)
+                return True
+            except Exception:
+                pass
+        else:
+            # 旧版本在 alpha 全 0 的图标上会存下一张全透明空图。这种坏缓存必须
+            # 删掉，否则每次都会命中它，图标永远出不来。
+            try:
+                cache_path.unlink()
+            except OSError:
+                pass
+
+    try:
+        Path(out_png).parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+
+    # ---- 方案 1：ctypes 同步抽取（<1 秒，无 PowerShell 启动开销）----
+    try:
+        img = _extract_icon_image(exe_path, size)
+    except Exception:
+        img = None
+    if img is not None:
         try:
-            Path(out_png).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(cache_path, out_png)
+            img.save(out_png, "PNG")
+            shutil.copy2(out_png, cache_path)
+            _usable_icon_cache.add(_file_stamp(cache_path))
             return True
         except Exception:
             pass
+    try:
+        Path(out_png).unlink(missing_ok=True)
+    except OSError:
+        pass
 
-    Path(out_png).parent.mkdir(parents=True, exist_ok=True)
-
-    # ---- 方案 1: ctypes 同步抽取（★ 优先，<1秒完成，无 PS 启动开销）----
-    if HAS_PIL and sys.platform.startswith("win"):
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            shell32 = ctypes.windll.shell32
-            shell32.ExtractIconExW.restype = wintypes.UINT
-            shell32.ExtractIconExW.argtypes = [
-                wintypes.LPCWSTR, wintypes.INT,
-                ctypes.POINTER(wintypes.HICON), ctypes.POINTER(wintypes.HICON),
-                wintypes.UINT
-            ]
-
-            large_icons = (wintypes.HICON * 1)()
-            small_icons = (wintypes.HICON * 1)()
-            n = shell32.ExtractIconExW(exe_path, 0, large_icons, small_icons, 1)
-            if n == 0:
-                raise RuntimeError("no icons")
-
-            hicon = large_icons[0]
-            if not hicon:
-                raise RuntimeError("hicon null")
-
-            gdi32 = ctypes.windll.gdi32
-            user32 = ctypes.windll.user32
-
-            class ICONINFO(ctypes.Structure):
-                _fields_ = [
-                    ("fIcon", wintypes.BOOL),
-                    ("xHotspot", wintypes.DWORD),
-                    ("yHotspot", wintypes.DWORD),
-                    ("hbmMask", wintypes.HBITMAP),
-                    ("hbmColor", wintypes.HBITMAP),
-                ]
-
-            info = ICONINFO()
-            if not user32.GetIconInfo(hicon, ctypes.byref(info)):
-                user32.DestroyIcon(hicon)
-                raise RuntimeError("GetIconInfo failed")
-
-            class BITMAP(ctypes.Structure):
-                _fields_ = [
-                    ("bmType", wintypes.LONG),
-                    ("bmWidth", wintypes.LONG),
-                    ("bmHeight", wintypes.LONG),
-                    ("bmWidthBytes", wintypes.LONG),
-                    ("bmPlanes", wintypes.WORD),
-                    ("bmBitsPixel", wintypes.WORD),
-                    ("bmBits", ctypes.c_void_p),
-                ]
-            bmp = BITMAP()
-            gdi32.GetObjectW(info.hbmColor, ctypes.sizeof(bmp), ctypes.byref(bmp))
-            w, h = bmp.bmWidth, bmp.bmHeight
-            if w == 0 or h == 0:
-                user32.DestroyIcon(hicon)
-                if info.hbmColor: gdi32.DeleteObject(info.hbmColor)
-                if info.hbmMask: gdi32.DeleteObject(info.hbmMask)
-                raise RuntimeError("zero size")
-
-            buf_len = w * h * 4
-            buf = (ctypes.c_ubyte * buf_len)()
-            gdi32.GetBitmapBits(info.hbmColor, buf_len, buf)
-
-            img = Image.frombuffer("RGBA", (w, h), bytes(buf), "raw", "BGRA", 0, 1)
-            if img.size != (size, size):
-                img = img.resize((size, size), Image.LANCZOS)
-            img.save(out_png, "PNG")
-
-            user32.DestroyIcon(hicon)
-            if info.hbmColor: gdi32.DeleteObject(info.hbmColor)
-            if info.hbmMask: gdi32.DeleteObject(info.hbmMask)
-
-            # ★ 保存到缓存（永久保存，下次直接用）
-            try:
-                shutil.copy2(out_png, cache_path)
-            except Exception:
-                pass
-            return True
-        except Exception:
-            # 走到 PowerShell 兑底
-            try:
-                Path(out_png).unlink(missing_ok=True)
-            except Exception:
-                pass
-
-    # ---- 方案 2: PowerShell + System.Drawing （兑底，案外锦上添花）----
+    # ---- 方案 2：PowerShell + System.Drawing（兜底）----
     if sys.platform.startswith("win"):
         try:
-            ps_script = (
-                f"Add-Type -AssemblyName System.Drawing; "
-                f"$icon = [System.Drawing.Icon]::ExtractAssociatedIcon('{exe_path}'); "
-                f"if ($icon) {{ "
-                f"  $bmp = $icon.ToBitmap(); "
-                f"  $bmp.Save('{out_png}', [System.Drawing.Imaging.ImageFormat]::Png); "
-                f"  $icon.Dispose(); $bmp.Dispose(); "
-                f"  exit 0 "
-                f"}} else {{ exit 1 }}"
-            )
-            r = subprocess.run(
+            ps_script = _PS_ICON_SCRIPT.format(
+                path=str(exe_path).replace("'", "''"),
+                out=str(out_png).replace("'", "''"))
+            result = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-NonInteractive",
-                  "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-                capture_output=True, timeout=15
-            )
-            if r.returncode == 0 and Path(out_png).exists() and Path(out_png).stat().st_size > 0:
+                 "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+                capture_output=True, timeout=15)
+            if result.returncode == 0 and png_icon_is_usable(out_png):
                 if HAS_PIL:
                     try:
                         img = Image.open(out_png)
@@ -340,12 +561,18 @@ def extract_exe_icon(exe_path: str, out_png: str, size: int = 48,
                         pass
                 try:
                     shutil.copy2(out_png, cache_path)
+                    _usable_icon_cache.add(_file_stamp(cache_path))
                 except Exception:
                     pass
                 return True
         except Exception:
             pass
 
+    try:
+        Path(out_png).unlink(missing_ok=True)
+    except OSError:
+        pass
+    _icon_miss_cache.add(exe_stamp)
     return False
 
 
@@ -379,6 +606,7 @@ class ToolsPage(ttk.Frame):
         self.icon_widgets: dict[int, tk.Frame] = {}
         self.icon_subwidgets: dict[int, tuple] = {}
         self._star_labels: dict[int, tk.Label] = {}
+        self._placeholder_cache: dict = {}      # (首字, 尺寸) → 无图标占位底牌
         # 按像素量文字用的字体对象：中英混排时「数几个字符」完全不准
         self._name_font = tkfont.Font(family="Microsoft YaHei", size=9)
         self._hint_font = tkfont.Font(family="Microsoft YaHei", size=8)
@@ -650,36 +878,20 @@ class ToolsPage(ttk.Frame):
         self.after(80, self._focus_search)
 
     def _build_top_bar(self):
-        """顶部命令条：一个长搜索框 + 右侧包选择 / 动作按钮。
+        """顶部命令条：一条长搜索框 + 右边一组轻量动作。
 
         旧版把「包」「搜索」各占一行，后面再挂一排 emoji 按钮（✎ 🔍 🧹 📁 ⚙），
         占掉两行高度却没有任何明确的输入焦点，进页面还得先点一下搜索框。
         现在压成一行：左边直接就能打字，右边是需要时才去点的动作。
+
+        动作按钮走 Toolbar.TButton —— 常态只看得到文字、悬停才浮出一层浅底。
+        一排实心灰底按钮压在白色页面上又重又硬，还会跟搜索框抢视觉焦点。
         """
         bar = create_page_toolbar(self, padding=(24, 16, 24, 6))
         self._command_bar = bar
 
-        # ---- 左：搜索（占满剩余宽度）----
-        self.search_var = tk.StringVar()
-        self.search_entry = ttk.Entry(bar, textvariable=self.search_var, width=46)
-        self.search_entry.pack(side="left", ipady=3)
-        self.search_entry.bind("<FocusIn>", self._on_search_focus_in)
-        self.search_entry.bind("<FocusOut>", self._on_search_focus_out)
-        self.search_entry.bind("<Down>", lambda e: self._move_cursor(1))
-        self.search_entry.bind("<Up>", lambda e: self._move_cursor(-1))
-        self.search_entry.bind("<Return>", self._on_search_enter)
-        self.search_entry.bind("<Escape>", lambda e: self._clear_search())
-        self.search_entry.bind("<Control-a>", self._select_all_search)
-        self.search_var.trace_add("write", lambda *_: self._on_search_changed())
-
-        ttk.Button(bar, text="清空", style="Quiet.TButton", width=0,
-                   command=self._clear_search).pack(side="left", padx=(8, 0))
-
-        # 常显的快捷键提示：占位文案一聚焦就消失，这些得一直看得见
-        ttk.Label(bar, text="↑↓ 选择 · 回车启动 · Esc 清空",
-                  style="Muted.TLabel").pack(side="left", padx=(12, 0))
-
-        # ---- 右：包 + 动作 ----
+        # 先把右侧动作组放好，搜索框最后 pack 并 expand，让它自己吃掉中间的空白；
+        # 原来写死 46 个字符宽，右边反而空出一大片。
         right = ttk.Frame(bar)
         right.pack(side="right")
 
@@ -692,10 +904,10 @@ class ToolsPage(ttk.Frame):
 
         # 包标识色块：点一下改色（一眼看出当前在哪个套件）
         self._package_swatch = tk.Frame(right, width=12, height=12, bg=COLOR_MUTED,
-                                       highlightthickness=1,
-                                       highlightbackground=COLOR_BORDER_LIGHT,
-                                       cursor="hand2")
-        self._package_swatch.pack(side="left", padx=(2, 10))
+                                        highlightthickness=1,
+                                        highlightbackground=COLOR_BORDER_LIGHT,
+                                        cursor="hand2")
+        self._package_swatch.pack(side="left", padx=(2, 12))
         self._package_swatch.bind("<Button-1>", lambda e: self._on_package_swatch_click())
 
         add_toolbar_buttons(right, [
@@ -704,7 +916,27 @@ class ToolsPage(ttk.Frame):
             ("扫描目录", self._initial_scan),
             ("打开目录", self._open_tools_folder),
             ("设置", self._show_settings),
-        ])
+        ], style="Toolbar.TButton")
+
+        # ---- 搜索（吃掉剩余宽度）----
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(bar, textvariable=self.search_var)
+        self.search_entry.pack(side="left", fill="x", expand=True, ipady=3)
+        self.search_entry.bind("<FocusIn>", self._on_search_focus_in)
+        self.search_entry.bind("<FocusOut>", self._on_search_focus_out)
+        self.search_entry.bind("<Down>", lambda e: self._move_cursor(1))
+        self.search_entry.bind("<Up>", lambda e: self._move_cursor(-1))
+        self.search_entry.bind("<Return>", lambda e: self._on_search_enter())
+        self.search_entry.bind("<Escape>", lambda e: self._clear_search())
+        self.search_entry.bind("<Control-a>", self._select_all_search)
+        self.search_var.trace_add("write", lambda *_: self._on_search_changed())
+
+        ttk.Button(bar, text="清空", style="Toolbar.TButton", width=0,
+                   command=self._clear_search).pack(side="left", padx=(6, 0))
+
+        # 常显的快捷键提示：占位文案一聚焦就消失，这些得一直看得见
+        ttk.Label(bar, text="↑↓ 选择 · 回车启动 · Esc 清空",
+                  style="Muted.TLabel").pack(side="left", padx=(10, 0))
 
     # ------------------------------------------------------------------
     # 搜索框（启动器主入口）
@@ -818,13 +1050,20 @@ class ToolsPage(ttk.Frame):
             self._cat_scroll.pack_forget()
 
     def _create_category_chip(self, name: str, count: int, category_id=None):
-        """一颗分类 chip。选中态用实心黑底白字，而不是原来的「凹陷边框」。"""
+        """一颗分类胶囊：圆角、常态浅灰、选中近黑底白字。
+
+        改用自绘的 RoundedChip —— tk.Label 是硬边矩形，摆一排就是「硬」；
+        而且 Canvas 之外的控件默认带 1px 的 highlightthickness，
+        会在每颗胶囊外面再套一圈边框，正是「按钮很硬」的来源之一。
+        """
         active = (name == self.current_category)
-        chip = tk.Label(
-            self.category_container, text=f"{name} {count}",
-            bg=COLOR_ACCENT if active else COLOR_CARD_HOVER,
-            fg=COLOR_ACCENT_TEXT if active else COLOR_TEXT,
-            font=("Microsoft YaHei", 9), padx=10, pady=3, cursor="hand2")
+        chip = RoundedChip(
+            self.category_container, f"{name} {count}",
+            canvas_bg=COLOR_BG,
+            bg=COLOR_CARD_HOVER, fg=COLOR_TEXT,
+            hover_bg=COLOR_BORDER_LIGHT, hover_fg=COLOR_TEXT,
+            active_bg=COLOR_ACCENT, active_fg=COLOR_ACCENT_TEXT,
+            active=active, font=("Microsoft YaHei", 9))
         chip.pack(side="left", padx=(0, 6), pady=1)
 
         chip.bind("<Button-1>", lambda e, n=name: self._switch_category(n))
@@ -832,17 +1071,6 @@ class ToolsPage(ttk.Frame):
             chip.bind("<Button-3>", lambda e, cid=category_id, n=name:
                       self._show_category_menu(e, cid, n))
             self._make_category_drop_target(chip, category_id, name)
-
-        def paint(widget, hover, category_name=name):
-            # 必须用闭包里的分类名判断选中态：从 chip 文案里 split(" ") 取名字，
-            # 遇到「ADB 工具」这种带空格的分类会取成 "ADB"，选中态会被 hover 涂掉
-            is_active = (category_name == self.current_category)
-            widget.configure(bg=(COLOR_ACCENT if is_active else
-                                 (COLOR_BORDER_LIGHT if hover else COLOR_CARD_HOVER)))
-
-        chip.bind("<Enter>", lambda e, c=chip, n=name: paint(
-            c, n != self.current_category))
-        chip.bind("<Leave>", lambda e, c=chip: paint(c, False))
 
         self.category_buttons.append(chip)
         self._category_chips[name] = chip
@@ -880,6 +1108,7 @@ class ToolsPage(ttk.Frame):
             self._build_strip_row("最近", recents)
 
     def _build_strip_row(self, title, items):
+        """一条快捷横条（收藏 / 最近）。单击即启动，悬停变近黑底作强提示。"""
         row = tk.Frame(self._strips_frame, bg=COLOR_BG)
         row.pack(fill="x", pady=(0, 2))
         tk.Label(row, text=title, bg=COLOR_BG, fg=COLOR_MUTED,
@@ -888,15 +1117,16 @@ class ToolsPage(ttk.Frame):
             tid = launcher.tool_id(tool)
             if tid is None:
                 continue
-            chip = tk.Label(row, text=launcher.strip_label(tool), bg=COLOR_CARD_HOVER,
-                            fg=COLOR_TEXT, font=("Microsoft YaHei", 9),
-                            padx=8, pady=2, cursor="hand2")
+            chip = RoundedChip(
+                row, launcher.strip_label(tool), canvas_bg=COLOR_BG,
+                bg=COLOR_CARD_HOVER, fg=COLOR_TEXT,
+                hover_bg=COLOR_ACCENT, hover_fg=COLOR_ACCENT_TEXT,
+                active_bg=COLOR_ACCENT, active_fg=COLOR_ACCENT_TEXT,
+                padx=9, pady=3, font=("Microsoft YaHei", 9),
+                command=lambda i=tid: self._run_tool_by_id(i))
             chip.pack(side="left", padx=(0, 6))
             # 单击即启动 —— 横条存在的意义就是「一下点开」，不做二次确认
-            chip.bind("<Button-1>", lambda e, i=tid: self._run_tool_by_id(i))
             chip.bind("<Button-3>", lambda e, i=tid: self._show_tool_menu(e, i))
-            chip.bind("<Enter>", lambda e, c=chip: c.configure(bg=COLOR_BORDER_LIGHT))
-            chip.bind("<Leave>", lambda e, c=chip: c.configure(bg=COLOR_CARD_HOVER))
 
     # ------------------------------------------------------------------
     # 状态条
@@ -1379,14 +1609,12 @@ class ToolsPage(ttk.Frame):
                 messagebox.showerror("错误", f"设置失败：{e}", parent=self)
 
     def _switch_category(self, name: str):
-        """切分类：只重涂 chip（不重建），再刷新网格。"""
+        """切分类：只重涂胶囊，不重建（重建会闪，也会丢掉横向滚动位置）。"""
         if name == self.current_category:
             return
         self.current_category = name
         for category_name, chip in self._category_chips.items():
-            active = (category_name == name)
-            chip.configure(bg=COLOR_ACCENT if active else COLOR_CARD_HOVER,
-                           fg=COLOR_ACCENT_TEXT if active else COLOR_TEXT)
+            chip.set_active(category_name == name)
         self._refresh_grid()
 
     def _refresh_grid(self):
@@ -1667,54 +1895,60 @@ class ToolsPage(ttk.Frame):
             pass
 
     def _load_tool_icon(self, tool: dict, label: tk.Label):
-        """加载工具图标：
-        1) 优先用数据库 icon_path（绝对路径直接用，相对路径基于 tools_dir）
-        2) 缺失则从 _图标/ 缓存查找（按 exe hash）
-        3) ★ 都没有则同步抽取一次（ctypes 方案，<1秒；仅 .exe）
-        4) 全部失败才显示占位
+        """加载工具图标。
+
+        1) 数据库 icon_path（绝对路径直接用，相对路径基于 tools_dir）
+        2) 缓存目录 _图标/ 里按 exe hash 找
+        3) 都没有就同步抽一次（仅 .exe）
+        4) 全失败 → 显示「首字底牌」
+
+        每一层都用 png_icon_is_usable 而不是 exists()：旧版本会把全透明的空图
+        当成「抽好了」写进 DB，此时文件确实存在，图标却什么都看不见。
+        这种坏数据要能被识别出来并重新抽，而不是一直摆在那儿。
         """
         icon_path = (tool.get("icon_path") or "").strip()
 
-        # ★ 路径解析：相对路径转为基于 tools_dir 的绝对路径
         if icon_path:
             p = Path(icon_path)
             if not p.is_absolute():
                 p = self.tools_dir / icon_path
             icon_path = str(p)
 
-        # ★ 数据库路径不存在 → 从缓存目录查找
-        if not icon_path or not Path(icon_path).exists():
+        if icon_path and not png_icon_is_usable(icon_path):
+            icon_path = ""
+
+        # ---- 兜底 1：缓存目录里按 exe hash 找 ----
+        if not icon_path:
             exe_path = tool.get("path", "")
             if exe_path:
                 if not Path(exe_path).is_absolute():
                     exe_path = str(self.tools_dir / exe_path)
                 cache_path = self._get_icon_cache_path(exe_path, self.icon_size)
-                if cache_path.exists() and cache_path.stat().st_size > 0:
+                if png_icon_is_usable(cache_path):
                     icon_path = str(cache_path)
-                    # ★ 顺手修复 DB：写回绝对路径，下次不再走兑底
+                    # 顺手修 DB：写回可用路径，下次不再走兜底
                     if tool.get("id"):
                         try:
-                            tools_db.update_tool(self.db, tool["id"], icon_path=icon_path)
+                            tools_db.update_tool(self.db, tool["id"],
+                                                 icon_path=icon_path)
                         except Exception:
                             pass
 
-        # ★ 依然没有图标 → 尝试同步抽取一次（仅 .exe，ctypes 方案 <1秒）
-        if not icon_path or not Path(icon_path).exists():
+        # ---- 兜底 2：现抽一次（仅 .exe；延迟 100ms 不挡首屏）----
+        if not icon_path:
             exe_path = tool.get("path", "")
             if exe_path:
                 if not Path(exe_path).is_absolute():
                     exe_path = str(self.tools_dir / exe_path)
                 exe_p = Path(exe_path)
                 if exe_p.exists() and exe_p.suffix.lower() == ".exe":
-                    # ★ 延迟 100ms 后异步抽取（不影响初始渲染）
-                    label.after(100, lambda t=tool, l=label: self._async_extract_icon(t, l))
+                    label.after(100, lambda t=tool, l=label:
+                                self._async_extract_icon(t, l))
 
-        # 没有图标 → 显示占位
-        if not icon_path or not Path(icon_path).exists():
-            label.configure(text="⚙", font=("Segoe UI Emoji", 22), image="")
+        if not icon_path:
+            self._set_placeholder_icon(tool, label)
             return
 
-        # 加载缓存（Windows 原生风格：透明背景、保持比例）
         cache_key = f"{icon_path}_native_{self.icon_size}"
         if cache_key in self.icon_cache:
             img = self.icon_cache[cache_key]
@@ -1723,9 +1957,13 @@ class ToolsPage(ttk.Frame):
             if HAS_PIL:
                 try:
                     pil = Image.open(icon_path)
-                    # ★ Windows 原生图标风格（透明背景、保持比例）
+                    # Windows 原生图标风格（透明背景、保持比例）
                     pil = _make_native_icon(pil, self.icon_size)
-                    img = ImageTk.PhotoImage(pil)
+                    # ★ 显式绑 master：不传的话 ImageTk 取的是 tkinter._default_root，
+                    #   而那个 root 未必是这张 label 所在的解释器（例如别的模块调过
+                    #   ttk.Style()，它会偷偷造一个 root 并占住默认位），
+                    #   结果就是 image "pyimage1" doesn't exist。
+                    img = ImageTk.PhotoImage(pil, master=label)
                 except Exception:
                     img = None
             self.icon_cache[cache_key] = img
@@ -1734,9 +1972,36 @@ class ToolsPage(ttk.Frame):
             label.configure(image=img, text="")
             label.image = img
         else:
-            label.configure(text="⚙", font=("Segoe UI Emoji", 22), image="")
+            self._set_placeholder_icon(tool, label)
 
-    # ★ 快速启动栏已移除
+    def _set_placeholder_icon(self, tool: dict, label: tk.Label):
+        """没有图标时给一张「首字底牌」。
+
+        以前这里放的是一个 ⚙ emoji：与全项目的线性图标语言不一致，而且一屏几十个
+        一模一样的齿轮根本没法扫读。换成带首字的圆角底牌后，既能靠字形认人，
+        也能一眼看出「这个工具确实没有图标」而不是「程序抽图标坏了」。
+
+        按「首字 + 尺寸」缓存：同一批无图标工具复用同一张位图，不必反复渲染。
+        """
+        name = (tool.get("name") or "?").strip() or "?"
+        key = (name[:1].upper(), self.icon_size)
+        photo = self._placeholder_cache.get(key, "miss")
+        if photo == "miss":
+            photo = None
+            if HAS_PIL:
+                try:
+                    photo = ImageTk.PhotoImage(
+                        app_icons.letter_tile(name, self.icon_size),
+                        master=label)
+                except Exception:
+                    photo = None
+            self._placeholder_cache[key] = photo
+        if photo is not None:
+            label.configure(image=photo, text="")
+            label.image = photo     # 必须持有引用，否则被 GC 回收后图变空白
+        else:
+            label.configure(image="", text=name[:1].upper(),
+                            font=("Microsoft YaHei", 16), fg=COLOR_MUTED)
 
     # ------------------------------------------------------------------
     # 选中 / 编辑
@@ -1802,7 +2067,7 @@ class ToolsPage(ttk.Frame):
         try:
             pil = Image.open(icon_path)
             pil = pil.resize((64, 64), Image.LANCZOS)
-            img = ImageTk.PhotoImage(pil)
+            img = ImageTk.PhotoImage(pil, master=self.icon_preview_label)
             self.icon_preview_label.configure(image=img, text="")
             self.icon_preview_label.image = img
         except Exception:
@@ -2245,35 +2510,33 @@ class ToolsPage(ttk.Frame):
             target = target.master
 
     def _make_category_drop_target(self, widget, category_id: int, category_name: str):
-        """把分类按钮注册为 drop target：拖动工具到该分类上可改变分类"""
+        """把分类胶囊注册为 drop target：拖动工具到该分类上即改变分类。
+
+        旧实现在 <Enter>/<Leave> 里 `configure(style="Accent.TButton")` 做高亮 ——
+        那是 ttk.Button 才有的选项，落在 tk.Label 上会抛 TclError 再被静默吞掉，
+        等于完全没有反馈。现在统一走组件自己的拖放高亮状态。
+        """
         widget._drop_kind = "category"
         widget._drop_cat_id = category_id
         widget._drop_cat_name = category_name
 
-        def on_enter(e, w=widget):
-            try:
-                # 高亮该分类（主色边框 + 浅蓝背景）
-                w.configure(style="Accent.TButton")
-            except tk.TclError:
-                pass
-        def on_leave(e, w=widget):
-            try:
-                w.configure(style="TButton")
-            except tk.TclError:
-                pass
-        widget.bind("<Enter>", on_enter, add="+")
-        widget.bind("<Leave>", on_leave, add="+")
-        # ★ 注册 drop target（拖入 .exe/目录→预填分类后打开 AddToolDialog）
         if HAS_TKDND and DND_FILES:
             try:
                 widget.drop_target_register(DND_FILES)
-                widget.dnd_bind("<<Drop>>", lambda e, n=category_name: self._on_drop_files(e, prefill_category=n))
+                widget.dnd_bind("<<Drop>>", lambda e, n=category_name:
+                                self._on_drop_files(e, prefill_category=n))
+                if hasattr(widget, "set_drop_highlight"):
+                    widget.dnd_bind("<<DropEnter>>", lambda e, w=widget:
+                                    w.set_drop_highlight(True))
+                    widget.dnd_bind("<<DropLeave>>", lambda e, w=widget:
+                                    w.set_drop_highlight(False))
             except Exception:
                 pass
 
     # ------------------------------------------------------------------
     # 面板空白处右键菜单
     # ------------------------------------------------------------------
+
     def _on_panel_right_click(self, event):
         """图标面板空白处右键 → 弹菜单（添加/查看/排序/操作）"""
         # 仅在 panel 空白处触发（不在 icon 上）

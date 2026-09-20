@@ -543,6 +543,32 @@ class ThemeManager:
         style.configure("Accent.TButton", background=palette.surface_alt, foreground=palette.accent)
         style.map("Accent.TButton", background=[("active", palette.button_hover), ("!disabled", palette.surface_alt)])
 
+        # 工具栏动作：默认「看不见按钮、只看得到文字」，悬停才浮出一层浅底。
+        # 一排实心灰底按钮压在白色页面上又重又硬，还抢搜索框的视觉焦点；
+        # 这与顶栏动作的处理保持一致。clam 会画 1px 描边，所以把
+        # bordercolor / lightcolor / darkcolor 一起设成页面底色才能真正抹平。
+        style.configure(
+            "Toolbar.TButton",
+            background=palette.bg,
+            foreground=palette.text_secondary,
+            borderwidth=0,
+            relief="flat",
+            focusthickness=0,
+            focuscolor=palette.bg,
+            bordercolor=palette.bg,
+            lightcolor=palette.bg,
+            darkcolor=palette.bg,
+            padding=(12, 6),
+            font=self.typography.body,
+        )
+        style.map(
+            "Toolbar.TButton",
+            background=[("active", palette.surface_alt),
+                        ("pressed", palette.button_pressed)],
+            foreground=[("active", palette.text_primary),
+                        ("pressed", palette.text_primary)],
+        )
+
 
 TYPOGRAPHY = Typography()
 THEME = ThemeManager(TYPOGRAPHY)
