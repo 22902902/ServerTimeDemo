@@ -5,9 +5,8 @@
 ===============================================================================
 - 顶部：包下拉（增删改）+ 搜索 + 设置 + 打开 Tools
 - 分类栏：[+ 分类] 按钮 + 右键编辑/删除（带工具数检查）
-- 主区：网格状工具图标（自动从 .exe 抽图标，存到 _icons/）
+- 主区：四种排列（图标 / 文件夹 / 卡片 / 列表），在分类栏右端切换
 - 右侧：编辑面板（显示相对路径）
-- 页面右上角：上下滚动按钮（▲/▼）绑定到图标面板
 - 整个页面：支持拖入 .exe 快速添加工具
 ===============================================================================
 """
@@ -30,7 +29,7 @@ import tools_db
 import tools_launcher as launcher
 from dialog_form_style import apply_dialog_form_style, create_form_checkbutton, create_form_entry, create_form_frame, create_form_label
 from page_components import add_toolbar_buttons, create_page_toolbar, create_status_bar
-from ui_components import RoundedChip
+from ui_components import HoverTooltip, RoundedChip
 from ui_theme import PACKAGE_ACCENT_COLORS, THEME, TOOLBOX_PALETTE
 
 # ★ tkdnd 拖拽支持（全局导入，确保打包包含）
@@ -81,6 +80,28 @@ CARD_HINT_MAX = 11       # 副标题最大字符数
 FAVORITE_LIMIT = 8       # 收藏横条最多显示几个
 RECENT_LIMIT = 8         # 最近使用横条最多显示几个
 LABEL_VPAD = 6           # tk.Label 单行 reqheight 比 linespace 多的那 6px（实测）
+
+# ---- 四种排列 ----
+# 键必须是稳定的英文标识（会写进 DB 设置），中文只是显示名
+VIEW_MODES = (
+    ("icon", "图标"),
+    ("folder", "文件夹"),
+    ("card", "卡片"),
+    ("list", "列表"),
+)
+VIEW_MODE_KEYS = tuple(key for key, _ in VIEW_MODES)
+DEFAULT_VIEW_MODE = "card"      # 保持既有用户看到的还是原来那套
+
+# 格子尺寸（不含格子之间的间距）
+ICON_TILE_PAD = 6        # 图标模式：留一点余量，悬停高亮才不会贴着图标边缘
+ICON_TILE_GAP = 4        # 「两个图标间距不需要太大」
+FOLDER_TILE_MIN_W = 84   # 文件夹模式：够放两行名字
+FOLDER_TILE_GAP = 8
+LIST_ROW_ICON = 32       # 列表里图标小一号，行高才压得住
+LIST_ROW_H = 38
+
+# 自动列数在窗口还没映射（canvas 宽度 =1）时的兜底值
+FALLBACK_COLS = {"icon": 8, "folder": 6, "list": 1}
 
 
 def apply_tool_dialog_theme(window):
@@ -611,6 +632,14 @@ class ToolsPage(ttk.Frame):
         self.icon_subwidgets: dict[int, tuple] = {}
         self._star_labels: dict[int, tk.Label] = {}
         self._placeholder_cache: dict = {}      # (首字, 尺寸) → 无图标占位底牌
+        # ★ 排列模式
+        self.view_mode: str = DEFAULT_VIEW_MODE
+        self._view_chips: dict[str, RoundedChip] = {}
+        self._grid_cols_now: int = 0            # 上一次渲染用的列数，用于判断要不要重排
+        self._relayout_job = None               # 窗口缩放防抖
+        self._tooltips: list[HoverTooltip] = []  # 重建网格时统一销毁
+        # 图标模式下「图标 + 角标」的容器，_paint_card 要连它一起重涂
+        self._icon_holders: dict[int, tk.Frame] = {}
         # 按像素量文字用的字体对象：中英混排时「数几个字符」完全不准
         self._name_font = tkfont.Font(family="Microsoft YaHei", size=9)
         self._hint_font = tkfont.Font(family="Microsoft YaHei", size=8)
@@ -846,6 +875,10 @@ class ToolsPage(ttk.Frame):
         except ValueError:
             self.grid_cols = 6
 
+        # ★ 排列模式：认不出来就退回默认，别因为一个坏值让页面开不出来
+        stored_mode = (s.get("view_mode") or "").strip()
+        self.view_mode = stored_mode if stored_mode in VIEW_MODE_KEYS else DEFAULT_VIEW_MODE
+
         # 加载包
         pkgs = tools_db.list_packages(self.db)
         self.packages = [p["name"] for p in pkgs]
@@ -1019,9 +1052,18 @@ class ToolsPage(ttk.Frame):
         bar.pack(fill="x")
         self._category_bar = bar
 
-        self._cat_canvas = tk.Canvas(bar, bg=COLOR_BG, highlightthickness=0, height=26)
+        # 视图切换器先 pack 到右侧：它必须固定住，不能跟着分类横向滚动跑掉。
+        # 放在分类同一行是因为这一行本来就有富余高度，另起一行只为放四个小按钮太浪费。
+        self._build_view_switcher(bar)
+
+        # 分类走独立子框，横向滚动条只影响它自己
+        cat_area = tk.Frame(bar, bg=COLOR_BG)
+        cat_area.pack(side="left", fill="x", expand=True)
+        self._cat_area = cat_area
+
+        self._cat_canvas = tk.Canvas(cat_area, bg=COLOR_BG, highlightthickness=0, height=26)
         self._cat_canvas.pack(fill="x", expand=True)
-        self._cat_scroll = ttk.Scrollbar(bar, orient="horizontal",
+        self._cat_scroll = ttk.Scrollbar(cat_area, orient="horizontal",
                                           command=self._cat_canvas.xview)
         self._cat_canvas.configure(xscrollcommand=self._cat_scroll.set)
 
@@ -1032,6 +1074,43 @@ class ToolsPage(ttk.Frame):
 
         self.category_buttons: list[tk.Label] = []
         self._category_chips: dict[str, tk.Label] = {}
+
+    def _build_view_switcher(self, parent):
+        """分类栏右端的排列切换器。
+
+        四种排列共用同一份数据与同一套快捷键，只是「一格画成什么」不同，
+        所以切换器只是一排互斥的小胶囊，不需要下拉或弹窗。
+        先建好再由 _set_view_mode 统一点亮，避免初始状态和实际渲染不一致。
+        """
+        wrap = tk.Frame(parent, bg=COLOR_BG)
+        wrap.pack(side="right", padx=(16, 0))
+        self._view_switcher = wrap
+
+        tk.Label(wrap, text="视图", bg=COLOR_BG, fg=COLOR_MUTED,
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 6))
+        for key, label in VIEW_MODES:
+            chip = RoundedChip(
+                wrap, label, canvas_bg=COLOR_BG,
+                bg=COLOR_BG, fg=COLOR_MUTED,
+                hover_bg=COLOR_CHIP_BG, hover_fg=COLOR_TEXT,
+                active_bg=COLOR_ACCENT, active_fg=COLOR_ACCENT_TEXT,
+                active=(key == self.view_mode),
+                padx=9, pady=2, font=("Microsoft YaHei", 9),
+                command=lambda k=key: self._set_view_mode(k))
+            chip.pack(side="left", padx=(0, 4))
+            self._view_chips[key] = chip
+
+    def _set_view_mode(self, mode: str):
+        """切排列：记到设置里，下次打开还是这个排列。"""
+        if mode not in VIEW_MODE_KEYS:
+            return
+        changed = (mode != self.view_mode)
+        self.view_mode = mode
+        for key, chip in self._view_chips.items():
+            chip.set_active(key == mode)
+        if changed:
+            tools_db.set_setting(self.db, "view_mode", mode)
+            self._refresh_grid()
 
     def _on_category_layout(self):
         bbox = self._cat_canvas.bbox("all")
@@ -1241,8 +1320,8 @@ class ToolsPage(ttk.Frame):
         self.grid_frame.bind("<Button-3>", self._on_panel_right_click)
         self.canvas.bind("<Button-3>", lambda e: self._on_panel_right_click(e)
                          if e.widget == self.canvas else None)
-        self.canvas.bind("<Configure>",
-                          lambda e: self.canvas.itemconfigure(self.canvas_window, width=e.width))
+        # 除了让内层 Frame 跟着变宽，还要在图标/文件夹排列下重算能放几格
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
         # 滚轮只在指针进入网格时才接管：原来裸 bind_all，在右侧编辑面板的文本框里
         # 滚动时滚的其实是背后的网格，很难受
         self.canvas.bind("<Enter>",
@@ -1625,16 +1704,24 @@ class ToolsPage(ttk.Frame):
         self._refresh_grid()
 
     def _refresh_grid(self):
-        """重建网格：按包拉全量 → 按分类过滤 → 按关键词模糊排序。
+        """重建当前排列：按包拉全量 → 按分类过滤 → 按关键词模糊排序。
 
         关键词过滤交给 tools_launcher.rank_tools，不用 SQL LIKE：
         否则 "dkgn" 这种子序列输入在 SQL 层就直接返回 0 条了。
+
+        四种排列共用这一份数据与排序结果，分派出去的只是「一格画成什么」，
+        不是整套渲染流程 —— 否则搜索、键盘光标、滚动定位都要各写四遍。
         """
         for child in self.grid_frame.winfo_children():
             child.destroy()
+        # 浮层是独立 Toplevel，不随父控件销毁，必须显式收拾
+        for tip in self._tooltips:
+            tip.destroy()
+        self._tooltips = []
         self.icon_widgets = {}
         self.icon_subwidgets = {}
         self._star_labels = {}
+        self._icon_holders = {}
         self._cursor_tool_id = None
         self._hover_tool_id = None
         # ★ 同步顶部色块（包切换、设置色后与卡片色条同步）
@@ -1651,17 +1738,25 @@ class ToolsPage(ttk.Frame):
         self._visible_tools = matched
         hints = launcher.compute_hints(self._all_tools)
 
+        cols = self._grid_columns()
+        # grid 的 columnconfigure 是持久化的：从 21 列的图标排列切到单列列表时，
+        # 残留的 weight 会把那唯一一列压成 1/21 宽。所以每轮先把旧列权重归零。
+        self._reset_grid_columns(max(self._grid_cols_now, cols))
+        self._grid_cols_now = cols if matched else 0
+
         if not matched:
             self._render_empty_state(keyword)
         else:
-            cols = max(int(self.grid_cols), 1)
-            # uniform 让每列等宽 —— 否则一行里长名字的卡片会把短名字的挤扁
+            builder = self._cell_builder()
+            gap_x, gap_y = self._cell_gap()
+            # uniform 让每列等宽 —— 否则一行里长名字的格子会把短名字的挤扁
+            uniform = f"tool{self.view_mode}"
             for col in range(cols):
-                self.grid_frame.columnconfigure(col, weight=1, uniform="toolcard")
+                self.grid_frame.columnconfigure(col, weight=1, uniform=uniform)
             for index, tool in enumerate(matched):
                 row, col = divmod(index, cols)
-                self._create_icon_card(self.grid_frame, tool, row, col,
-                                        hint=hints.get(launcher.tool_id(tool), ""))
+                builder(self.grid_frame, tool, row, col,
+                        hint=hints.get(launcher.tool_id(tool), ""))
             # 搜完自动把光标落在第一条命中上 —— 接着按回车就能启动
             if keyword:
                 first = launcher.tool_id(matched[0])
@@ -1671,6 +1766,316 @@ class ToolsPage(ttk.Frame):
         self._refresh_strips(self._all_tools)
         self._update_status(self._all_tools, matched, keyword,
                             extra=self._cursor_label())
+
+    # ------------------------------------------------------------------
+    # 排列：格子尺寸 / 列数 / 分派
+    # ------------------------------------------------------------------
+
+    def _cell_builder(self):
+        return {
+            "icon": self._create_icon_tile,
+            "folder": self._create_folder_tile,
+            "card": self._create_icon_card,
+            "list": self._create_list_row,
+        }.get(self.view_mode, self._create_icon_card)
+
+    def _tile_size(self):
+        """(格子宽, 格子高)。
+
+        图标排列是正方形；文件夹排列得给下方名字留两行高度 ——
+        漏掉这个高度名字第二行会被切掉（tk.Label 单行 reqheight 比
+        linespace 还多 6px，见 LABEL_VPAD）。
+        """
+        if self.view_mode == "folder":
+            width = max(self.icon_size + 2 * ICON_TILE_PAD, FOLDER_TILE_MIN_W)
+            name_h = 2 * self._name_font.metrics("linespace") + LABEL_VPAD
+            return width, 2 * ICON_TILE_PAD + self.icon_size + 2 + name_h
+        side = self.icon_size + 2 * ICON_TILE_PAD
+        return side, side
+
+    def _cell_gap(self):
+        if self.view_mode == "list":
+            return 0, 1
+        if self.view_mode == "folder":
+            return FOLDER_TILE_GAP, FOLDER_TILE_GAP
+        return ICON_TILE_GAP, ICON_TILE_GAP
+
+    def _available_grid_width(self) -> int:
+        """网格可用宽度。窗口还没映射时宽度是 1，返回 0 让调用方走兜底值。"""
+        width = 0
+        for widget in (self.canvas, self):
+            try:
+                width = widget.winfo_width()
+            except tk.TclError:
+                width = 0
+            if width > 1:
+                break
+        if width <= 1:
+            return 0
+        return max(width - 16, 1)       # grid_frame 自身左右各 8px 内边距
+
+    def _grid_columns(self) -> int:
+        """这一行放几格。
+
+        卡片排列沿用设置里的固定列数（用户可能已经调过）。
+        图标/文件夹排列按格子尺寸铺满可用宽度 —— 固定列数在宽屏上右边
+        会空一大片，窄屏上又会溢出；这两种排列本来就没名字，列数跟着窗口
+        走才自然。
+        """
+        if self.view_mode == "list":
+            return 1
+        if self.view_mode == "card":
+            return max(int(self.grid_cols), 1)
+        avail = self._available_grid_width()
+        if avail <= 0:
+            return FALLBACK_COLS.get(self.view_mode, 6)
+        cell_w, _ = self._tile_size()
+        gap_x, _ = self._cell_gap()
+        return max(1, (avail + gap_x) // max(cell_w + gap_x, 1))
+
+    def _reset_grid_columns(self, count: int):
+        """把上一轮用过的列权重清掉（见 _refresh_grid 里的说明）。"""
+        for col in range(max(int(count), 0) + 1):
+            try:
+                self.grid_frame.columnconfigure(col, weight=0, uniform="")
+            except tk.TclError:
+                return
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfigure(self.canvas_window, width=event.width)
+        self._schedule_relayout()
+
+    def _schedule_relayout(self):
+        """宽度变了可能要多放/少放几格。
+
+        重排 = 重建整个网格，拖窗口时每像素触发一次会闪，所以等手停下来再做。
+        """
+        if self.view_mode not in ("icon", "folder"):
+            return
+        if self._relayout_job is not None:
+            try:
+                self.after_cancel(self._relayout_job)
+            except (tk.TclError, ValueError):
+                pass
+        self._relayout_job = self.after(140, self._relayout_now)
+
+    def _relayout_now(self):
+        self._relayout_job = None
+        if not self.winfo_exists():
+            return
+        if self._grid_columns() != self._grid_cols_now:
+            self._refresh_grid()
+
+    # ------------------------------------------------------------------
+    # 一格的公共部分
+    # ------------------------------------------------------------------
+
+    def _register_cell(self, tool, cell, subwidgets, holder=None):
+        """登记一格的控件，供键盘光标 / 重涂 / 收藏角标复用。
+
+        ``subwidgets`` 的第 0 位必须是图标 label —— 外部（测试与图标自检）
+        按下标取图标，四种排列都遵守这个约定。
+        """
+        tool_id = launcher.tool_id(tool)
+        if tool_id is None:
+            return
+        self.icon_widgets[tool_id] = cell
+        self.icon_subwidgets[tool_id] = subwidgets
+        if holder is not None:
+            self._icon_holders[tool_id] = holder
+        star = subwidgets[3] if len(subwidgets) > 3 else None
+        if star is not None:
+            self._star_labels[tool_id] = star
+
+    def _make_icon_slot(self, parent, tool, size):
+        """图标 + 右上角收藏角标的固定尺寸容器。
+
+        图标不能直接 pack 到格子上：角标要贴在图标右上角，得有一个
+        和图标一样大的容器，角标才能相对它 place。容器尺寸固定、
+        图标在其中居中，角标再飘在角上。
+        """
+        holder = tk.Frame(parent, bg=COLOR_BG, width=size, height=size)
+        holder.pack_propagate(False)
+        icon_label = tk.Label(holder, bg=COLOR_BG, cursor="hand2")
+        icon_label.pack(expand=True)
+        self._load_tool_icon(tool, icon_label, size=size)
+
+        favourited = launcher.as_flag(tool.get("is_favorite"))
+        star = tk.Label(holder, bg=COLOR_BG, text="★" if favourited else "",
+                        fg=COLOR_WARNING, font=("Microsoft YaHei", 9),
+                        bd=0, highlightthickness=0)
+        star.place(relx=1.0, rely=0.0, anchor="ne", x=2, y=-2)
+        return holder, icon_label, star
+
+    def _bind_tool_cell(self, widgets, tool_id, cell):
+        """给一格里所有控件挂同一套交互。
+
+        四种排列的「点开 / 右键 / 悬停」行为完全一致，只有外观不同；
+        绑定必须铺到每个子控件上，否则指针直接落到图标上时外层框收不到
+        Enter，悬停高亮和浮层都不会出现。
+        """
+        for widget in widgets:
+            if widget is None:
+                continue
+            widget.bind("<Button-1>",
+                        lambda e, tid=tool_id: self._on_card_press(e, tid))
+            widget.bind("<Double-Button-1>",
+                        lambda e, tid=tool_id: self._run_tool_by_id(tid))
+            widget.bind("<Button-3>",
+                        lambda e, tid=tool_id: self._show_tool_menu(e, tid))
+            widget.bind("<Enter>",
+                        lambda e, tid=tool_id: self._on_card_hover(cell, True, tid))
+            widget.bind("<Leave>",
+                        lambda e, tid=tool_id: self._on_card_hover(cell, False, tid))
+
+    def _attach_cell_tooltip(self, cell, widgets, tool):
+        """悬停浮层 —— 图标排列里一个字都没有，名字和分类全靠它。"""
+        if self.view_mode not in ("icon", "folder"):
+            return
+        tip = HoverTooltip(cell, lambda t=tool: self._tooltip_text(t))
+        tip.watch(*widgets)
+        self._tooltips.append(tip)
+
+    def _tooltip_text(self, tool):
+        name = (tool.get("name") or "").strip() or "未命名"
+        category = tool.get("category") or "未分类"
+        if self.view_mode == "icon":
+            # 图标排列连名字都没有，两样都得给
+            return name, category
+        # 文件夹排列名字已经常显，浮层只补「它属于哪个分类」
+        return category, ""
+
+    # ------------------------------------------------------------------
+    # 排列一：图标（只有图标，底色透明，紧凑）
+    # ------------------------------------------------------------------
+
+    def _create_icon_tile(self, parent, tool: dict, row: int, col: int, *, hint: str = ""):
+        """只有图标的一格。"""
+        tool_id = launcher.tool_id(tool)
+        width, height = self._tile_size()
+        gap_x, gap_y = self._cell_gap()
+
+        tile = tk.Frame(parent, bg=COLOR_BG, relief="flat", bd=0,
+                        width=width, height=height, highlightthickness=0)
+        tile.grid(row=row, column=col, padx=gap_x // 2, pady=gap_y // 2,
+                  sticky="nsew")
+        tile.grid_propagate(False)
+
+        holder, icon_label, star = self._make_icon_slot(tile, tool, self.icon_size)
+        holder.pack(expand=True)
+
+        self._register_cell(tool, tile, (icon_label, None, None, star), holder)
+        self._attach_cell_tooltip(tile, [holder, icon_label, star], tool)
+        self._bind_tool_cell([tile, holder, icon_label], tool_id, tile)
+        return tile
+
+    # ------------------------------------------------------------------
+    # 排列二：文件夹（图标 + 名字常显）
+    # ------------------------------------------------------------------
+
+    def _create_folder_tile(self, parent, tool: dict, row: int, col: int, *, hint: str = ""):
+        """图标 + 下方名字，对齐 Windows 资源管理器的图标视图。"""
+        tool_id = launcher.tool_id(tool)
+        width, height = self._tile_size()
+        gap_x, gap_y = self._cell_gap()
+
+        tile = tk.Frame(parent, bg=COLOR_BG, relief="flat", bd=0,
+                        width=width, height=height, highlightthickness=0)
+        tile.grid(row=row, column=col, padx=gap_x // 2, pady=gap_y // 2,
+                  sticky="nsew")
+        tile.grid_propagate(False)
+
+        holder, icon_label, star = self._make_icon_slot(tile, tool, self.icon_size)
+        holder.pack(pady=(ICON_TILE_PAD, 2))
+
+        available = max(width - 12, 24)
+        title = self._fit_px(tool.get("name") or "", available * 2, self._name_font)
+        name_label = tk.Label(tile, text=title, bg=COLOR_BG, fg=COLOR_TEXT,
+                              font=self._name_font, wraplength=available,
+                              justify="center", cursor="hand2")
+        name_label.pack(padx=4, fill="x")
+
+        self._register_cell(tool, tile, (icon_label, name_label, None, star), holder)
+        self._attach_cell_tooltip(tile, [holder, icon_label, name_label, star], tool)
+        self._bind_tool_cell([tile, holder, icon_label, name_label], tool_id, tile)
+        return tile
+
+    # ------------------------------------------------------------------
+    # 排列四：列表（一行一个工具）
+    # ------------------------------------------------------------------
+
+    def _row_path_text(self, tool: dict) -> str:
+        """列表里的路径列：能表示成相对 Tools 就显示相对路径（短得多）。"""
+        raw = (tool.get("path") or "").strip()
+        if not raw:
+            return ""
+        try:
+            path = Path(raw)
+            if path.is_absolute():
+                return str(path.relative_to(self.tools_dir))
+            return str(path)
+        except (ValueError, OSError):
+            return raw
+
+    def _create_list_row(self, parent, tool: dict, row: int, col: int, *, hint: str = ""):
+        """一行一个工具：图标 / 名称 / 相对路径 / 分类 / 收藏。
+
+        路径列是这种排列存在的理由 —— 网格与图标排列里永远看不到
+        工具到底在 Tools 的哪一层。路径放中间并吃掉剩余宽度，长路径
+        按像素截断（中英混排数字符完全不准）。
+        """
+        tool_id = launcher.tool_id(tool)
+        gap_x, gap_y = self._cell_gap()
+
+        row_frame = tk.Frame(parent, bg=COLOR_BG, height=LIST_ROW_H,
+                             highlightthickness=0)
+        row_frame.grid(row=row, column=col, padx=gap_x, pady=gap_y,
+                       sticky="nsew")
+        row_frame.grid_propagate(False)
+
+        icon_label = tk.Label(row_frame, bg=COLOR_BG, cursor="hand2")
+        icon_label.pack(side="left", padx=(8, 8))
+        self._load_tool_icon(tool, icon_label, size=LIST_ROW_ICON)
+
+        # 星标与分类从右侧开始 pack：长路径先把中间的弹性空间吃掉，
+        # 不会把这两个挤出去
+        favourited = launcher.as_flag(tool.get("is_favorite"))
+        star = tk.Label(row_frame, bg=COLOR_BG, cursor="hand2",
+                        text="★" if favourited else "☆",
+                        fg=COLOR_WARNING if favourited else COLOR_BORDER,
+                        font=("Microsoft YaHei", 10))
+        star.pack(side="right", padx=(8, 12))
+        star.bind("<Button-1>",
+                  lambda e, i=tool_id: self._toggle_favorite_by_id(i))
+
+        cat_label = tk.Label(row_frame, text=tool.get("category") or "未分类",
+                             bg=COLOR_BG, fg=COLOR_MUTED, font=self._hint_font,
+                             width=10, anchor="w", cursor="hand2")
+        cat_label.pack(side="right", padx=(8, 0))
+
+        name_label = tk.Label(
+            row_frame, text=self._fit_px(tool.get("name") or "", 230,
+                                         self._name_font),
+            bg=COLOR_BG, fg=COLOR_TEXT, font=self._name_font,
+            anchor="w", cursor="hand2")
+        name_label.pack(side="left")
+
+        # 路径吃掉剩下的宽度
+        used = 8 + LIST_ROW_ICON + 8 + 230 + 100 + 40 + 28
+        budget = max(self._available_grid_width() - used, 60)
+        path_label = tk.Label(
+            row_frame, text=self._fit_px(self._row_path_text(tool), budget,
+                                         self._hint_font),
+            bg=COLOR_BG, fg=COLOR_MUTED, font=self._hint_font,
+            anchor="w", cursor="hand2")
+        path_label.pack(side="left", fill="x", expand=True, padx=(10, 0))
+
+        self._register_cell(tool, row_frame,
+                            (icon_label, name_label, cat_label, star))
+        self._bind_tool_cell([row_frame, icon_label, name_label, cat_label,
+                              path_label], tool_id, row_frame)
+        return row_frame
+
 
     def _render_empty_state(self, keyword: str):
         if keyword:
@@ -1833,28 +2238,55 @@ class ToolsPage(ttk.Frame):
             widget.bind("<Leave>",
                         lambda e, w=card, tid=tool_id: self._on_card_hover(w, False, tid))
 
+    def _cell_paint_spec(self, tool_id):
+        """一格的 (底色, 描边色, 描边宽度)。
+
+        按「键盘光标 > 编辑选中 > 鼠标悬停 > 常态」定状态，各排列只换表。
+
+        描边只给卡片排列：其余三种一格就是一个图标或一行文字，再套一圈框
+        立刻回到「硬」的老样子（这正是早先用户说的「按钮太硬」）；它们只用
+        浅底色表达状态，常态就是页面底色 —— 也就是「底色透明」。
+        """
+        state = ("cursor" if tool_id == self._cursor_tool_id else
+                 "selected" if tool_id == self.selected_tool_id else
+                 "hover" if tool_id == self._hover_tool_id else "normal")
+        if self.view_mode == "card":
+            table = {
+                "cursor": (COLOR_CARD_HOVER, COLOR_ACCENT, 2),
+                "selected": (COLOR_BG, COLOR_PRIMARY, 2),
+                "hover": (COLOR_CARD_HOVER, COLOR_BORDER, 1),
+                "normal": (COLOR_BG, COLOR_BORDER_LIGHT, 1),
+            }
+        else:
+            table = {
+                "cursor": (COLOR_CHIP_BG_HOVER, COLOR_BG, 0),
+                "selected": (COLOR_CHIP_BG, COLOR_BG, 0),
+                "hover": (COLOR_CHIP_BG, COLOR_BG, 0),
+                "normal": (COLOR_BG, COLOR_BG, 0),
+            }
+        return table[state]
+
     def _paint_card(self, tool_id):
-        """按「键盘光标 > 编辑选中 > 鼠标悬停 > 常态」重涂一张卡片。
+        """按优先级重涂一格。
 
         以前 hover 和 selected 各自 configure 一遍子控件，互相盖掉是常事；
         统一成一个优先级判定后就不会打架了。
         """
-        card = self.icon_widgets.get(tool_id)
-        if card is None or not card.winfo_exists():
+        cell = self.icon_widgets.get(tool_id)
+        if cell is None or not cell.winfo_exists():
             return
-        if tool_id == self._cursor_tool_id:
-            bg, border, thickness = COLOR_CARD_HOVER, COLOR_ACCENT, 2
-        elif tool_id == self.selected_tool_id:
-            bg, border, thickness = COLOR_BG, COLOR_PRIMARY, 2
-        elif tool_id == self._hover_tool_id:
-            bg, border, thickness = COLOR_CARD_HOVER, COLOR_BORDER, 1
-        else:
-            bg, border, thickness = COLOR_BG, COLOR_BORDER_LIGHT, 1
+        bg, border, thickness = self._cell_paint_spec(tool_id)
         try:
-            card.configure(bg=bg, highlightbackground=border, highlightthickness=thickness)
+            cell.configure(bg=bg, highlightbackground=border,
+                           highlightthickness=thickness)
         except tk.TclError:
             return
-        for widget in self.icon_subwidgets.get(tool_id, ()):
+        # 图标容器也要一起重涂，否则浅底高亮会在图标四周留一圈白边
+        targets = tuple(self.icon_subwidgets.get(tool_id, ())) + \
+            (self._icon_holders.get(tool_id),)
+        for widget in targets:
+            if widget is None:
+                continue
             try:
                 widget.configure(bg=bg)
             except tk.TclError:
@@ -1901,7 +2333,7 @@ class ToolsPage(ttk.Frame):
         except Exception:
             pass
 
-    def _load_tool_icon(self, tool: dict, label: tk.Label):
+    def _load_tool_icon(self, tool: dict, label: tk.Label, *, size: int | None = None):
         """加载工具图标。
 
         1) 数据库 icon_path（绝对路径直接用，相对路径基于 tools_dir）
@@ -1912,7 +2344,12 @@ class ToolsPage(ttk.Frame):
         每一层都用 png_icon_is_usable 而不是 exists()：旧版本会把全透明的空图
         当成「抽好了」写进 DB，此时文件确实存在，图标却什么都看不见。
         这种坏数据要能被识别出来并重新抽，而不是一直摆在那儿。
+
+        ``size`` 只影响渲染尺寸（列表排列用小图标）。缓存文件一律按
+        ``self.icon_size`` 找与抽 —— 抽一次 48px 就能同时供两种尺寸渲染，
+        没必要按渲染尺寸再存一份缓存。
         """
+        render_size = int(size or self.icon_size)
         icon_path = (tool.get("icon_path") or "").strip()
 
         if icon_path:
@@ -1953,10 +2390,10 @@ class ToolsPage(ttk.Frame):
                                 self._async_extract_icon(t, l))
 
         if not icon_path:
-            self._set_placeholder_icon(tool, label)
+            self._set_placeholder_icon(tool, label, size=render_size)
             return
 
-        cache_key = f"{icon_path}_native_{self.icon_size}"
+        cache_key = f"{icon_path}_native_{render_size}"
         if cache_key in self.icon_cache:
             img = self.icon_cache[cache_key]
         else:
@@ -1965,7 +2402,7 @@ class ToolsPage(ttk.Frame):
                 try:
                     pil = Image.open(icon_path)
                     # Windows 原生图标风格（透明背景、保持比例）
-                    pil = _make_native_icon(pil, self.icon_size)
+                    pil = _make_native_icon(pil, render_size)
                     # ★ 显式绑 master：不传的话 ImageTk 取的是 tkinter._default_root，
                     #   而那个 root 未必是这张 label 所在的解释器（例如别的模块调过
                     #   ttk.Style()，它会偷偷造一个 root 并占住默认位），
@@ -1979,9 +2416,9 @@ class ToolsPage(ttk.Frame):
             label.configure(image=img, text="")
             label.image = img
         else:
-            self._set_placeholder_icon(tool, label)
+            self._set_placeholder_icon(tool, label, size=render_size)
 
-    def _set_placeholder_icon(self, tool: dict, label: tk.Label):
+    def _set_placeholder_icon(self, tool: dict, label: tk.Label, *, size: int | None = None):
         """没有图标时给一张「首字底牌」。
 
         以前这里放的是一个 ⚙ emoji：与全项目的线性图标语言不一致，而且一屏几十个
@@ -1990,15 +2427,16 @@ class ToolsPage(ttk.Frame):
 
         按「首字 + 尺寸」缓存：同一批无图标工具复用同一张位图，不必反复渲染。
         """
+        render_size = int(size or self.icon_size)
         name = (tool.get("name") or "?").strip() or "?"
-        key = (name[:1].upper(), self.icon_size)
+        key = (name[:1].upper(), render_size)
         photo = self._placeholder_cache.get(key, "miss")
         if photo == "miss":
             photo = None
             if HAS_PIL:
                 try:
                     photo = ImageTk.PhotoImage(
-                        app_icons.letter_tile(name, self.icon_size),
+                        app_icons.letter_tile(name, render_size),
                         master=label)
                 except Exception:
                     photo = None
@@ -2008,7 +2446,8 @@ class ToolsPage(ttk.Frame):
             label.image = photo     # 必须持有引用，否则被 GC 回收后图变空白
         else:
             label.configure(image="", text=name[:1].upper(),
-                            font=("Microsoft YaHei", 16), fg=COLOR_MUTED)
+                            font=("Microsoft YaHei", max(render_size // 3, 9)),
+                            fg=COLOR_MUTED)
 
     # ------------------------------------------------------------------
     # 选中 / 编辑
@@ -2180,8 +2619,16 @@ class ToolsPage(ttk.Frame):
             return
         favourited = any(launcher.as_flag(t.get("is_favorite"))
                          for t in self._all_tools if launcher.tool_id(t) == tool_id)
-        star.configure(text="★" if favourited else "☆",
-                       fg=COLOR_WARNING if favourited else COLOR_BORDER)
+        if self.view_mode in ("icon", "folder"):
+            # 这两种排列的收藏动作走右键菜单，星标只是「已收藏」的角标。
+            # 未收藏时留空 —— 一排空心 ☆ 等于每格都挂了个装饰，
+            # 反而看不出哪些真收藏了。
+            star.configure(text="★" if favourited else "", fg=COLOR_WARNING,
+                           cursor="arrow")
+        else:
+            star.configure(text="★" if favourited else "☆",
+                           fg=COLOR_WARNING if favourited else COLOR_BORDER,
+                           cursor="hand2")
 
     def _run_selected_tool(self):
         if not self.selected_tool_id:
@@ -2250,8 +2697,14 @@ class ToolsPage(ttk.Frame):
         self._refresh_strips(self._all_tools)
 
     def _show_tool_menu(self, event, tool_id: int):
+        tool = tools_db.get_tool(self.db, tool_id)
+        favourited = launcher.as_flag(tool.get("is_favorite")) if tool else False
         menu = tk.Menu(self, tearoff=0)
         menu.add_command(label="运行", command=lambda: self._run_tool_by_id(tool_id))
+        # 图标/文件夹排列没有可点的星标（角标只在收藏后出现），
+        # 收藏这条动作必须能从右键菜单走
+        menu.add_command(label="取消收藏" if favourited else "收藏",
+                          command=lambda: self._toggle_favorite_by_id(tool_id))
         menu.add_command(label="编辑", command=lambda: self._select_tool(tool_id))
         menu.add_separator()
         menu.add_command(label="抽图标",

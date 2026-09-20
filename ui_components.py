@@ -6,6 +6,7 @@
 2. 扁平卡片/分组区块
 3. 状态文本与指标卡片
 4. 自绘圆角胶囊 RoundedChip（Tk 原生画不出圆角）
+5. 悬停浮层 HoverTooltip（Tk 没有原生 tooltip）
 """
 
 import tkinter as tk
@@ -273,3 +274,181 @@ class RoundedChip(tk.Canvas):
                                 smooth=True, fill=bg, outline="")
         self.create_text(w / 2.0, h / 2.0, text=self._text, fill=fg,
                          font=self._font)
+
+
+class HoverTooltip:
+    """鼠标悬停在某个控件上时弹出的说明浮层。
+
+    为什么需要一个自绘的
+    ------------------------------------------------------------------
+    Tk 没有原生 tooltip。纯粹的图标视图里没有文字，必须靠悬停把
+    「这是什么」补上；而把它塞进状态条又离指针太远，眼睛要来回跑。
+
+    为什么用深色
+    ------------------------------------------------------------------
+    页面本身是白底灰阶，浅色浮层压上去几乎看不出边界（这也是先前
+    胶囊底色踩过的坑）。近黑是这套设计里唯一的强调色，拿它当浮层既
+    清楚又不引入新颜色。颜色由调用方传入，深浅都可以。
+
+    防抖要点
+    ------------------------------------------------------------------
+    Tk 里指针从父控件移到子控件会先给父控件一个 ``<Leave>``。
+    卡片由「容器 + 图标 + 文字」多个控件拼成，若一收到 Leave 就关掉，
+    浮层会在卡片内部移动时疯狂闪烁。所以真正关闭前要用
+    ``winfo_pointerxy()`` 复核指针是否还在绑定的控件矩形内 ——
+    浅底侧栏的悬停也是靠同一手法解决的。
+    """
+
+    def __init__(self, widget, text_fn, *, delay: int = 260,
+                 bg: str = "#1c1c1c", fg: str = "#ffffff",
+                 sub_fg: str = "#b9b9b9", offset=(16, 22)):
+        self.widget = widget
+        self.text_fn = text_fn          # 返回 (主标题, 副标题) 或单个字符串
+        self.delay = delay
+        self.bg = bg
+        self.fg = fg
+        self.sub_fg = sub_fg
+        self.offset = offset
+        self._tip = None
+        self._title_label = None
+        self._sub_label = None
+        self._after_id = None
+        widget.bind("<Enter>", self._on_enter, add="+")
+        widget.bind("<Leave>", self._on_leave, add="+")
+        widget.bind("<ButtonPress>", self._on_leave, add="+")
+        widget.bind("<Destroy>", self._on_destroy, add="+")
+
+    # ---- 对外 ----
+    def watch(self, *widgets):
+        """把更多控件纳入同一个浮层；「指示区」仍是构造时那个控件。
+
+        一格由容器 + 图标 + 角标等多个控件拼成，Enter/Leave 是逐控件派发的：
+        只绑外层容器的话，指针直接从格子外落到图标上时外层收不到 Enter，
+        浮层就不出现。子控件绑上同一套回调后，进出一格都能正确开关；
+        而「指针还在不在这一格」始终按容器矩形判定，所以卡内部移动不会闪。
+        """
+        for widget in widgets:
+            if widget is None or widget is self.widget:
+                continue
+            widget.bind("<Enter>", self._on_enter, add="+")
+            widget.bind("<Leave>", self._on_leave, add="+")
+            widget.bind("<ButtonPress>", self._on_leave, add="+")
+        return self
+
+    def hide(self):
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.withdraw()
+            except tk.TclError:
+                pass
+
+    def destroy(self):
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
+    # ---- 内部 ----
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except (tk.TclError, ValueError):
+                pass
+            self._after_id = None
+
+    def _pointer_inside(self):
+        """指针是否还在绑定控件内 —— 用来把「移进子控件」当成仍在悬停。"""
+        try:
+            px, py = self.widget.winfo_pointerxy()
+            x, y = self.widget.winfo_rootx(), self.widget.winfo_rooty()
+            w, h = self.widget.winfo_width(), self.widget.winfo_height()
+        except tk.TclError:
+            return False
+        if w <= 1 or h <= 1:
+            return False
+        return x <= px <= x + w and y <= py <= y + h
+
+    def _on_enter(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _on_leave(self, _event=None):
+        self._cancel()
+        if self._pointer_inside():
+            return          # 只是移到卡片内的另一个子控件，别关
+        self.hide()
+
+    def _on_destroy(self, _event=None):
+        self.destroy()
+
+    def _ensure_window(self):
+        if self._tip is not None:
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.withdraw()
+        tip.overrideredirect(True)
+        try:
+            tip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        frame = tk.Frame(tip, bg=self.bg, highlightthickness=0, bd=0)
+        frame.pack(fill="both", expand=True)
+        self._title_label = tk.Label(frame, bg=self.bg, fg=self.fg,
+                                     font=("Microsoft YaHei", 9), justify="left")
+        self._title_label.pack(anchor="w", padx=10, pady=(7, 0))
+        self._sub_label = tk.Label(frame, bg=self.bg, fg=self.sub_fg,
+                                   font=("Microsoft YaHei", 8), justify="left")
+        self._sub_label.pack(anchor="w", padx=10, pady=(0, 7))
+        self._tip = tip
+
+    def _show(self):
+        self._after_id = None
+        if not self.widget.winfo_exists():
+            return
+        try:
+            content = self.text_fn()
+        except tk.TclError:
+            return
+        if isinstance(content, (tuple, list)):
+            title = content[0] if content else ""
+            sub = content[1] if len(content) > 1 else ""
+        else:
+            title, sub = content, ""
+        if not title and not sub:
+            return
+
+        self._ensure_window()
+        if self._title_label is None or self._sub_label is None:
+            return
+        self._title_label.configure(text=title)
+        if sub:
+            self._sub_label.configure(text=sub)
+            if not self._sub_label.winfo_ismapped():
+                self._sub_label.pack(anchor="w", padx=10, pady=(0, 7))
+        else:
+            self._sub_label.pack_forget()
+
+        tip = self._tip
+        tip.update_idletasks()
+        tw, th = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        px, py = self.widget.winfo_pointerxy()
+        x, y = px + self.offset[0], py + self.offset[1]
+        # 贴到屏幕右/下边缘时翻到另一侧，否则浮层会被切掉
+        screen_w = tip.winfo_screenwidth()
+        screen_h = tip.winfo_screenheight()
+        if x + tw > screen_w - 4:
+            x = max(screen_w - tw - 4, 4)
+        if y + th > screen_h - 4:
+            y = max(py - th - 10, 4)
+        tip.geometry(f"{tw}x{th}+{int(x)}+{int(y)}")
+        tip.deiconify()
+        try:
+            tip.lift()
+        except tk.TclError:
+            pass
+

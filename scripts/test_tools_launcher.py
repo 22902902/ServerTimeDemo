@@ -282,6 +282,7 @@ def test_real_page():
         _assert_command_bar(page)
         _assert_launch_with_args(page, conn)
         _assert_status_bar(page)
+        _assert_view_modes(page, root)
     finally:
         try:
             root.destroy()
@@ -698,6 +699,224 @@ def _assert_status_bar(page):
     check("状态条点名重名工具", "重名" in text, f"实际 {text!r}")
     check("状态条是 ttk 标签挂着的（真的会显示）",
           page._status_bar.winfo_exists())
+
+
+def _assert_view_modes(page, root):
+    """四种排列：图标 / 文件夹 / 卡片 / 列表。
+
+    共用的东西（数据、排序、键盘光标、右键菜单、收藏）必须四种都一样，
+    各排列之间只能差「一格画成什么」。这里就是在锁这条边界。
+    """
+    from ui_components import HoverTooltip
+
+    check("切换器给出四种排列",
+          [k for k, _ in tp.VIEW_MODES] == ["icon", "folder", "card", "list"],
+          str(list(page._view_chips)))
+    check("切换器 4 颗胶囊都在",
+          all(c.winfo_exists() for c in page._view_chips.values()))
+
+    page._set_view_mode("card")
+    root.update()
+    total = len(page.icon_widgets)
+    check("有工具可渲染", total > 0, f"{total} 个")
+
+    # ---- 每种排列都要渲染出全部工具，且保持 icon_subwidgets[0]=图标 label 的约定 ----
+    shapes = {}
+    for mode in ("icon", "folder", "card", "list"):
+        page._set_view_mode(mode)
+        root.update()
+        check(f"「{mode}」渲染出全部格子", len(page.icon_widgets) == total,
+              f"{len(page.icon_widgets)}/{total}")
+        tid = next(iter(page.icon_widgets), None)
+        cell = page.icon_widgets.get(tid)
+        sub = page.icon_subwidgets.get(tid, ())
+        check(f"「{mode}」subwidgets[0] 是图标 label",
+              bool(sub) and sub[0] is not None and sub[0].winfo_class() == "Label",
+              str([type(s).__name__ if s is not None else None for s in sub]))
+        if cell is not None:
+            shapes[mode] = (cell.cget("width"), cell.cget("height"))
+
+    # ---- 图标排列：透明底 + 方格子 + 无描边 ----
+    page._set_view_mode("icon")
+    root.update()
+    tid = next(iter(page.icon_widgets), None)
+    cell = page.icon_widgets[tid]
+    check("图标排列：格子是正方形",
+          abs(int(cell.cget("width")) - int(cell.cget("height"))) <= 1,
+          str(shapes.get("icon")))
+    check("图标排列：格子不带任何描边",
+          str(cell.cget("highlightthickness")) == "0",
+          str(cell.cget("highlightthickness")))
+    # 常态（既非光标也非选中）必须是纯页面底色 —— 就是「底色透明」
+    idle = next((i for i in page.icon_widgets
+                 if i not in (page.selected_tool_id, page._cursor_tool_id,
+                              page._hover_tool_id)), tid)
+    spec = page._cell_paint_spec(idle)
+    check("图标排列：常态底色=页面底色且无描边宽度",
+          spec[0] == tp.COLOR_BG and spec[2] == 0, str(spec))
+    check("图标排列：悬停/光标用浅底色而不是描边",
+          page._cell_paint_spec(page.selected_tool_id)[2] == 0
+          and page._cell_paint_spec(page._cursor_tool_id)[2] == 0
+          if page._cursor_tool_id is not None else True)
+
+    # ---- 悬停浮层：图标排列给「名字+分类」，文件夹排列只给「分类」 ----
+    check("图标排列：每格都挂了悬停浮层", len(page._tooltips) == total,
+          f"{len(page._tooltips)}/{total}")
+    check("图标排列：浮层控件是 HoverTooltip",
+          all(isinstance(t, HoverTooltip) for t in page._tooltips))
+    sample = page._visible_tools[0]
+    text = page._tooltip_text(sample)
+    check("图标排列：浮层给「名字 + 分类」两行",
+          isinstance(text, tuple) and len(text) == 2 and bool(text[0])
+          and bool(text[1]), str(text))
+
+    page._set_view_mode("folder")
+    root.update()
+    tid = next(iter(page.icon_widgets), None)
+    sub = page.icon_subwidgets[tid]
+    check("文件夹排列：名字常显", sub[1] is not None and sub[1].winfo_exists())
+    check("文件夹排列：名字 label 有文字",
+          bool(str(sub[1].cget("text")).strip()), f"{sub[1].cget('text')!r}")
+    folder_text = page._tooltip_text(page._visible_tools[0])
+    check("文件夹排列：浮层只给分类（名字已常显）",
+          isinstance(folder_text, tuple) and bool(folder_text[0])
+          and folder_text[1] == "", str(folder_text))
+
+    # ---- 卡片排列：保留描边（原来那套视觉不能变） ----
+    page._set_view_mode("card")
+    root.update()
+    tid = next(iter(page.icon_widgets), None)
+    check("卡片排列：保留描边",
+          str(page.icon_widgets[tid].cget("highlightthickness")) in ("1", "2"),
+          str(page.icon_widgets[tid].cget("highlightthickness")))
+
+    # ---- 列表排列：单列 + 固定行高 + 星标可点 ----
+    page._set_view_mode("list")
+    root.update()
+    tid = next(iter(page.icon_widgets), None)
+    cell = page.icon_widgets[tid]
+    check("列表排列：单列", page._grid_cols_now == 1, str(page._grid_cols_now))
+    check("列表排列：行高固定", int(cell.cget("height")) == tp.LIST_ROW_H,
+          str(cell.cget("height")))
+    check("列表排列：有分类列", page.icon_subwidgets[tid][2] is not None)
+    check("列表排列：星标可点（cursor=hand2）",
+          str(page._star_labels[tid].cget("cursor")) == "hand2",
+          str(page._star_labels[tid].cget("cursor")))
+
+    # ---- 列数：卡片用固定设置，图标/文件夹随宽度自动算 ----
+    check("列表排列恒为一列（宽度无关）", page._grid_columns() == 1)
+    page._set_view_mode("icon")
+    root.update()
+    original_width = page._available_grid_width
+    try:
+        page._available_grid_width = lambda: 600
+        narrow = page._grid_columns()
+        page._available_grid_width = lambda: 1400
+        wide = page._grid_columns()
+    finally:
+        page._available_grid_width = original_width
+    check("图标排列列数随可用宽度增长", wide > narrow, f"{narrow} → {wide}")
+    check("图标排列在窄窗口下也至少留一列",
+          narrow >= 1, str(narrow))
+    page._set_view_mode("card")
+    root.update()
+    check("卡片排列仍用设置里的固定列数",
+          page._grid_columns() == max(int(page.grid_cols), 1),
+          f"{page._grid_columns()} vs grid_cols={page.grid_cols}")
+
+    # ---- 浮层不许泄漏：网格重建时 Toplevel 要跟着销毁 ----
+    page._set_view_mode("icon")
+    root.update()
+    before = len(page._tooltips)
+    for _ in range(3):
+        page._refresh_grid()
+        root.update()
+    check("反复重建网格后浮层不累积", len(page._tooltips) == before,
+          f"{before} → {len(page._tooltips)}")
+
+    # ---- 收藏角标：图标/文件夹排列是「收藏后才出现的角标」，卡片是「常显可点」 ----
+    tid = next(iter(page.icon_widgets), None)
+    was_fav = any(launcher.as_flag(t.get("is_favorite"))
+                  for t in page._all_tools if launcher.tool_id(t) == tid)
+    try:
+        if was_fav:
+            page._toggle_favorite_by_id(tid)
+            root.update()
+        page._toggle_favorite_by_id(tid)
+        root.update()
+        star = page._star_labels[tid]
+        check("图标排列：收藏后右上角出现 ★",
+              str(star.cget("text")) == "★", repr(star.cget("text")))
+        check("图标排列：角标不是可点的（收藏走右键）",
+              str(star.cget("cursor")) == "arrow", str(star.cget("cursor")))
+        page._toggle_favorite_by_id(tid)
+        root.update()
+        check("图标排列：取消收藏后角标清空",
+              str(star.cget("text")) == "", repr(star.cget("text")))
+    finally:
+        if was_fav:                        # 还原成进来时的样子
+            page._toggle_favorite_by_id(tid)
+            root.update()
+
+    page._set_view_mode("card")
+    root.update()
+    tid = next(iter(page.icon_widgets), None)
+    check("卡片排列：星标常显可点",
+          str(page._star_labels[tid].cget("cursor")) == "hand2")
+
+    # ---- 右键菜单必须能收藏/取消收藏 ----
+    def menu_labels(favorited):
+        captured = {}
+        original_popup = tk.Menu.tk_popup
+
+        def fake_popup(menu_self, *_a, **_k):
+            captured["menu"] = menu_self
+
+        tk.Menu.tk_popup = fake_popup
+        try:
+            if favorited != any(launcher.as_flag(t.get("is_favorite"))
+                                for t in page._all_tools
+                                if launcher.tool_id(t) == tid):
+                page._toggle_favorite_by_id(tid)
+                root.update()
+            page._show_tool_menu(types.SimpleNamespace(x_root=5, y_root=5), tid)
+        finally:
+            tk.Menu.tk_popup = original_popup
+        menu = captured.get("menu")
+        if menu is None:
+            return None
+        labels = []
+        for index in range(menu.index("end") + 1):
+            # 分隔符没有 -label 选项，直接 entrycget 会抛 TclError
+            if menu.type(index) == "separator":
+                continue
+            try:
+                labels.append(menu.entrycget(index, "label") or "")
+            except tk.TclError:
+                pass
+        menu.destroy()
+        return labels
+
+    labels = menu_labels(favorited=False)
+    check("右键菜单含「收藏」", labels is not None and "收藏" in labels,
+          str(labels))
+    check("右键菜单保留「运行」", labels is not None and "运行" in labels,
+          str(labels))
+    labels_fav = menu_labels(favorited=True)
+    check("已收藏时菜单变成「取消收藏」",
+          labels_fav is not None and "取消收藏" in labels_fav, str(labels_fav))
+    page._toggle_favorite_by_id(tid)
+    root.update()
+
+    # ---- 排列模式要记住 ----
+    page._set_view_mode("list")
+    root.update()
+    saved = tools_db.get_setting(page.db, "view_mode", "")
+    check("切换排列会写进设置（下次打开还是它）", saved == "list", f"{saved!r}")
+    page._set_view_mode("card")
+    root.update()
+    check("能切回卡片并同步设置",
+          tools_db.get_setting(page.db, "view_mode", "") == "card")
 
 
 # ---------------------------------------------------------------------------
