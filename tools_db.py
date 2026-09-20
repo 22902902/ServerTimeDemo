@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS tool_items (
     sort_order INTEGER DEFAULT 0,
     is_builtin INTEGER DEFAULT 0,
     is_deleted INTEGER DEFAULT 0,
+    last_run_at TEXT DEFAULT '',
+    run_count INTEGER DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 )
@@ -115,6 +117,17 @@ def init_all_tool_tables(conn: sqlite3.Connection):
             conn.commit()
         except Exception:
             pass
+    # ★ 迁移：旧库表加 last_run_at / run_count
+    #    启动器的「最近使用」横条依赖这两列；缺列时 field_text() 会退成空串，
+    #    所以对老库只是“没有最近使用”，不会崩。
+    for col, ddl in (("last_run_at", "TEXT DEFAULT ''"),
+                     ("run_count", "INTEGER DEFAULT 0")):
+        if col not in cols:
+            try:
+                conn.execute(f"ALTER TABLE tool_items ADD COLUMN {col} {ddl}")
+                conn.commit()
+            except Exception:
+                pass
     # ★ 迁移：旧库 tool_categories 表加 package_id 列
     cat_cols = [r[1] for r in conn.execute("PRAGMA table_info(tool_categories)").fetchall()]
     if "package_id" not in cat_cols:
@@ -327,6 +340,22 @@ def get_tool(conn, tool_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def touch_tool_run(conn, tool_id: int):
+    """记一次启动：刷新最近使用时间 + 累加次数。
+
+    刷新/统计失败不应影响工具本身能不能启动，
+    所以这里把异常全吞（也避免老库缺列时把启动流程打断）。
+    """
+    try:
+        conn.execute(
+            "UPDATE tool_items SET last_run_at=?, run_count=COALESCE(run_count,0)+1 "
+            "WHERE id=?",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tool_id))
+        conn.commit()
+    except Exception:
+        pass
+
+
 def list_tools(conn, category: str = "", keyword: str = "",
                favorites_only: bool = False,
                include_deleted: bool = False,
@@ -347,9 +376,12 @@ def list_tools(conn, category: str = "", keyword: str = "",
                      "WHERE tp.name = ?)")
             params.append(package)
     if keyword:
-        sql += " AND (name LIKE ? OR description LIKE ? OR args LIKE ?)"
+        # ★ 补上 alias / category：用户往往记得别名（如 "FF"）或分类，
+        #    却记不住全名；过去只搜 name/description/args 会搜不到。
+        sql += (" AND (name LIKE ? OR description LIKE ? OR args LIKE ? "
+                "OR COALESCE(alias,'') LIKE ? OR COALESCE(category,'') LIKE ?)")
         kw = f"%{keyword}%"
-        params.extend([kw, kw, kw])
+        params.extend([kw, kw, kw, kw, kw])
     if favorites_only:
         sql += " AND is_favorite=1"
     # ★ 排序：sort_key 指定则按该字段排，否则默认按 分类+s序

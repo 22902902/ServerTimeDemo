@@ -19,12 +19,16 @@ import hashlib
 import logging
 import subprocess
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import tools_db
+import tools_launcher as launcher
 from dialog_form_style import apply_dialog_form_style, create_form_checkbutton, create_form_entry, create_form_frame, create_form_label
+from page_components import add_toolbar_buttons, create_page_toolbar, create_status_bar
 from ui_theme import PACKAGE_ACCENT_COLORS, THEME, TOOLBOX_PALETTE
 
 # ★ tkdnd 拖拽支持（全局导入，确保打包包含）
@@ -61,6 +65,16 @@ COLOR_ACCENT = TOOLBOX_PALETTE.accent
 COLOR_DROP_HOVER = TOOLBOX_PALETTE.button_hover
 COLOR_SUCCESS = TOOLBOX_PALETTE.success
 COLOR_WARNING = TOOLBOX_PALETTE.warn
+# 选中态 chip 用实心黑底 + 白字（比「凹陷边框」一眼可辨）
+COLOR_ACCENT_TEXT = TOOLBOX_PALETTE.accent_text
+
+# ---- 启动器布局常量 ----
+CARD_MIN_WIDTH = 104     # 卡片最小宽度：icon 48px 之外还留得下两行名字
+CARD_TITLE_MAX = 16      # 标题最大字符数，超出截断，防止换行把卡片撑破
+CARD_HINT_MAX = 11       # 副标题最大字符数
+FAVORITE_LIMIT = 8       # 收藏横条最多显示几个
+RECENT_LIMIT = 8         # 最近使用横条最多显示几个
+LABEL_VPAD = 6           # tk.Label 单行 reqheight 比 linespace 多的那 6px（实测）
 
 
 def apply_tool_dialog_theme(window):
@@ -355,6 +369,20 @@ class ToolsPage(ttk.Frame):
         self.icon_cache: dict[str, Optional[tk.PhotoImage]] = {}  # path → PhotoImage
         self.toolbar_buttons: list[ttk.Button] = []
 
+        # ★ 启动器状态
+        self._all_tools: list[dict] = []            # 当前包下的全部工具（未过滤）
+        self._visible_tools: list[dict] = []        # 网格里真正显示的工具（已排序）
+        self._cursor_tool_id: Optional[int] = None  # 键盘光标所在卡片
+        self._hover_tool_id: Optional[int] = None   # 鼠标悬停卡片
+        self._category_chips: dict[str, tk.Label] = {}
+        self._search_placeholder_on = True
+        self.icon_widgets: dict[int, tk.Frame] = {}
+        self.icon_subwidgets: dict[int, tuple] = {}
+        self._star_labels: dict[int, tk.Label] = {}
+        # 按像素量文字用的字体对象：中英混排时「数几个字符」完全不准
+        self._name_font = tkfont.Font(family="Microsoft YaHei", size=9)
+        self._hint_font = tkfont.Font(family="Microsoft YaHei", size=8)
+
         # ★ 定义拖入高亮样式
         try:
             style = ttk.Style()
@@ -611,122 +639,302 @@ class ToolsPage(ttk.Frame):
     def _build_ui(self):
         self._build_top_bar()
         self._build_category_bar()
+        self._build_quick_strips()
         self._build_main_area()
+        # ★ 状态条最后 pack —— pack 是按调用顺序自上而下占位的
+        self._build_status_bar()
         # ★ 整个页面注册为 drop target（拖入 .exe 即可快速添加）
         self._register_drop_target(self)
+        self._show_placeholder()
+        # 进页面就能直接打字 —— 启动器的第一步就该是输入框
+        self.after(80, self._focus_search)
 
     def _build_top_bar(self):
-        """顶部工具栏 — 黑白极简风格，紧凑布局"""
-        # 主容器：白色背景
-        top = tk.Frame(self, bg=COLOR_BG, padx=12, pady=8)
-        top.pack(fill="x")
+        """顶部命令条：一个长搜索框 + 右侧包选择 / 动作按钮。
 
-        # 左侧组：包选择 + 搜索
-        left_group = tk.Frame(top, bg=COLOR_BG)
-        left_group.pack(side="left", fill="y")
+        旧版把「包」「搜索」各占一行，后面再挂一排 emoji 按钮（✎ 🔍 🧹 📁 ⚙），
+        占掉两行高度却没有任何明确的输入焦点，进页面还得先点一下搜索框。
+        现在压成一行：左边直接就能打字，右边是需要时才去点的动作。
+        """
+        bar = create_page_toolbar(self, padding=(24, 16, 24, 6))
+        self._command_bar = bar
 
-        # 包选择行
-        pkg_row = tk.Frame(left_group, bg=COLOR_BG)
-        pkg_row.pack(fill="x", pady=(0, 6))
+        # ---- 左：搜索（占满剩余宽度）----
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(bar, textvariable=self.search_var, width=46)
+        self.search_entry.pack(side="left", ipady=3)
+        self.search_entry.bind("<FocusIn>", self._on_search_focus_in)
+        self.search_entry.bind("<FocusOut>", self._on_search_focus_out)
+        self.search_entry.bind("<Down>", lambda e: self._move_cursor(1))
+        self.search_entry.bind("<Up>", lambda e: self._move_cursor(-1))
+        self.search_entry.bind("<Return>", self._on_search_enter)
+        self.search_entry.bind("<Escape>", lambda e: self._clear_search())
+        self.search_entry.bind("<Control-a>", self._select_all_search)
+        self.search_var.trace_add("write", lambda *_: self._on_search_changed())
 
-        tk.Label(pkg_row, text="包", bg=COLOR_BG, fg=COLOR_TEXT,
-                 font=("Microsoft YaHei", 10, "bold")).pack(side="left", padx=(0, 6))
+        ttk.Button(bar, text="清空", style="Quiet.TButton", width=0,
+                   command=self._clear_search).pack(side="left", padx=(8, 0))
 
+        # 常显的快捷键提示：占位文案一聚焦就消失，这些得一直看得见
+        ttk.Label(bar, text="↑↓ 选择 · 回车启动 · Esc 清空",
+                  style="Muted.TLabel").pack(side="left", padx=(12, 0))
+
+        # ---- 右：包 + 动作 ----
+        right = ttk.Frame(bar)
+        right.pack(side="right")
+
+        ttk.Label(right, text="包", style="Muted.TLabel").pack(side="left", padx=(0, 6))
         self.package_var = tk.StringVar(value=self.current_package)
-        self.package_combo = ttk.Combobox(pkg_row, textvariable=self.package_var,
-                                          width=16, values=self.packages, state="readonly")
+        self.package_combo = ttk.Combobox(right, textvariable=self.package_var, width=12,
+                                          values=self.packages, state="readonly")
         self.package_combo.pack(side="left", padx=(0, 4))
         self.package_combo.bind("<<ComboboxSelected>>", lambda e: self._on_package_change())
 
-        # 包色块（小圆点）
-        self._package_swatch = tk.Frame(pkg_row, width=12, height=12, bg=COLOR_MUTED,
-                                         highlightthickness=1, highlightbackground=COLOR_BORDER_LIGHT)
-        self._package_swatch.pack(side="left", padx=(4, 0))
+        # 包标识色块：点一下改色（一眼看出当前在哪个套件）
+        self._package_swatch = tk.Frame(right, width=12, height=12, bg=COLOR_MUTED,
+                                       highlightthickness=1,
+                                       highlightbackground=COLOR_BORDER_LIGHT,
+                                       cursor="hand2")
+        self._package_swatch.pack(side="left", padx=(2, 10))
         self._package_swatch.bind("<Button-1>", lambda e: self._on_package_swatch_click())
 
-        # 编辑按钮（小）
-        self._btn_edit_pkg = self._create_tool_btn(pkg_row, "✎", self._show_package_manager, width=2)
-        self._btn_edit_pkg.pack(side="left", padx=(4, 0))
+        add_toolbar_buttons(right, [
+            ("添加工具", self._show_add_dialog, "Primary.TButton"),
+            ("包管理", self._show_package_manager),
+            ("扫描目录", self._initial_scan),
+            ("打开目录", self._open_tools_folder),
+            ("设置", self._show_settings),
+        ])
 
-        # 搜索行
-        search_row = tk.Frame(left_group, bg=COLOR_BG)
-        search_row.pack(fill="x")
+    # ------------------------------------------------------------------
+    # 搜索框（启动器主入口）
+    # ------------------------------------------------------------------
 
-        tk.Label(search_row, text="搜索", bg=COLOR_BG, fg=COLOR_TEXT,
-                 font=("Microsoft YaHei", 10, "bold")).pack(side="left", padx=(0, 6))
+    SEARCH_PLACEHOLDER = "搜索工具：支持名称 / 别名 / 分类 / 文件名"
 
-        self.search_var = tk.StringVar()
-        search_entry = tk.Entry(search_row, textvariable=self.search_var, width=30,
-                                bg=COLOR_BG, fg=COLOR_TEXT, relief="solid",
-                                highlightthickness=1, highlightbackground=COLOR_BORDER_LIGHT)
-        search_entry.pack(side="left", padx=(0, 4))
-        self.search_var.trace_add("write", lambda *_: self._refresh_grid())
+    def _select_all_search(self, _event=None):
+        self.search_entry.selection_range(0, "end")
+        return "break"
 
-        self._btn_search = self._create_tool_btn(search_row, "🔍", lambda: None, width=2)
-        self._btn_search.pack(side="left", padx=(0, 12))
+    def _focus_search(self):
+        try:
+            self.search_entry.focus_set()
+        except tk.TclError:
+            pass
 
-        # 右侧组：工具按钮（紧凑排列）
-        right_group = tk.Frame(top, bg=COLOR_BG)
-        right_group.pack(side="right", fill="y")
+    def _show_placeholder(self):
+        self._search_placeholder_on = True
+        self.search_var.set(self.SEARCH_PLACEHOLDER)
+        self.search_entry.configure(foreground=COLOR_MUTED)
 
-        btn_specs = [
-            ("+ 添加", self._show_add_dialog),
-            ("⟳ 扫描", self._initial_scan),
-            ("🧹 清空无效", self._clean_invalid_tools),
-            ("📁 目录", self._open_tools_folder),
-            ("⚙ 设置", self._show_settings),
-        ]
-        for text, cmd in btn_specs:
-            btn = self._create_tool_btn(right_group, text, cmd)
-            btn.pack(side="left", padx=(0, 6))
+    def _hide_placeholder(self):
+        self._search_placeholder_on = False
+        self.search_var.set("")
+        self.search_entry.configure(foreground=COLOR_TEXT)
 
-    def _create_tool_btn(self, parent, text, command, width=None):
-        """创建统一风格的工具按钮 — 白色底、淡灰边框、黑色文字"""
-        btn = tk.Label(parent, text=text, bg=COLOR_BG, fg=COLOR_TEXT,
-                       font=("Microsoft YaHei", 9),
-                       padx=8 if width is None else 4, pady=3,
-                       relief="raised", bd=1,
-                       highlightthickness=1, highlightbackground=COLOR_BORDER_LIGHT,
-                       cursor="hand2")
-        if width:
-            btn.configure(width=width)
-        # ★ 修复：点击时凹陷，释放时执行命令+恢复，避免阻塞导致按钮卡住
-        btn.bind("<Button-1>", lambda e: btn.configure(relief="sunken"))
-        btn.bind("<ButtonRelease-1>", lambda e: (btn.configure(relief="raised"), command()))
-        # 悬停效果
-        btn.bind("<Enter>", lambda e: btn.configure(bg="#f5f5f5"))
-        btn.bind("<Leave>", lambda e: btn.configure(bg=COLOR_BG))
-        return btn
+    def _current_keyword(self) -> str:
+        """取用户真正输入的关键词（占位文案不算）。"""
+        if self._search_placeholder_on:
+            return ""
+        return self.search_var.get().strip()
+
+    def _on_search_focus_in(self, _event=None):
+        if self._search_placeholder_on:
+            self._hide_placeholder()
+
+    def _on_search_focus_out(self, _event=None):
+        if not self.search_var.get().strip():
+            self._show_placeholder()
+
+    def _on_search_changed(self):
+        # 占位文案也会触发 write，此时不能当成用户在搜索
+        if self._search_placeholder_on:
+            return
+        self._refresh_grid()
+
+    def _clear_search(self):
+        if self._search_placeholder_on:
+            self._focus_search()
+            return
+        if self.search_var.get():
+            self.search_var.set("")     # 触发 trace → 自动刷新
+        else:
+            self._refresh_grid()
+        self._focus_search()
+
+    def _on_search_enter(self, _event=None):
+        """回车启动光标所在工具；没有光标就启动第一条命中（Listary 的手感）。"""
+        target = self._cursor_tool_id
+        if target is None and self._visible_tools:
+            target = launcher.tool_id(self._visible_tools[0])
+        if target is not None:
+            self._run_tool_by_id(target)
+        return "break"
 
     def _build_category_bar(self):
-        """分类栏 — 黑白极简风格，支持横向滚动"""
-        cat_frame = tk.Frame(self, bg=COLOR_BG, padx=12, pady=6)
-        cat_frame.pack(fill="x")
+        """分类栏：只列「有工具」的分类，数量跟在名字后面。
 
-        tk.Label(cat_frame, text="分类", bg=COLOR_BG, fg=COLOR_TEXT,
-                 font=("Microsoft YaHei", 10, "bold")).pack(side="left", padx=(0, 8))
+        以前 13 个分类里有 5 个是空的，照样各占一颗按钮（还都是同样的灰底凹陷框），
+        扫一遍全是噪音、也看不出哪个分类值得点。现在空分类不进栏，
+        名字后面直接带数量；管理分类仍然走「设置 → 分类」。
+        横向滚动条只在真的放不下时才出现 —— 常驻一条灰杠很脏。
+        """
+        bar = tk.Frame(self, bg=COLOR_BG, padx=24, pady=0)
+        bar.pack(fill="x")
+        self._category_bar = bar
 
-        # ★ 分类按钮容器改为 Canvas + 横向滚动
-        self._cat_canvas = tk.Canvas(cat_frame, bg=COLOR_BG, highlightthickness=0, height=28)
-        self._cat_canvas.pack(side="left", fill="x", expand=True, padx=(0, 8))
-
-        # 滚动条（需要时才显示）
-        self._cat_scroll = tk.Scrollbar(cat_frame, orient="horizontal", command=self._cat_canvas.xview,
-                                         bg=COLOR_BG, troughcolor=COLOR_BG,
-                                         highlightthickness=0, bd=0)
-        self._cat_scroll.pack(side="bottom", fill="x")
+        self._cat_canvas = tk.Canvas(bar, bg=COLOR_BG, highlightthickness=0, height=26)
+        self._cat_canvas.pack(fill="x", expand=True)
+        self._cat_scroll = ttk.Scrollbar(bar, orient="horizontal",
+                                          command=self._cat_canvas.xview)
         self._cat_canvas.configure(xscrollcommand=self._cat_scroll.set)
 
-        # 内部 Frame 放按钮
         self.category_container = tk.Frame(self._cat_canvas, bg=COLOR_BG)
-        self._cat_canvas.create_window((0, 0), window=self.category_container, anchor="nw")
-        self.category_container.bind("<Configure>", lambda e: self._cat_canvas.configure(scrollregion=self._cat_canvas.bbox("all")))
-
-        # + 分类按钮（小尺寸）
-        add_cat_btn = self._create_tool_btn(cat_frame, "+", self._add_category_dialog, width=2)
-        add_cat_btn.pack(side="right")
+        self._cat_window = self._cat_canvas.create_window(
+            (0, 0), window=self.category_container, anchor="nw")
+        self.category_container.bind("<Configure>", lambda e: self._on_category_layout())
 
         self.category_buttons: list[tk.Label] = []
+        self._category_chips: dict[str, tk.Label] = {}
+
+    def _on_category_layout(self):
+        bbox = self._cat_canvas.bbox("all")
+        if not bbox:
+            return
+        self._cat_canvas.configure(scrollregion=bbox)
+        # 让 canvas 高度贴着内容，避免上下留一圈白
+        self._cat_canvas.configure(height=max(bbox[3] - bbox[1], 24))
+        self._update_category_scroll()
+
+    def _update_category_scroll(self):
+        bbox = self._cat_canvas.bbox("all")
+        if not bbox:
+            return
+        need = (bbox[2] - bbox[0]) > self._cat_canvas.winfo_width() + 1
+        shown = bool(self._cat_scroll.winfo_ismapped())
+        if need and not shown:
+            self._cat_scroll.pack(fill="x")
+        elif not need and shown:
+            self._cat_scroll.pack_forget()
+
+    def _create_category_chip(self, name: str, count: int, category_id=None):
+        """一颗分类 chip。选中态用实心黑底白字，而不是原来的「凹陷边框」。"""
+        active = (name == self.current_category)
+        chip = tk.Label(
+            self.category_container, text=f"{name} {count}",
+            bg=COLOR_ACCENT if active else COLOR_CARD_HOVER,
+            fg=COLOR_ACCENT_TEXT if active else COLOR_TEXT,
+            font=("Microsoft YaHei", 9), padx=10, pady=3, cursor="hand2")
+        chip.pack(side="left", padx=(0, 6), pady=1)
+
+        chip.bind("<Button-1>", lambda e, n=name: self._switch_category(n))
+        if category_id is not None:
+            chip.bind("<Button-3>", lambda e, cid=category_id, n=name:
+                      self._show_category_menu(e, cid, n))
+            self._make_category_drop_target(chip, category_id, name)
+
+        def paint(widget, hover, category_name=name):
+            # 必须用闭包里的分类名判断选中态：从 chip 文案里 split(" ") 取名字，
+            # 遇到「ADB 工具」这种带空格的分类会取成 "ADB"，选中态会被 hover 涂掉
+            is_active = (category_name == self.current_category)
+            widget.configure(bg=(COLOR_ACCENT if is_active else
+                                 (COLOR_BORDER_LIGHT if hover else COLOR_CARD_HOVER)))
+
+        chip.bind("<Enter>", lambda e, c=chip, n=name: paint(
+            c, n != self.current_category))
+        chip.bind("<Leave>", lambda e, c=chip: paint(c, False))
+
+        self.category_buttons.append(chip)
+        self._category_chips[name] = chip
+        return chip
+
+    # ------------------------------------------------------------------
+    # 快捷横条：收藏 / 最近使用
+    # ------------------------------------------------------------------
+
+    def _build_quick_strips(self):
+        """收藏 / 最近使用两条横条。没有内容时整块不占位（pack_forget）。"""
+        self._strips_frame = tk.Frame(self, bg=COLOR_BG)
+
+    def _refresh_strips(self, tools):
+        for child in self._strips_frame.winfo_children():
+            child.destroy()
+
+        favourites = launcher.favorite_tools(tools)[:FAVORITE_LIMIT]
+        fav_ids = {launcher.tool_id(t) for t in favourites}
+        recents = launcher.recent_tools(tools, RECENT_LIMIT, exclude_ids=fav_ids)
+
+        if not favourites and not recents:
+            self._strips_frame.pack_forget()
+            return
+
+        # 必须 pack 在网格之前（pack_forget 后再 pack 会排到队尾）
+        options = {"fill": "x", "padx": 24, "pady": (0, 6)}
+        if getattr(self, "_main_body", None) is not None:
+            options["before"] = self._main_body
+        self._strips_frame.pack(**options)
+
+        if favourites:
+            self._build_strip_row("收藏", favourites)
+        if recents:
+            self._build_strip_row("最近", recents)
+
+    def _build_strip_row(self, title, items):
+        row = tk.Frame(self._strips_frame, bg=COLOR_BG)
+        row.pack(fill="x", pady=(0, 2))
+        tk.Label(row, text=title, bg=COLOR_BG, fg=COLOR_MUTED,
+                 font=("Microsoft YaHei", 9), width=4, anchor="w").pack(side="left")
+        for tool in items:
+            tid = launcher.tool_id(tool)
+            if tid is None:
+                continue
+            chip = tk.Label(row, text=launcher.strip_label(tool), bg=COLOR_CARD_HOVER,
+                            fg=COLOR_TEXT, font=("Microsoft YaHei", 9),
+                            padx=8, pady=2, cursor="hand2")
+            chip.pack(side="left", padx=(0, 6))
+            # 单击即启动 —— 横条存在的意义就是「一下点开」，不做二次确认
+            chip.bind("<Button-1>", lambda e, i=tid: self._run_tool_by_id(i))
+            chip.bind("<Button-3>", lambda e, i=tid: self._show_tool_menu(e, i))
+            chip.bind("<Enter>", lambda e, c=chip: c.configure(bg=COLOR_BORDER_LIGHT))
+            chip.bind("<Leave>", lambda e, c=chip: c.configure(bg=COLOR_CARD_HOVER))
+
+    # ------------------------------------------------------------------
+    # 状态条
+    # ------------------------------------------------------------------
+
+    def _build_status_bar(self):
+        self.status_var = tk.StringVar(value="")
+        self._status_bar = create_status_bar(self, self.status_var, padding=(24, 8))
+
+    def _update_status(self, tools=None, matched=None, keyword="", extra=""):
+        """状态条：数量 / 重名提醒 / 当前光标。"""
+        if tools is None:
+            tools = getattr(self, "_all_tools", [])
+        if matched is None:
+            matched = getattr(self, "_visible_tools", [])
+
+        parts = []
+        if keyword:
+            parts.append(f"匹配 {len(matched)} / {len(tools)}")
+        else:
+            parts.append(f"共 {len(matched)} 个工具")
+
+        # 重名是「工具多了就找不着」的头号原因，直接在这儿点名。
+        # 只统计当前「看得见」的那批 —— 在「系统工具」分类下还念叨别处的重名，
+        # 只会让人以为当前这个分类里有问题。
+        dupes = launcher.duplicate_names(matched)
+        if dupes:
+            shown = "、".join(f"{name}×{count}" for name, count in dupes[:3])
+            more = f" 等 {len(dupes)} 组" if len(dupes) > 3 else ""
+            parts.append(f"重名：{shown}{more}")
+
+        if extra:
+            parts.append(extra)
+        elif keyword and not matched:
+            # 只在「搜了但没搜到」时提示换词；套件本来就空的时候这么说很奇怪
+            parts.append("没有匹配项，试试别名或分类")
+
+        self.status_var.set("  ·  ".join(parts))
 
     def _build_main_area(self):
         """中间：左网格 + 中折叠按钮 + 右编辑（默认折叠 + 可展开）"""
@@ -784,16 +992,6 @@ class ToolsPage(ttk.Frame):
         self.scrollbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
 
-        # ★ view_bar：上下滚动按钮（绑定 canvas 垂直滚动）
-        view_bar = ttk.Frame(left)
-        view_bar.place(relx=1.0, x=-36, y=4, anchor="ne")
-        self.scroll_up_btn = ttk.Button(view_bar, text="▲", width=2,
-                                        command=lambda: self.canvas.yview_scroll(-5, "units"))
-        self.scroll_up_btn.pack(side="top", pady=(0, 2))
-        self.scroll_down_btn = ttk.Button(view_bar, text="▼", width=2,
-                                          command=lambda: self.canvas.yview_scroll(5, "units"))
-        self.scroll_down_btn.pack(side="top")
-
         # 列表视图（隐藏）
         self.list_frame = ttk.Frame(canvas_frame)
 
@@ -807,9 +1005,12 @@ class ToolsPage(ttk.Frame):
         self.canvas.bind("<Button-3>", lambda e: self._on_panel_right_click(e)
                          if e.widget == self.canvas else None)
         self.canvas.bind("<Configure>",
-                          lambda e: (self.canvas.itemconfigure(self.canvas_window, width=e.width),
-                                     self.after(0, self._update_scroll_btns)))
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+                          lambda e: self.canvas.itemconfigure(self.canvas_window, width=e.width))
+        # 滚轮只在指针进入网格时才接管：原来裸 bind_all，在右侧编辑面板的文本框里
+        # 滚动时滚的其实是背后的网格，很难受
+        self.canvas.bind("<Enter>",
+                          lambda e: self.canvas.bind_all("<MouseWheel>", self._on_mousewheel))
+        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
         # ★ 支持拖入 .exe（tkdnd）
         if HAS_TKDND and DND_FILES:
             try:
@@ -900,10 +1101,10 @@ class ToolsPage(ttk.Frame):
             self._main_body.columnconfigure(2, minsize=0, weight=0)
             self.toggle_btn.configure(text="▶")
             self._right_visible = False
-            if self.selected_tool_id and self.selected_tool_id in self.icon_widgets:
-                self.icon_widgets[self.selected_tool_id].configure(
-                    highlightbackground=COLOR_BORDER, highlightthickness=1)
+            previous = self.selected_tool_id
             self.selected_tool_id = None
+            if previous is not None:
+                self._paint_card(previous)
 
     # ------------------------------------------------------------------
     # 扫描
@@ -987,7 +1188,7 @@ class ToolsPage(ttk.Frame):
             return
         for iid in self.list_tree.get_children():
             self.list_tree.delete(iid)
-        keyword = self.search_var.get().strip()
+        keyword = self._current_keyword()
         tools = tools_db.list_tools(self.db, category=self.current_category, keyword=keyword)
         for t in tools:
             self.list_tree.insert("", "end", iid=str(t["id"]),
@@ -1084,46 +1285,38 @@ class ToolsPage(ttk.Frame):
                 tools_db.add_category(self.db, category)
         tools_db.add_tool(self.db, name=p.stem, path=store_path, category=category or "未分类")
 
+    def _fetch_package_tools(self) -> list[dict]:
+        """当前包下全部未删除工具（不按分类 / 关键词过滤）。"""
+        return tools_db.list_tools(self.db, package=self.current_package)
+
     def _refresh_categories(self):
-        """重绘分类按钮 + 右键菜单（仅显示当前包下的分类）— 黑白极简风格"""
-        for btn in self.category_buttons:
-            btn.destroy()
+        """按「当前包 → 有工具的分类」重绘 chip 条，并带上数量。"""
+        for chip in self.category_buttons:
+            chip.destroy()
         self.category_buttons.clear()
+        self._category_chips.clear()
 
-        # ★ 只取当前包下的分类（包→分类 联动）
-        categories = tools_db.list_categories(self.db, package=self.current_package)
+        counts: dict[str, int] = {}
+        for tool in self._fetch_package_tools():
+            key = tool.get("category") or "未分类"
+            counts[key] = counts.get(key, 0) + 1
 
-        for cat in categories:
-            # 使用自定义样式按钮
-            btn = tk.Label(self.category_container, text=cat["name"],
-                           bg=COLOR_BG, fg=COLOR_TEXT,
-                           font=("Microsoft YaHei", 9),
-                           padx=10, pady=2,
-                           relief="raised", bd=1,
-                           highlightthickness=1, highlightbackground=COLOR_BORDER_LIGHT,
-                           cursor="hand2")
-            btn.pack(side="left", padx=(0, 6), pady=1)
+        all_categories = tools_db.list_categories(self.db, package=self.current_package)
+        entries = [("全部", sum(counts.values()), None)]
+        for category in all_categories:
+            if counts.get(category["name"], 0) > 0:
+                entries.append((category["name"], counts[category["name"]], category["id"]))
 
-            # 点击切换分类
-            btn.bind("<Button-1>", lambda e, n=cat["name"]: self._switch_category(n))
-            btn.bind("<Button-3>", lambda e, cid=cat["id"], n=cat["name"]: self._show_category_menu(e, cid, n))
+        # 当前分类已被删空 / 移走时，自动退回「全部」，免得停在一个空页面上
+        if self.current_category not in {name for name, _, _ in entries}:
+            self.current_category = "全部"
 
-            # 悬停效果
-            btn.bind("<Enter>", lambda e, b=btn: b.configure(bg="#f5f5f5"))
-            btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=COLOR_BG))
+        for name, count, category_id in entries:
+            self._create_category_chip(name, count, category_id)
 
-            # 选中状态（当前分类）
-            if cat["name"] == self.current_category:
-                btn.configure(relief="sunken", bg="#e8e8e8")
-
-            # ★ 拖入支持
-            self._make_category_drop_target(btn, cat["id"], cat["name"])
-            self.category_buttons.append(btn)
-
-        # 同步到编辑区下拉
+        # 同步到编辑区下拉（这里要保留空分类，用户可能正想把工具改进去）
         if hasattr(self, "edit_category_combo"):
-            self.edit_category_combo["values"] = [c["name"] for c in categories]
-        # 同步到包下拉
+            self.edit_category_combo["values"] = [c["name"] for c in all_categories]
         self._refresh_package_combo()
 
     def _refresh_package_combo(self):
@@ -1186,97 +1379,214 @@ class ToolsPage(ttk.Frame):
                 messagebox.showerror("错误", f"设置失败：{e}", parent=self)
 
     def _switch_category(self, name: str):
+        """切分类：只重涂 chip（不重建），再刷新网格。"""
+        if name == self.current_category:
+            return
         self.current_category = name
-        # ★ 修复：tk.Label 没有 state 方法，直接改 relief
-        for btn in self.category_buttons:
-            btn.configure(relief="raised", bg=COLOR_BG)
-        for btn in self.category_buttons:
-            if btn.cget("text") == name:
-                btn.configure(relief="sunken", bg="#e8e8e8")
+        for category_name, chip in self._category_chips.items():
+            active = (category_name == name)
+            chip.configure(bg=COLOR_ACCENT if active else COLOR_CARD_HOVER,
+                           fg=COLOR_ACCENT_TEXT if active else COLOR_TEXT)
         self._refresh_grid()
 
     def _refresh_grid(self):
-        for w in self.grid_frame.winfo_children():
-            w.destroy()
+        """重建网格：按包拉全量 → 按分类过滤 → 按关键词模糊排序。
+
+        关键词过滤交给 tools_launcher.rank_tools，不用 SQL LIKE：
+        否则 "dkgn" 这种子序列输入在 SQL 层就直接返回 0 条了。
+        """
+        for child in self.grid_frame.winfo_children():
+            child.destroy()
         self.icon_widgets = {}
+        self.icon_subwidgets = {}
+        self._star_labels = {}
+        self._cursor_tool_id = None
+        self._hover_tool_id = None
         # ★ 同步顶部色块（包切换、设置色后与卡片色条同步）
         self._refresh_package_swatch()
 
-        keyword = self.search_var.get().strip()
-        sort_key = tools_db.get_setting(self.db, "sort_key", "")
-        tools = tools_db.list_tools(self.db, category=self.current_category, keyword=keyword,
-                                    sort_key=sort_key, package=self.current_package)
-        if not tools:
-            ttk.Label(self.grid_frame,
-                      text="(空) 把 .exe 拖入 Tools 文件夹，或点击 ➕ 添加工具",
-                      foreground=COLOR_MUTED).pack(pady=40)
-            self.after(0, self._update_scroll_btns)
+        tools = self._fetch_package_tools()
+        self._all_tools = tools
+        if self.current_category != "全部":
+            tools = [t for t in tools
+                     if (t.get("category") or "未分类") == self.current_category]
+
+        keyword = self._current_keyword()
+        matched = launcher.rank_tools(tools, keyword)
+        self._visible_tools = matched
+        hints = launcher.compute_hints(self._all_tools)
+
+        if not matched:
+            self._render_empty_state(keyword)
+        else:
+            cols = max(int(self.grid_cols), 1)
+            # uniform 让每列等宽 —— 否则一行里长名字的卡片会把短名字的挤扁
+            for col in range(cols):
+                self.grid_frame.columnconfigure(col, weight=1, uniform="toolcard")
+            for index, tool in enumerate(matched):
+                row, col = divmod(index, cols)
+                self._create_icon_card(self.grid_frame, tool, row, col,
+                                        hint=hints.get(launcher.tool_id(tool), ""))
+            # 搜完自动把光标落在第一条命中上 —— 接着按回车就能启动
+            if keyword:
+                first = launcher.tool_id(matched[0])
+                if first is not None:
+                    self._set_cursor(first, quiet=True)
+
+        self._refresh_strips(self._all_tools)
+        self._update_status(self._all_tools, matched, keyword,
+                            extra=self._cursor_label())
+
+    def _render_empty_state(self, keyword: str):
+        if keyword:
+            text = f"没有匹配「{keyword}」的工具\n换个关键词，或按 Esc 清空搜索"
+        elif not tools_db.list_categories(self.db, package=self.current_package):
+            text = (f"「{self.current_package}」套件下还没有分类，所以这里是空的。\n"
+                     f"到右上角「包管理」把分类分配到套件，或把「包」切回有内容的套件。")
+        else:
+            text = "这个分类下还没有工具。\n把 .exe 拖进来，或点右上角「添加工具」。"
+        tk.Label(self.grid_frame, text=text, bg=COLOR_BG, fg=COLOR_MUTED,
+                 font=("Microsoft YaHei", 10), justify="center").pack(pady=60)
+
+    # ------------------------------------------------------------------
+    # 键盘光标
+    # ------------------------------------------------------------------
+
+    def _cursor_label(self) -> str:
+        if self._cursor_tool_id is None:
+            return ""
+        tool = next((t for t in self._visible_tools
+                     if launcher.tool_id(t) == self._cursor_tool_id), None)
+        return f"选中 {tool['name']}" if tool else ""
+
+    def _set_cursor(self, tool_id, *, quiet: bool = False):
+        if tool_id is None or tool_id == self._cursor_tool_id:
             return
+        previous, self._cursor_tool_id = self._cursor_tool_id, tool_id
+        for tid in (previous, tool_id):
+            if tid is not None:
+                self._paint_card(tid)
+        self._scroll_card_into_view(tool_id)
+        if not quiet:
+            self._update_status(extra=self._cursor_label())
 
-        cols = self.grid_cols
-        for i, tool in enumerate(tools):
-            row, col = divmod(i, cols)
-            self._create_icon_card(self.grid_frame, tool, row, col)
-        # ★ 布局完后再判断是否需要显示滚动按钮
-        self.after(0, self._update_scroll_btns)
+    def _move_cursor(self, step: int):
+        """把光标在可见结果里上下移动；到边界就绕回去。"""
+        ids = [launcher.tool_id(t) for t in self._visible_tools]
+        ids = [i for i in ids if i is not None]
+        if not ids:
+            return "break"
+        if self._cursor_tool_id in ids:
+            index = (ids.index(self._cursor_tool_id) + step) % len(ids)
+        else:
+            index = 0 if step >= 0 else len(ids) - 1
+        self._set_cursor(ids[index])
+        return "break"
 
-    def _update_scroll_btns(self):
-        """根据内容溢出决定上下滚动按钮是否显示。
-        溢出：内容高度 > 可见区域 → 显示
-        未溢出：图标已铺满 → 隐藏（避免空跑）"""
-        try:
-            self.canvas.update_idletasks()
-            bbox = self.canvas.bbox("all")
-            if not bbox:
-                return
-            content_h = bbox[3] - bbox[1]
-            view_h = self.canvas.winfo_height()
-            need_scroll = content_h > view_h
-        except Exception:
-            need_scroll = False
-        if hasattr(self, 'scroll_up_btn'):
-            if need_scroll:
-                try:
-                    self.scroll_up_btn.master.place(relx=1.0, x=-36, y=4, anchor="ne")
-                except tk.TclError:
-                    pass
+    def _scroll_card_into_view(self, tool_id):
+        """键盘移动时把卡片滚进可见区，否则光标会跑到视野外。"""
+        card = self.icon_widgets.get(tool_id)
+        if card is None or not card.winfo_exists():
+            return
+        self.canvas.update_idletasks()
+        bbox = self.canvas.bbox("all")
+        if not bbox:
+            return
+        content_h = max(bbox[3] - bbox[1], 1)
+        top = card.winfo_y()
+        bottom = top + card.winfo_height()
+        view_top = self.canvas.canvasy(0)
+        view_h = self.canvas.winfo_height()
+        if top < view_top:
+            self.canvas.yview_moveto(max(top, 0) / content_h)
+        elif bottom > view_top + view_h:
+            self.canvas.yview_moveto(max(bottom - view_h, 0) / content_h)
+
+    # ------------------------------------------------------------------
+    # 卡片
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fit_px(text: str, max_px: int, font) -> str:
+        """按像素宽度截断：中英混排时「数几个字符」完全不可靠。
+
+        二分找最长可放下前缀，再补省略号 —— 与到期表格用的是同一套思路。
+        """
+        text = (text or "").strip()
+        if not text or max_px <= 0:
+            return ""
+        if font.measure(text) <= max_px:
+            return text
+        ellipsis = "…"
+        room = max_px - font.measure(ellipsis)
+        if room <= 0:
+            return ellipsis
+        low, high = 0, len(text)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if font.measure(text[:mid]) <= room:
+                low = mid
             else:
-                try:
-                    self.scroll_up_btn.master.place_forget()
-                except tk.TclError:
-                    pass
+                high = mid - 1
+        return text[:low] + ellipsis
 
-    def _create_icon_card(self, parent, tool: dict, row: int, col: int):
-        # ★ 卡片尺寸 = icon_size + padding，扁平化圆角风格
-        card_w = self.icon_size + 16
-        card_h = self.icon_size + 44  # 图标区 + 名字区 + 间距
-        tool_id = tool["id"]
+    def _create_icon_card(self, parent, tool: dict, row: int, col: int, *, hint: str = ""):
+        """一张工具卡片：图标 / 名字 / 副标题 + 右上角星标。
 
-        # 卡片容器：纯白背景，无边框，悬停效果
+        副标题是关键 —— 用户有 3 个 putty、2 个 simplewall，光看名字分不清；
+        星标常显（不满 hover）是因为「能收藏」这件事本身需要被发现。
+        """
+        tool_id = launcher.tool_id(tool)
+        card_w = max(self.icon_size + 56, CARD_MIN_WIDTH)
+        name_lines = 2
+        # tk.Label 单行 reqheight 实测 = linespace + 6（17 -> 23），别漏掉这个常数，
+        # 否则卡片会比内容矮，标题第二行会被切掉
+        name_h = name_lines * self._name_font.metrics("linespace") + LABEL_VPAD
+        hint_h = self._hint_font.metrics("linespace") + LABEL_VPAD
+        card_h = 6 + self.icon_size + 4 + name_h + 2 + hint_h + 6
+
         card = tk.Frame(parent, bg=COLOR_BG, relief="flat", bd=0,
-                         width=card_w, height=card_h)
+                        width=card_w, height=card_h,
+                        highlightthickness=1, highlightbackground=COLOR_BORDER_LIGHT)
         card.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
         card.grid_propagate(False)
 
+        # 星标：常显，点一下收藏/取消（不必再展开右侧面板找按钮）
+        favourited = launcher.as_flag(tool.get("is_favorite"))
+        star = tk.Label(card, bg=COLOR_BG, cursor="hand2",
+                        text="★" if favourited else "☆",
+                        fg=COLOR_WARNING if favourited else COLOR_BORDER,
+                        font=("Microsoft YaHei", 10))
+        star.place(relx=1.0, x=-3, y=1, anchor="ne")
+        star.bind("<Button-1>", lambda e, i=tool_id: self._toggle_favorite_by_id(i))
+
         # 图标
-        # ★ 图标 Label 固定尺寸，防止图片过大撑破卡片
         icon_label = tk.Label(card, bg=COLOR_BG, cursor="hand2")
         self._load_tool_icon(tool, icon_label)
         icon_label.pack(pady=(6, 2))
 
-        # 名称
-        name_label = tk.Label(card, text=tool["name"], bg=COLOR_BG,
-                               fg=COLOR_TEXT, font=("", 9),
-                               wraplength=88, justify="center", cursor="hand2")
-        name_label.pack(pady=(0, 4), padx=2)
+        # 名字：限制在两行高度内，否则换行会把固定高度的卡片撑破
+        available = card_w - 16
+        title = self._fit_px(tool.get("name") or "", available * name_lines, self._name_font)
+        name_label = tk.Label(card, text=title, bg=COLOR_BG, fg=COLOR_TEXT,
+                               font=self._name_font, wraplength=available,
+                               justify="center", cursor="hand2")
+        name_label.pack(padx=4)
+
+        # 副标题：别名 / 分类 / 上级目录（重名时取能区分开的那一个）
+        hint_text = hint or ""
+        if launcher.as_flag(tool.get("run_as_admin")):
+            hint_text = f"{hint_text} · 管理" if hint_text else "管理员"
+        hint_label = tk.Label(card, text=self._fit_px(hint_text, available + 8, self._hint_font),
+                               bg=COLOR_BG, fg=COLOR_MUTED,
+                               font=self._hint_font, cursor="hand2")
+        hint_label.pack(pady=(0, 2))
 
         self.icon_widgets[tool_id] = card
-        # ★ 同时存储子 widget 用于 hover 同步
-        if not hasattr(self, 'icon_subwidgets'):
-            self.icon_subwidgets = {}
-        self.icon_subwidgets[tool_id] = (icon_label, name_label)
+        self.icon_subwidgets[tool_id] = (icon_label, name_label, hint_label, star)
+        self._star_labels[tool_id] = star
 
-        for widget in (card, icon_label, name_label):
+        for widget in (card, icon_label, name_label, hint_label):
             widget.bind("<Button-1>",
                         lambda e, tid=tool_id: self._on_card_press(e, tid))
             widget.bind("<Double-Button-1>",
@@ -1287,6 +1597,33 @@ class ToolsPage(ttk.Frame):
                         lambda e, w=card, tid=tool_id: self._on_card_hover(w, True, tid))
             widget.bind("<Leave>",
                         lambda e, w=card, tid=tool_id: self._on_card_hover(w, False, tid))
+
+    def _paint_card(self, tool_id):
+        """按「键盘光标 > 编辑选中 > 鼠标悬停 > 常态」重涂一张卡片。
+
+        以前 hover 和 selected 各自 configure 一遍子控件，互相盖掉是常事；
+        统一成一个优先级判定后就不会打架了。
+        """
+        card = self.icon_widgets.get(tool_id)
+        if card is None or not card.winfo_exists():
+            return
+        if tool_id == self._cursor_tool_id:
+            bg, border, thickness = COLOR_CARD_HOVER, COLOR_ACCENT, 2
+        elif tool_id == self.selected_tool_id:
+            bg, border, thickness = COLOR_BG, COLOR_PRIMARY, 2
+        elif tool_id == self._hover_tool_id:
+            bg, border, thickness = COLOR_CARD_HOVER, COLOR_BORDER, 1
+        else:
+            bg, border, thickness = COLOR_BG, COLOR_BORDER_LIGHT, 1
+        try:
+            card.configure(bg=bg, highlightbackground=border, highlightthickness=thickness)
+        except tk.TclError:
+            return
+        for widget in self.icon_subwidgets.get(tool_id, ()):
+            try:
+                widget.configure(bg=bg)
+            except tk.TclError:
+                pass
 
     def _get_icon_cache_path(self, exe_path: str, size: int) -> Path:
         """生成图标缓存路径。基于 exe 文件名 + 文件 hash（mtime+size）+ 尺寸。"""
@@ -1414,43 +1751,25 @@ class ToolsPage(ttk.Frame):
         }
 
     def _on_card_hover(self, card, hover: bool, tool_id: int):
-        # 选中态优先于 hover
-        if self.selected_tool_id == tool_id:
-            return
         if hover:
-            # hover：加深背景色 + 加粗边框（不改变盒子大小/不调整 padding）
-            card.configure(bg=COLOR_DROP_HOVER,
-                           highlightbackground=COLOR_ACCENT,
-                           highlightthickness=2)
-            # ★ 同步子 widget 背景色（跳过 accent_bar，保留色钆）
-            if hasattr(self, 'icon_subwidgets') and tool_id in self.icon_subwidgets:
-                for w in self.icon_subwidgets[tool_id][:2]:
-                    w.configure(bg=COLOR_DROP_HOVER)
-        else:
-            card.configure(bg=COLOR_BG,
-                           highlightbackground=COLOR_BORDER,
-                           highlightthickness=1)
-            if hasattr(self, 'icon_subwidgets') and tool_id in self.icon_subwidgets:
-                for w in self.icon_subwidgets[tool_id][:2]:
-                    w.configure(bg=COLOR_BG)
+            self._hover_tool_id = tool_id
+        elif self._hover_tool_id == tool_id:
+            self._hover_tool_id = None
+        self._paint_card(tool_id)
 
     def _select_tool(self, tool_id: int):
         # ★ 选中时自动展开右栏
         if not self._right_visible:
             self._toggle_right_panel()
-        # ★ 先清除旧的选中态
-        if self.selected_tool_id and self.selected_tool_id in self.icon_widgets:
-            old = self.icon_widgets[self.selected_tool_id]
-            old.configure(highlightbackground=COLOR_BORDER, highlightthickness=1)
-
+        # ★ 选中态交给统一画法：和 hover / 键盘光标按优先级重涂
+        previous = self.selected_tool_id
         self.selected_tool_id = tool_id
+        for tid in (previous, tool_id):
+            if tid is not None:
+                self._paint_card(tid)
         tool = tools_db.get_tool(self.db, tool_id)
         if not tool:
             return
-        # ★ 应用新的选中态
-        if tool_id in self.icon_widgets:
-            new = self.icon_widgets[tool_id]
-            new.configure(highlightbackground=COLOR_PRIMARY, highlightthickness=2)
 
         self.edit_name_var.set(tool["name"])
         self.edit_alias_var.set(tool.get("alias") or "")
@@ -1563,14 +1882,34 @@ class ToolsPage(ttk.Frame):
         self.icon_preview_label.configure(text="(无)", image="")
 
     def _toggle_favorite(self):
+        """右侧面板的收藏按钮 —— 直接复用卡片星标那条路径，行为保持一致。"""
         if not self.selected_tool_id:
             return
-        tool = tools_db.get_tool(self.db, self.selected_tool_id)
+        self._toggle_favorite_by_id(self.selected_tool_id)
+
+    def _toggle_favorite_by_id(self, tool_id: int):
+        tool = tools_db.get_tool(self.db, tool_id)
         if not tool:
             return
-        new_val = not bool(tool["is_favorite"])
-        tools_db.update_tool(self.db, self.selected_tool_id, is_favorite=new_val)
-        # ★ 快速启动栏已移除，不再联动
+        new_value = not launcher.as_flag(tool.get("is_favorite"))
+        tools_db.update_tool(self.db, tool_id, is_favorite=new_value)
+        # 同步内存快照：为了点一颗星就整表重查 + 重建网格，画面会闪
+        for bucket in (self._all_tools, self._visible_tools):
+            for item in bucket:
+                if launcher.tool_id(item) == tool_id:
+                    item["is_favorite"] = 1 if new_value else 0
+        self._refresh_star(tool_id)
+        self._refresh_strips(self._all_tools)
+        self._update_status(extra=self._cursor_label())
+
+    def _refresh_star(self, tool_id):
+        star = self._star_labels.get(tool_id)
+        if star is None or not star.winfo_exists():
+            return
+        favourited = any(launcher.as_flag(t.get("is_favorite"))
+                         for t in self._all_tools if launcher.tool_id(t) == tool_id)
+        star.configure(text="★" if favourited else "☆",
+                       fg=COLOR_WARNING if favourited else COLOR_BORDER)
 
     def _run_selected_tool(self):
         if not self.selected_tool_id:
@@ -1593,6 +1932,7 @@ class ToolsPage(ttk.Frame):
         if raw_path.lower().startswith(("http://", "https://")):
             import webbrowser
             webbrowser.open(raw_path)
+            self._after_tool_run(tool_id)
             return
 
         if not abs_path.exists():
@@ -1607,23 +1947,35 @@ class ToolsPage(ttk.Frame):
 
             if tool.get("run_as_admin"):
                 # ★ 提权时用 list2cmdline 正确引用路径（含空格/单引号均安全）
-                import subprocess as _sub
-                safe_path = _sub.list2cmdline([str(abs_path)])
-                safe_args = _sub.list2cmdline(args) if args else ""
+                safe_path = subprocess.list2cmdline([str(abs_path)])
+                safe_args = subprocess.list2cmdline(args) if args else ""
                 ps_parts = [f'Start-Process -FilePath {safe_path} -Verb RunAs']
                 if safe_args:
                     ps_parts.append(f'-ArgumentList {safe_args}')
-                ps_cmd = " ".join(ps_parts)
-                _sub.Popen(["powershell.exe", "-Command", ps_cmd], shell=False)
+                subprocess.Popen(["powershell.exe", "-Command", " ".join(ps_parts)],
+                                 shell=False)
             else:
                 if hasattr(os, 'startfile') and not args:
                     # ★ startfile 体验最佳（用文件关联打开）
                     os.startfile(str(abs_path))
                 else:
                     # ★ shell=False + 列表形式，避免命令注入
-                    _sub.Popen([str(abs_path)] + args, shell=False)
+                    #   注意：这里以前写的是 _sub.Popen，而 _sub 只在上面提权分支里
+                    #   才绑定 —— 「带参数 + 不提权」会直接 NameError。改用模块级 subprocess。
+                    subprocess.Popen([str(abs_path)] + args, shell=False)
+            self._after_tool_run(tool_id)
         except Exception as e:
             messagebox.showerror("错误", f"启动失败：\n{e}", parent=self)
+
+    def _after_tool_run(self, tool_id: int):
+        """启动成功后的收尾：记一次「最近使用」并刷新横条。"""
+        tools_db.touch_tool_run(self.db, tool_id)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for item in self._all_tools:
+            if launcher.tool_id(item) == tool_id:
+                item["last_run_at"] = stamp
+                item["run_count"] = int(item.get("run_count") or 0) + 1
+        self._refresh_strips(self._all_tools)
 
     def _show_tool_menu(self, event, tool_id: int):
         menu = tk.Menu(self, tearoff=0)
@@ -2086,7 +2438,7 @@ class ToolsPage(ttk.Frame):
 
     def _refresh_current_icons(self):
         """重新抽取当前分类下所有工具的图标"""
-        keyword = self.search_var.get().strip()
+        keyword = self._current_keyword()
         sort_key = tools_db.get_setting(self.db, "sort_key", "")
         tools = tools_db.list_tools(self.db, category=self.current_category, keyword=keyword,
                                     sort_key=sort_key, package=self.current_package)
