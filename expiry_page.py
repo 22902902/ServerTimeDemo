@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """到期管理页面类。"""
 
+import re
+import tkinter.font as tkfont
 from tkinter import ttk
 
 from page_components import add_toolbar_buttons, create_content_frame, create_page_toolbar, create_status_bar
@@ -19,6 +21,106 @@ COLUMN_ALIGN = {
     "detail_action": "center",
     "accounts_action": "center",
 }
+
+
+# ----------------------------------------------------------------------
+# 单元格文本收敛：表格负责「扫视」，详情弹窗负责「细读」
+#
+# 「资源详情」在库里常是多行（一行一个 IP / 域名 / 域名列表），
+# 直接塞进 Treeview 会把行撑高、文字溢出到相邻列，整张表看起来是散的。
+# 这里统一收敛成一行、不超出列宽：换行折成分隔符，放不下就丢整段并加省略号。
+#
+# 为什么强调「丢整段」而不是直接按字符切：像
+#   IP：203.0.113.45 / 配置：4 核（vCPU）16 GiB10 Mbps
+# 按字符切会得到「…（vCPU）1…」这种从数值中间断开的残句，读起来是坏的；
+# 整段丢弃则得到「IP：203.0.113.45…」，至少每一段都是完整的。
+# Treeview 自己超宽只会硬裁（看不出「后面还有」），所以省略号必须自己加。
+# ----------------------------------------------------------------------
+CELL_SUMMARY_SEP = " · "
+CELL_TEXT_PADDING = 14   # 单元格左右留白，避免文字顶到列边线上
+
+
+def split_cell_chunks(value) -> list[str]:
+    """按换行把单元格值切成若干段（去掉空段与首尾空白）。"""
+    if value is None:
+        return []
+    return [chunk.strip() for chunk in re.split(r"[\r\n]+", str(value)) if chunk.strip()]
+
+
+def compact_cell_text(value, *, sep: str = CELL_SUMMARY_SEP) -> str:
+    """把可能多行的单元格值压成单行（换行折成分隔符）。"""
+    return sep.join(split_cell_chunks(value))
+
+
+def ellipsize_px(text: str, max_px: int, *, font) -> str:
+    """按像素宽度截断并追加省略号（宽度用二分查找量，不逐字符循环）。
+
+    这是最后手段：只在「连第一段都放不下」时才用，避免把数值从中间切开。
+    """
+    if not text or max_px <= 0:
+        return text or ""
+    if font.measure(text) <= max_px:
+        return text
+    ellipsis = "…"
+    budget = max_px - font.measure(ellipsis)
+    if budget <= 0:
+        return ellipsis
+    low, high = 0, len(text)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if font.measure(text[:mid]) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return text[:low].rstrip() + ellipsis
+
+
+def treeview_font(tree):
+    """取 Treeview 实际使用的字体，供按像素量算截断宽度。"""
+    try:
+        spec = ttk.Style(tree).lookup("Treeview", "font")
+    except Exception:
+        spec = None
+    if spec:
+        try:
+            return tkfont.Font(root=tree, font=spec)
+        except Exception:
+            pass
+    return tkfont.nametofont("TkDefaultFont")
+
+
+def summarize_cell_text(value, column: str, *, column_meta, font=None,
+                        sep: str = CELL_SUMMARY_SEP) -> str:
+    """把单元格值收敛成「一行、且不超出该列宽度」的摘要。
+
+    放得下 → 原样；放不下 → 逐段保留、末尾加省略号；连第一段都放不下
+    → 才退化为按像素截断。完整内容一律由「详情」弹窗承载。
+    """
+    chunks = split_cell_chunks(value)
+    if not chunks:
+        return ""
+    width = column_meta.get(column, {}).get("width", 0)
+    if not width:
+        return sep.join(chunks)
+
+    font = font or tkfont.nametofont("TkDefaultFont")
+    limit = width - CELL_TEXT_PADDING
+    full = sep.join(chunks)
+    if font.measure(full) <= limit:
+        return full
+
+    kept = ""
+    for index, chunk in enumerate(chunks):
+        candidate = chunk if not kept else kept + sep + chunk
+        # 还有后续段时先预留省略号的位置，否则最后一段会被省略号顶出列外
+        tail = "…" if index < len(chunks) - 1 else ""
+        if font.measure(candidate + tail) <= limit:
+            kept = candidate
+        else:
+            break
+    if kept:
+        return kept + "…"
+    return ellipsize_px(chunks[0], limit, font=font)
 
 
 class ExpiryPage:

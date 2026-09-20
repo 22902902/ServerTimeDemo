@@ -153,7 +153,7 @@ from account_windows import AccountManagerDialog as SharedAccountManagerDialog
 from backend_page import BackendPage
 from credential_process_dialogs import CredentialItemDialog, ProcessFlowDialog, ProcessStepDialog
 from expiry_dialogs import AssetDialog, DetailDialog, SettingsDialog
-from expiry_page import ExpiryPage
+from expiry_page import ExpiryPage, summarize_cell_text, treeview_font
 from credentials_page import CredentialsPage
 from process_page import ProcessPage
 from ui_theme import MAIN_PALETTE, THEME, TYPOGRAPHY
@@ -228,7 +228,7 @@ DEFAULT_DISPLAY_COLUMNS = [
 COLUMN_META = {
     "id":               {"title": "ID",          "width": 60},
     "record_no":        {"title": "编号",         "width": 100},
-    "platform":         {"title": "平台",         "width": 90},
+    "platform":         {"title": "平台",         "width": 130},
     "account_no":       {"title": "账号信息",     "width": 180},
     "account_subject":  {"title": "主体账号",     "width": 180},
     "resource_type":    {"title": "资源类型",     "width": 120},
@@ -1109,6 +1109,17 @@ def parse_expiry_value(raw_value) -> tuple[date | None, str]:
 
 def format_date(value: date | None) -> str:
     return value.strftime("%Y-%m-%d") if value else ""
+
+
+def parse_expiry_date(text) -> date | None:
+    """把 "YYYY-MM-DD" 解析成 date；为空或格式不对时返回 None（不抛）。"""
+    text = str(text or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def days_left(expiry_date: date | None) -> int | None:
@@ -4116,10 +4127,20 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             self.tree.delete(item)
 
         rows = self.db.fetch_assets(keyword=keyword)
+        table_font = treeview_font(self.tree)
+
+        def cell(value, column):
+            """单元格统一「压成单行 + 按列宽截断」。
+
+            库里的资源详情/账号信息可能是多行的（一行一个 IP 或域名），
+            直接塞进 Treeview 会把行撑高、文字溢出到相邻列，整表看着是散的；
+            这里统一收敛成一行并加省略号，完整内容由「详情」弹窗负责。
+            """
+            return summarize_cell_text(value, column,
+                                       column_meta=COLUMN_META, font=table_font)
+
         for row in rows:
-            expiry_dt = None
-            if row["expiry_date"]:
-                expiry_dt = datetime.strptime(row["expiry_date"], "%Y-%m-%d").date()
+            expiry_dt = parse_expiry_date(row["expiry_date"])
             remain = days_left(expiry_dt)
             tag = ""
             if remain is not None and remain < 0:
@@ -4140,17 +4161,17 @@ class ExpiryManagerApp(TkinterDnD.Tk):
                 values=(
                     row["id"],
                     row["record_no"],
-                    row["platform"],
-                    account_summary,
-                    account_subject,
-                    row["resource_type"],
-                    row["resource_detail"],
-                    resource_subject,
+                    cell(row["platform"], "platform"),
+                    cell(account_summary, "account_no"),
+                    cell(account_subject, "account_subject"),
+                    cell(row["resource_type"], "resource_type"),
+                    cell(row["resource_detail"], "resource_detail"),
+                    cell(resource_subject, "resource_subject"),
                     row["expiry_date"],
                     "" if remain is None else remain,
                     "详情",
                     f"账户({account_count})",
-                    row["note"],
+                    cell(row["note"], "note"),
                 ),
                 tags=(tag,) if tag else (),
             )
@@ -4199,6 +4220,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             self.db.fetch_shared_accounts(row["account_no"]),
             detail_fields=DETAIL_FIELDS,
             format_account_identity=format_account_identity,
+            remain_days=days_left(parse_expiry_date(row["expiry_date"])),
         )
 
     def show_account_manager(self, asset_id: int):
