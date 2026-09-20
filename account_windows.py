@@ -7,6 +7,29 @@ import webbrowser
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
+from dialog_form_style import apply_dialog_form_style
+from page_components import (
+    GUTTER,
+    add_toolbar_buttons,
+    create_menu_button,
+    create_table_preview_split,
+    pack_tree_with_scrollbars,
+)
+from ui_theme import MAIN_PALETTE, TYPOGRAPHY
+
+
+def center_dialog_over_parent(dialog, parent) -> None:
+    """把弹窗摆到父窗口中间偏上，而不是永远贴在屏幕/父窗口左上角。"""
+    try:
+        parent.update_idletasks()
+        size = dialog.geometry().split("+")[0]
+        width, height = (int(value) for value in size.split("x"))
+        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - width) // 2)
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - height) // 3)
+        dialog.geometry(f"+{x}+{y}")
+    except Exception:
+        pass
+
 
 class AccountManagerDialog(tk.Toplevel):
     """共享账户管理窗口。"""
@@ -36,74 +59,111 @@ class AccountManagerDialog(tk.Toplevel):
         self.group_key = normalize_text(group_key)
         self.context = context or {}
         self.title("账户管理")
-        self.geometry("980x460")
+        self.geometry("1220x580")
+        self.minsize(940, 460)
         self.transient(parent)
         self.grab_set()
         self.build_ui()
         self.refresh_accounts()
+        center_dialog_over_parent(self, parent)
 
     def build_ui(self):
-        title = ttk.Label(self, text=f"账号编号：{self.group_key or '未设置'}")
-        title.pack(anchor="w", padx=10, pady=(10, 6))
+        apply_dialog_form_style(self, MAIN_PALETTE, style_prefix="AccountDialog")
+        self.bind("<Escape>", lambda event: self.destroy())
 
+        header = ttk.Frame(self, padding=(GUTTER, 18, GUTTER, 8))
+        header.pack(fill="x")
+        ttk.Label(
+            header,
+            text=f"账号编号：{self.group_key or '未设置'}",
+            font=TYPOGRAPHY.subtitle,
+            style="AccountDialog.TLabel",
+        ).pack(anchor="w")
         used_count = self.db.count_assets_by_account_no(self.group_key)
-        subtitle = ttk.Label(self, text=f"当前有 {used_count} 条资源共用这个账户编号，修改后会同步反映到这些记录。")
-        subtitle.pack(anchor="w", padx=10, pady=(0, 6))
+        ttk.Label(
+            header,
+            text=f"当前有 {used_count} 条资源共用这个账户编号，修改后会同步反映到这些记录。",
+            style="AccountDialogMuted.TLabel",
+        ).pack(anchor="w", pady=(4, 0))
 
-        toolbar = ttk.Frame(self, padding=(10, 0, 10, 6))
+        # 13 个按钮平铺一行时需求 1563px、可用 960px，末尾 5 个按钮被 Tk 直接
+        # 不映射。这里把复制类与打开类各收进一个下拉。
+        toolbar = ttk.Frame(self, padding=(GUTTER, 0, GUTTER, 10))
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="新增账户", command=self.add_account).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="编辑账户", command=self.edit_account).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="删除选中", command=self.delete_account).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="复制整行", command=self.copy_account_row).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="复制模板", command=self.copy_account_template).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="复制账号", command=self.copy_account_name).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="复制密码", command=self.copy_password).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="复制邮箱", command=self.copy_email).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="复制手机号", command=self.copy_phone).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="打开链接", command=self.open_link).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="查看截图", command=self.open_selected_account_screenshot).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="打开截图文件夹", command=self.open_selected_account_image_folder).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="关闭", command=self.destroy).pack(side="right", padx=4)
+        add_toolbar_buttons(
+            toolbar,
+            [
+                ("新增账户", self.add_account, "Primary.TButton"),
+                ("编辑账户", self.edit_account),
+                ("删除选中", self.delete_account),
+            ],
+        )
+        create_menu_button(
+            toolbar,
+            "复制",
+            [
+                ("复制整行", self.copy_account_row),
+                ("复制模板", self.copy_account_template),
+                ("复制账号", self.copy_account_name),
+                ("复制密码", self.copy_password),
+                ("复制邮箱", self.copy_email),
+                ("复制手机号", self.copy_phone),
+            ],
+        )
+        create_menu_button(
+            toolbar,
+            "更多",
+            [
+                ("打开链接", self.open_link),
+                "---",
+                ("查看截图", self.open_selected_account_screenshot),
+                ("打开截图文件夹", self.open_selected_account_image_folder),
+            ],
+        )
+        ttk.Button(toolbar, text="关闭", command=self.destroy).pack(side="right", padx=(6, 0))
 
-        content = ttk.Frame(self, padding=(10, 0, 10, 10))
-        content.pack(fill="both", expand=True)
-        table_frame = ttk.Frame(content)
-        table_frame.pack(side="left", fill="both", expand=True)
-        preview_frame = ttk.Frame(content, width=300)
-        preview_frame.pack(side="right", fill="y", padx=(10, 0))
-        preview_frame.pack_propagate(False)
+        table_card, preview_card = create_table_preview_split(
+            self,
+            table_title="账户列表",
+            preview_title="截图预览",
+            preview_width=300,
+            padding=(GUTTER, 0, GUTTER, GUTTER),
+        )
 
-        columns = ("id", "subject_name", "account_identity", "password", "email", "phone", "platform", "note")
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=14, selectmode="extended")
+        columns = ("id", "subject_name", "account_identity", "password",
+                   "email", "phone", "platform", "note")
         meta = {
-            "id": ("ID", 60),
-            "subject_name": ("主体名称", 170),
-            "account_identity": ("账号信息", 220),
-            "password": ("密码(明文)", 130),
-            "email": ("邮箱", 160),
-            "phone": ("手机号", 120),
-            "platform": ("平台", 100),
-            "note": ("备注", 180),
+            "id": ("ID", 44),
+            "subject_name": ("主体名称", 126),
+            "account_identity": ("账号信息", 148),
+            "password": ("密码(明文)", 92),
+            "email": ("邮箱", 126),
+            "phone": ("手机号", 92),
+            "platform": ("平台", 74),
+            "note": ("备注", 108),
         }
+        self.tree = ttk.Treeview(table_card, columns=columns, show="headings",
+                                 height=14, selectmode="extended")
         for column in columns:
             self.tree.heading(column, text=meta[column][0], anchor="w")
             self.tree.column(
                 column,
                 width=meta[column][1],
+                minwidth=44,
                 anchor="center" if column == "id" else "w",
             )
-        self.tree.pack(fill="both", expand=True, pady=6)
+        pack_tree_with_scrollbars(table_card, self.tree)
         self.tree.bind("<Double-1>", lambda event: self.edit_account())
         self.tree.bind("<<TreeviewSelect>>", lambda event: self.refresh_account_preview())
 
         self.account_preview = self.account_image_preview_cls(
             self,
-            preview_size=(260, 170),
+            preview_size=(240, 160),
             empty_text="选中账户后，这里显示注册/密保截图小图。",
         )
-        self.account_preview.build(preview_frame, title="截图预览").pack(fill="x", pady=(6, 6))
-        ttk.Button(preview_frame, text="查看大图", command=self.open_selected_account_screenshot).pack(fill="x")
+        self.account_preview.build(preview_card, title="截图预览").pack(fill="x")
+        ttk.Button(preview_card, text="查看大图",
+                   command=self.open_selected_account_screenshot).pack(fill="x", pady=(8, 0))
 
     def refresh_accounts(self):
         for item in self.tree.get_children():
@@ -114,13 +174,15 @@ class AccountManagerDialog(tk.Toplevel):
                 "end",
                 values=(
                     row["id"],
-                    row["subject_name"],
-                    self.format_account_identity(row["account_no"], row["account_name"]),
-                    row["password"],
-                    row["email"],
-                    row["phone"],
-                    row["platform"],
-                    row["note"],
+                    row["subject_name"] or "",
+                    self.format_account_identity(
+                        row["account_no"] or "", row["account_name"] or ""
+                    ),
+                    row["password"] or "",
+                    row["email"] or "",
+                    row["phone"] or "",
+                    row["platform"] or "",
+                    row["note"] or "",
                 ),
             )
         self.refresh_account_preview()
@@ -376,41 +438,64 @@ class AccountLedgerDialog(tk.Toplevel):
         self.normalize_text = normalize_text
         self.account_manager_dialog_cls = account_manager_dialog_cls
         self.title("全局账户台账")
-        self.geometry("980x560")
+        self.geometry("1040x580")
+        self.minsize(880, 460)
         self.transient(parent)
         self.grab_set()
         self.search_var = tk.StringVar()
         self.build_ui()
         self.refresh_groups()
+        center_dialog_over_parent(self, parent)
 
     def build_ui(self):
-        top = ttk.Frame(self, padding=10)
+        apply_dialog_form_style(self, MAIN_PALETTE, style_prefix="AccountDialog")
+        self.bind("<Escape>", lambda event: self.destroy())
+
+        header = ttk.Frame(self, padding=(GUTTER, 18, GUTTER, 8))
+        header.pack(fill="x")
+        ttk.Label(header, text="全局账户台账", font=TYPOGRAPHY.subtitle,
+                  style="AccountDialog.TLabel").pack(anchor="w")
+        ttk.Label(header, text="按账号编号汇总共享账户与关联资源。双击一行可直接打开该组的账户管理。",
+                  style="AccountDialogMuted.TLabel").pack(anchor="w", pady=(4, 0))
+
+        top = ttk.Frame(self, padding=(GUTTER, 0, GUTTER, 10))
         top.pack(fill="x")
-        ttk.Button(top, text="新增账号组", command=self.add_group).pack(side="left", padx=4)
-        ttk.Button(top, text="打开管理", command=self.open_group_manager).pack(side="left", padx=4)
-        ttk.Button(top, text="刷新", command=self.refresh_groups).pack(side="left", padx=4)
-        ttk.Button(top, text="关闭", command=self.destroy).pack(side="right", padx=4)
+        ttk.Button(top, text="关闭", command=self.destroy).pack(side="right", padx=(6, 0))
+        # 搜索组整体靠右：pack 顺序与视觉顺序相反，先 pack 的贴最右
+        search_box = ttk.Frame(top)
+        search_box.pack(side="right")
+        ttk.Button(search_box, text="搜索", command=self.refresh_groups).pack(side="right", padx=(6, 0))
+        ttk.Entry(search_box, textvariable=self.search_var, width=26).pack(side="right", padx=4)
+        ttk.Label(search_box, text="账号组").pack(side="right")
+        add_toolbar_buttons(
+            top,
+            [
+                ("新增账号组", self.add_group, "Primary.TButton"),
+                ("打开管理", self.open_group_manager),
+                ("刷新", self.refresh_groups),
+            ],
+        )
 
-        ttk.Entry(top, textvariable=self.search_var, width=28).pack(side="right", padx=4)
-        ttk.Button(top, text="搜索", command=self.refresh_groups).pack(side="right", padx=4)
-        ttk.Label(top, text="账号组").pack(side="right")
-
-        columns = ("group_key", "account_summary", "account_count", "asset_count", "platform", "subject_name", "note")
-        self.tree = ttk.Treeview(self, columns=columns, show="headings", height=20)
+        table_card = ttk.Frame(self, padding=(GUTTER, 0, GUTTER, GUTTER))
+        table_card.pack(fill="both", expand=True)
+        columns = ("group_key", "account_summary", "account_count",
+                   "asset_count", "platform", "subject_name", "note")
         meta = {
-            "group_key": ("账号编号", 120),
-            "account_summary": ("主账号信息", 220),
-            "account_count": ("账户数", 80),
-            "asset_count": ("关联资源", 90),
-            "platform": ("平台", 110),
-            "subject_name": ("主体名称", 220),
-            "note": ("备注", 220),
+            "group_key": ("账号编号", 110),
+            "account_summary": ("主账号信息", 200),
+            "account_count": ("账户数", 72),
+            "asset_count": ("关联资源", 80),
+            "platform": ("平台", 100),
+            "subject_name": ("主体名称", 200),
+            "note": ("备注", 460),
         }
+        self.tree = ttk.Treeview(table_card, columns=columns, show="headings", height=20)
         for column in columns:
             self.tree.heading(column, text=meta[column][0], anchor="w")
             numeric = column in ("account_count", "asset_count")
-            self.tree.column(column, width=meta[column][1], anchor="e" if numeric else "w")
-        self.tree.pack(fill="both", expand=True, pady=(0, 12))
+            self.tree.column(column, width=meta[column][1], minwidth=56,
+                             anchor="e" if numeric else "w")
+        pack_tree_with_scrollbars(table_card, self.tree)
         self.tree.bind("<Double-1>", lambda event: self.open_group_manager())
 
     def refresh_groups(self):

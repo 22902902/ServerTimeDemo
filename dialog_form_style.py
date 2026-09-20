@@ -5,10 +5,38 @@
 避免系统默认 ttk 在不同弹窗里出现白底块、灰底块混杂的问题。
 """
 
+import os
+import sys
 import tkinter as tk
 from tkinter import ttk
 
 from ui_theme import MAIN_PALETTE, Palette
+
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def apply_window_icon(window) -> None:
+    """给 Toplevel 设上应用图标。
+
+    不设的话弹窗标题栏是 Tk 默认的羽毛图标，跟主窗口的品牌标记对不上。
+    图标优先取代码里内嵌的那份 base64（打包成 exe 后也在），
+    失败再退回外部 app.ico；两者都失败就静默放过 —— 图标缺失不该拦住弹窗。
+    """
+    for loader in (
+        lambda: __import__(
+            "embedded_admin_tools.services.app_icon_service",
+            fromlist=["save_temp_app_icon"],
+        ).save_temp_app_icon(),
+        lambda: os.path.join(getattr(sys, "_MEIPASS", _APP_DIR), "app.ico"),
+    ):
+        try:
+            icon_path = loader()
+            if icon_path:
+                window.iconbitmap(str(icon_path))
+                return
+        except Exception:
+            continue
 
 
 def apply_dialog_form_style(master, palette: Palette = MAIN_PALETTE, *, style_prefix: str = "DialogForm") -> str:
@@ -17,6 +45,9 @@ def apply_dialog_form_style(master, palette: Palette = MAIN_PALETTE, *, style_pr
         master.configure(bg=palette.bg)
     except Exception:
         pass
+
+    if isinstance(master, (tk.Tk, tk.Toplevel)):
+        apply_window_icon(master)
 
     style = ttk.Style(master)
     style.configure(f"{style_prefix}.TFrame", background=palette.bg)

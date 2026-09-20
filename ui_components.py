@@ -92,6 +92,33 @@ def create_ttk_section_header(parent, text: str):
     return ttk.Label(parent, text=text, style="SectionTitle.TLabel")
 
 
+def create_flat_menu(parent, actions, *, palette=MAIN_PALETTE, font=None):
+    """扁平菜单（tk.Menu 默认是系统立体样式，和灰阶语言不符）。
+
+    actions 每项为 (标题, 回调)，分隔线写 "---"。
+    注意：分隔符不能带 label，遍历菜单项前要先用 menu.type(i) 跳过 separator。
+    """
+    menu = tk.Menu(
+        parent,
+        tearoff=0,
+        bg=palette.surface,
+        fg=palette.text_primary,
+        activebackground=palette.chip_bg,
+        activeforeground=palette.text_primary,
+        disabledforeground=palette.text_muted,
+        bd=0,
+        relief="flat",
+        activeborderwidth=0,
+        font=font or TYPOGRAPHY.body,
+    )
+    for item in actions:
+        if isinstance(item, str) and item.strip("-") == "":
+            menu.add_separator()
+        else:
+            menu.add_command(label=item[0], command=item[1])
+    return menu
+
+
 # ----------------------------------------------------------------------
 # 自绘圆角胶囊
 # ----------------------------------------------------------------------
