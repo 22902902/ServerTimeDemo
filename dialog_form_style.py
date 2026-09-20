@@ -75,6 +75,25 @@ def apply_dialog_form_style(master, palette: Palette = MAIN_PALETTE, *, style_pr
         selectforeground=[("readonly", palette.text_primary)],
         arrowcolor=[("readonly", palette.text_primary)],
     )
+    # 单行输入框与下拉框同款，否则同一行里一个浅灰、一个白，看着像两套控件
+    style.configure(
+        f"{style_prefix}.TEntry",
+        fieldbackground=palette.input_bg,
+        background=palette.input_bg,
+        foreground=palette.text_primary,
+        bordercolor=palette.input_border,
+        lightcolor=palette.input_border,
+        darkcolor=palette.input_border,
+        insertcolor=palette.text_primary,
+        padding=(8, 6),
+    )
+    style.map(
+        f"{style_prefix}.TEntry",
+        fieldbackground=[("focus", palette.surface)],
+        bordercolor=[("focus", palette.input_focus)],
+        lightcolor=[("focus", palette.input_focus)],
+        darkcolor=[("focus", palette.input_focus)],
+    )
     return style_prefix
 
 
