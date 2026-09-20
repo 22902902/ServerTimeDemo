@@ -786,19 +786,27 @@ class AccountImagePreview:
         self.prev_button = None
         self.next_button = None
 
-    def build(self, master, *, title: str = "注册/密保截图") -> ttk.Frame:
-        self.frame = ttk.LabelFrame(master, text=title, padding=8)
+    def build(self, master, *, title: str = "") -> ttk.Frame:
+        # title 留空就不套 LabelFrame：父容器（create_ttk_card / create_preview_sidebar）
+        # 本身已经是带标题的卡片，再套一层会把同一个标题显示两遍。
+        if title:
+            self.frame = ttk.LabelFrame(master, text=title, padding=8, style="Card.TLabelframe")
+        else:
+            # 内边距交给 PreviewArea.TLabel 自带，否则两层 padding 会把文案挤出方框
+            self.frame = ttk.Frame(master)
         self.preview_label = ttk.Label(
             self.frame,
             text="加载中...",
             anchor="center",
             justify="center",
-            relief="solid",
-            padding=6,
-            width=28,
+            style="PreviewArea.TLabel",
+            # 只是个初值，真值由 _on_preview_resize 按实际宽度刷新：preview_size
+            # 只管缩略图大小，与卡片能给出多宽无关，拿它算换行宽度会截断文案。
+            wraplength=max(self.preview_size[0] - 24, 180),
         )
         self.preview_label.pack(fill="both", expand=True)
         self.preview_label.bind("<Button-1>", lambda event: self.open_large_viewer())
+        self.preview_label.bind("<Configure>", self._on_preview_resize)
         nav_frame = ttk.Frame(self.frame)
         nav_frame.pack(fill="x", pady=(6, 0))
         self.prev_button = ttk.Button(nav_frame, text="上一张", command=self.show_previous)
@@ -815,6 +823,17 @@ class AccountImagePreview:
         ).pack(fill="x", pady=(6, 0))
         self.refresh()
         return self.frame
+
+    def _on_preview_resize(self, event):
+        """按预览框的真实宽度重算换行宽度，避免文案被卡片裁掉。
+
+        卡片宽度由布局决定（300/320），preview_size 只决定缩略图大小，两者不
+        等，所以只能在这里取真实宽度。比较后再写回：否则每次 configure 又会
+        触发一次 <Configure>，无限自激。
+        """
+        wrap = max(event.width - 24, 120)
+        if self.preview_label is not None and int(self.preview_label.cget("wraplength")) != wrap:
+            self.preview_label.configure(wraplength=wrap)
 
     def get_value(self) -> str:
         return serialize_account_image_items(self.image_items)

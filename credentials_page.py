@@ -53,7 +53,9 @@ class CredentialsPage:
             app.credentials_page,
             table_title="账号列表",
             preview_title="注册信息预览",
-            preview_width=300,
+            # 320 而非 300：要给「选中账号后…」这类 19 字提示留出整行，
+            # 300 时文本宽约 253px、可用仅 266px，第 20 个字必被折到下一行
+            preview_width=320,
         )
         self._build_tree(app, table_card)
         self._build_preview(app, preview_card)
@@ -185,7 +187,8 @@ class CredentialsPage:
             preview_size=(260, 170),
             empty_text="选中账号后，这里显示注册/密保截图小图。",
         )
-        app.credential_preview.build(preview_card, title="截图预览").pack(fill="x")
+        # 卡片已自带「截图预览」标题，这里不再传 title，否则标题会出现两遍
+        app.credential_preview.build(preview_card).pack(fill="x")
         ttk.Button(
             preview_card, text="查看大图", command=app.open_selected_credential_image
         ).pack(fill="x", pady=(8, 0))

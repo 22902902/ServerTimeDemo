@@ -127,7 +127,8 @@ class ProcessPage:
         process_detail_frame = create_content_frame(process_right, padding=(0, 12, 0, 0))
         process_text_frame = ttk.Frame(process_detail_frame)
         process_text_frame.pack(side="left", fill="both", expand=True)
-        process_preview_frame = create_preview_sidebar(process_detail_frame, "步骤截图", width=300, padding=(16, 12))
+        # width=320 而非 300：理由同账号中心，19 字提示需要整行宽度
+        process_preview_frame = create_preview_sidebar(process_detail_frame, "步骤截图", width=320, padding=(16, 12))
 
         ttk.Label(process_text_frame, textvariable=self.app.process_step_title_var, style="SectionTitle.TLabel").pack(anchor="w")
         self.app.process_step_detail_text = scrolledtext.ScrolledText(
@@ -143,7 +144,8 @@ class ProcessPage:
             preview_size=(260, 170),
             empty_text="选中步骤后，这里显示该步骤的截图小图。",
         )
-        self.app.process_step_preview.build(process_preview_frame, title="步骤截图").pack(fill="x", pady=(0, 6))
+        # 卡片已自带「步骤截图」标题，这里不再传 title，否则标题会出现两遍
+        self.app.process_step_preview.build(process_preview_frame).pack(fill="x", pady=(0, 6))
         ttk.Button(process_preview_frame, text="查看大图", command=self.app.open_process_step_image).pack(fill="x")
 
         create_status_bar(self.app.process_page, self.app.process_status_var, padding=(24, 0, 24, 16))

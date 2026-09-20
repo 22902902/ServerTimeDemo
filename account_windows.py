@@ -126,7 +126,7 @@ class AccountManagerDialog(tk.Toplevel):
             self,
             table_title="账户列表",
             preview_title="截图预览",
-            preview_width=300,
+            preview_width=320,
             padding=(GUTTER, 0, GUTTER, GUTTER),
         )
 
@@ -161,7 +161,8 @@ class AccountManagerDialog(tk.Toplevel):
             preview_size=(240, 160),
             empty_text="选中账户后，这里显示注册/密保截图小图。",
         )
-        self.account_preview.build(preview_card, title="截图预览").pack(fill="x")
+        # 卡片已自带「截图预览」标题，这里不再传 title，否则标题会出现两遍
+        self.account_preview.build(preview_card).pack(fill="x")
         ttk.Button(preview_card, text="查看大图",
                    command=self.open_selected_account_screenshot).pack(fill="x", pady=(8, 0))
 

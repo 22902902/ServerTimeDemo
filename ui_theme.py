@@ -337,6 +337,18 @@ class ThemeManager:
             foreground=[("selected", palette.text_primary)],
         )
         style.map("Treeview.Heading", background=[("active", palette.surface)])
+        # 图片预览占位区：浅填充 + 极浅描边，避免大片留白里出现硬方框
+        style.configure(
+            "PreviewArea.TLabel",
+            background=palette.surface_alt,
+            foreground=palette.text_muted,
+            borderwidth=1,
+            relief="solid",
+            bordercolor=palette.border_soft,
+            lightcolor=palette.border_soft,
+            darkcolor=palette.border_soft,
+            padding=8,
+        )
         # 工具栏按钮：浅底、无边框，悬停才加深（对齐克制的按钮观感）
         style.configure(
             "Quiet.TButton",
