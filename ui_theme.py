@@ -78,6 +78,11 @@ class Palette:
     nav_icon: str = "#8f8f8f"
     nav_icon_hover: str = "#525252"
     nav_icon_active: str = "#1c1c1c"
+    # 分类胶囊 / 快捷条 chip。常态必须能在白底上看得出是「一颗药丸」，
+    # 否则自绘圆角等于白做（原来的 #f7f7f7 与白底只差 3%，圆角完全看不出来）；
+    # 悬停取侧栏选中态同一档灰，保证有可感知的反馈。
+    chip_bg: str = "#f0f0f0"
+    chip_bg_hover: str = "#e3e3e3"
 
 
 MAIN_PALETTE = Palette(

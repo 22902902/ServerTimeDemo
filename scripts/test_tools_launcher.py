@@ -55,6 +55,7 @@ except Exception:
 
 import tools_db  # noqa: E402
 import tools_launcher as launcher  # noqa: E402
+import tools_page as tp  # noqa: E402
 import app_icons  # noqa: E402
 from tools_page import ToolsPage  # noqa: E402
 from ui_components import RoundedChip, rounded_rect_image  # noqa: E402
@@ -350,6 +351,27 @@ def _assert_categories(page, conn):
     check("分类 chip 是自绘圆角胶囊", isinstance(chip, RoundedChip))
     check("分类 chip 不带原生 1px 边框",
           str(chip.cget("highlightthickness")) == "0")
+
+    # 常态胶囊底色必须与内容区底色可区分。曾经用 surface_alt(#f7f7f7)：
+    # 与白底只差 3%，自绘的圆角在那种对比度下完全看不出来 —— 等于白做。
+    def _lum(hexv):
+        return int(hexv.lstrip("#")[:2], 16)
+
+    delta = _lum(tp.COLOR_BG) - _lum(tp.COLOR_CHIP_BG)
+    check("常态胶囊底色与白底可区分（圆角才看得见）", delta >= 8,
+          f"{tp.COLOR_CHIP_BG} vs {tp.COLOR_BG}，亮度差仅 {delta}")
+    hover_delta = _lum(tp.COLOR_CHIP_BG) - _lum(tp.COLOR_CHIP_BG_HOVER)
+    check("胶囊悬停态比常态明显深一档", hover_delta >= 8,
+          f"{tp.COLOR_CHIP_BG_HOVER} vs {tp.COLOR_CHIP_BG}，差 {hover_delta}")
+    # 注意要挑一颗「非选中」的：选中那颗的 fill 是近黑 accent，与底色无关
+    idle = next((c for c in page._category_chips.values() if not c.is_active),
+                None)
+    check("常态胶囊底色确实传给了控件",
+          idle is not None and idle.fill_color == tp.COLOR_CHIP_BG,
+          f"实际 {getattr(idle, 'fill_color', None)!r}")
+    check("选中胶囊底色是近黑 accent",
+          chip.fill_color == tp.COLOR_ACCENT, f"实际 {chip.fill_color!r}")
+
     check("当前分类恰好只有一颗 chip 亮起",
           sum(1 for c in page._category_chips.values() if c.is_active) == 1
           and page._category_chips[page.current_category].is_active,

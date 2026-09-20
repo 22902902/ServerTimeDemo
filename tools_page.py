@@ -69,6 +69,10 @@ COLOR_SUCCESS = TOOLBOX_PALETTE.success
 COLOR_WARNING = TOOLBOX_PALETTE.warn
 # 选中态 chip 用实心黑底 + 白字（比「凹陷边框」一眼可辨）
 COLOR_ACCENT_TEXT = TOOLBOX_PALETTE.accent_text
+# 分类胶囊 / 快捷条 chip 的底色。不用 surface_alt(#f7f7f7)：它与白底只差 3%，
+# 圆角在这点对比度下根本看不出来，等于白做。
+COLOR_CHIP_BG = TOOLBOX_PALETTE.chip_bg
+COLOR_CHIP_BG_HOVER = TOOLBOX_PALETTE.chip_bg_hover
 
 # ---- 启动器布局常量 ----
 CARD_MIN_WIDTH = 104     # 卡片最小宽度：icon 48px 之外还留得下两行名字
@@ -1055,13 +1059,16 @@ class ToolsPage(ttk.Frame):
         改用自绘的 RoundedChip —— tk.Label 是硬边矩形，摆一排就是「硬」；
         而且 Canvas 之外的控件默认带 1px 的 highlightthickness，
         会在每颗胶囊外面再套一圈边框，正是「按钮很硬」的来源之一。
+
+        底色用 COLOR_CHIP_BG 而不是 surface_alt：后者与白底只差 3%，
+        自绘的圆角在那种对比度下看不出来。
         """
         active = (name == self.current_category)
         chip = RoundedChip(
             self.category_container, f"{name} {count}",
             canvas_bg=COLOR_BG,
-            bg=COLOR_CARD_HOVER, fg=COLOR_TEXT,
-            hover_bg=COLOR_BORDER_LIGHT, hover_fg=COLOR_TEXT,
+            bg=COLOR_CHIP_BG, fg=COLOR_TEXT,
+            hover_bg=COLOR_CHIP_BG_HOVER, hover_fg=COLOR_TEXT,
             active_bg=COLOR_ACCENT, active_fg=COLOR_ACCENT_TEXT,
             active=active, font=("Microsoft YaHei", 9))
         chip.pack(side="left", padx=(0, 6), pady=1)
@@ -1119,7 +1126,7 @@ class ToolsPage(ttk.Frame):
                 continue
             chip = RoundedChip(
                 row, launcher.strip_label(tool), canvas_bg=COLOR_BG,
-                bg=COLOR_CARD_HOVER, fg=COLOR_TEXT,
+                bg=COLOR_CHIP_BG, fg=COLOR_TEXT,
                 hover_bg=COLOR_ACCENT, hover_fg=COLOR_ACCENT_TEXT,
                 active_bg=COLOR_ACCENT, active_fg=COLOR_ACCENT_TEXT,
                 padx=9, pady=3, font=("Microsoft YaHei", 9),
