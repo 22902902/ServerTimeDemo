@@ -195,6 +195,12 @@ def _g_book(g: Pen) -> None:             # Python 学习
     g.poly([(8.0, 3.2), (8.0, 13.0)])
 
 
+def _g_checklist(g: Pen) -> None:        # 待办
+    g.box(3.2, 2.6, 12.8, 13.4, r=2.0)
+    g.poly([(5.6, 6.6), (7.1, 8.0), (10.4, 4.7)])
+    g.poly([(5.6, 10.9), (10.5, 10.9)])
+
+
 def _g_dot(g: Pen) -> None:              # 兜底（未登记图标的模块）
     g.box(6.8, 6.8, 9.2, 9.2, r=1.2, fill=True)
 
@@ -220,6 +226,7 @@ NAV_GLYPHS = {
     "module_system_toolbox": _g_grid,
     "module_study_notes": _g_doc,
     "module_study_demo": _g_book,
+    "module_life_todo": _g_checklist,
 }
 
 

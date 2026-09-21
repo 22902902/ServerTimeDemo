@@ -68,6 +68,7 @@ NAV_MODEL = [
         "key": "sec_life",
         "label": "生活",
         "items": [
+            {"kind": "module", "key": "module_life_todo", "label": "待办"},
             {"kind": "module", "key": "module_study_notes", "label": "笔记"},
             {"kind": "module", "key": "module_study_demo", "label": "Python 学习"},
         ],

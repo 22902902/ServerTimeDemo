@@ -160,6 +160,8 @@ from ui_theme import MAIN_PALETTE, THEME, TYPOGRAPHY
 from dialog_form_style import apply_dialog_form_style, create_form_entry, create_form_frame, create_form_label
 import app_version
 import markdown_view
+from todo_db import TodoDB  # 待办事项数据库（含法定节假日日历）
+from todo_page import TodoPage  # 待办 / 提醒事项页面
 
 
 # =============================================================================
@@ -3026,7 +3028,7 @@ class AppShutdownManager:
     def shutdown(self):
         self._close_backend_windows()
         self._close_optional_resource("tray")
-        for attr_name in ("db", "study_notes_db", "qa_work_log_db", "study_demo_db_conn"):
+        for attr_name in ("db", "study_notes_db", "qa_work_log_db", "study_demo_db_conn", "todo_db"):
             self._close_optional_resource(attr_name)
         try:
             self.app.quit()
@@ -3114,6 +3116,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         self.study_notes_db = StudyNotesDB(DB_PATH)
         self.qa_work_log_db = QAWorkLogDBExt(DB_PATH)
         self.study_demo_db_conn = get_study_demo_conn()  # Python 学习模块数据库
+        self.todo_db = TodoDB(DB_PATH)  # 待办模块数据库
         self.tray = TrayController(self)
         self.shutdown_manager = AppShutdownManager(self)
         self.search_var = tk.StringVar()
@@ -3168,6 +3171,12 @@ class ExpiryManagerApp(TkinterDnD.Tk):
                 "desc": "当前模块负责服务器、域名、云服务等到期管理与提醒。",
                 "page": "expiry",
             },
+            "module_life_todo": {
+                "title": "待办",
+                "path": "生活 / 待办",
+                "desc": "提醒事项式的待办清单：彩色列表分组、重复规则、优先级、标签、子任务与多行备注；未完成自动顺延，周末与法定节假日自动跳过，假期后第一个工作日汇总提醒。",
+                "page": "todo",
+            },
             "module_study_notes": {
                 "title": "学习笔记",
                 "path": "学习 / 笔记",
@@ -3206,6 +3215,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             "study_notes":    (self.study_notes_page,    None),
             "qa_work_log":    (self.qa_work_log_page,    None),
             "system_toolbox": (self.system_toolbox_page, None),
+            "todo":           (self.todo_page,            self.todo_page_refresh),
             "study_demo":     (self.study_demo_page,     None),
             "note":           (self.note_page,          None),
             "placeholder":    (self.placeholder_page,    None),
@@ -3489,6 +3499,10 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         # 系统工具箱页面
         self.system_toolbox_page = ttk.Frame(self.page_container)
         self._build_system_toolbox_page()
+
+        # 待办 / 提醒事项页面
+        self.todo_page = ttk.Frame(self.page_container)
+        self._build_todo_page()
 
         # 简单笔记页面
         self.note_page = ttk.Frame(self.page_container)
@@ -3902,6 +3916,12 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         page = SystemToolboxPage(self.system_toolbox_page, self.db, project_root=self.project_root)
         page.pack(fill="both", expand=True)
 
+    def _build_todo_page(self):
+        """构建待办 / 提醒事项页面（嵌入主窗口，非独立窗口）。"""
+        page = TodoPage(self.todo_page, self.todo_db)
+        page.pack(fill='both', expand=True)
+        self.todo_view = page
+
     def _build_study_demo_page(self):
         """构建 Python 学习辅助模块页面"""
         page = StudyDemoPage(self.study_demo_page, self.study_demo_db_conn,
@@ -4129,6 +4149,8 @@ class ExpiryManagerApp(TkinterDnD.Tk):
                 )
         self.show_reminder_popup()
         self.trigger_daily_tray_reminder(force=False)
+        # 推迟到 2.5s：登录提示在 100ms 弹出，别让两个模态框打架
+        self.after(2500, self.todo_daily_maintenance)
 
     def poll_external_commands(self):
         token = self.db.get_state("external_show_window_token", "")
@@ -5219,6 +5241,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
 
     def periodic_reminder_check(self):
         self.trigger_daily_tray_reminder(force=False)
+        self.todo_daily_maintenance()
         self.after(CHECK_INTERVAL_MS, self.periodic_reminder_check)
 
     def show_window(self):
@@ -5257,6 +5280,56 @@ class ExpiryManagerApp(TkinterDnD.Tk):
                 self.exit_app()
         else:
             self.exit_app()
+
+    # ------------------------------------------------------------------
+    # 待办：每日顺延 + 假期后首个工作日汇总
+    # ------------------------------------------------------------------
+    def todo_daily_maintenance(self):
+        """顺延逾期待办，并在假期后的第一个工作日弹一次汇总。
+
+        挂在启动流程与每小时巡检两条线上：程序一直开着时，跨过午夜或
+        假期结束后也会自动生效，不需要重启。同一天只弹一次（去重状态
+        记在 todo_state 里，由 workday_notice() 判定）。
+        """
+        try:
+            self.todo_db.rollover()
+        except Exception:
+            logger.exception("待办顺延失败")
+            return
+        try:
+            notice = self.todo_db.workday_notice()
+        except Exception:
+            logger.exception("工作日检查失败")
+            return
+        if not notice:
+            return
+        self.todo_db.ack_workday_notice()
+
+        lines = [
+            f"{notice['holiday_name']}假期结束，今天是第一个工作日。",
+            f"中间休息了 {notice['rest_days']} 天。",
+            "",
+        ]
+        if notice["today_count"]:
+            lines.append(f"今天有 {notice['today_count']} 条待办：")
+            for title in notice["carried"][:8]:
+                lines.append(f"    · {title}")
+            rest = notice["today_count"] - 8
+            if rest > 0:
+                lines.append(f"    …… 还有 {rest} 条")
+        else:
+            lines.append("今天没有待办。")
+        if messagebox.askyesno("工作日提醒",
+                               "\n".join(lines) + "\n\n现在去看待办吗？",
+                               parent=self):
+            self.switch_module("module_life_todo")
+
+    def todo_page_refresh(self):
+        """切到待办页时刷新一次（由 _page_registry 的 on_show 调用）。"""
+        try:
+            self.todo_view.refresh()
+        except Exception:
+            logger.exception("待办页面刷新失败")
 
     def exit_app(self):
         self.shutdown_manager.shutdown()

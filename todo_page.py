@@ -1,0 +1,1711 @@
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+待办事项模块 - 界面层（View Layer）
+================================================================================
+把苹果「提醒事项」的三栏结构翻译到桌面窗口：
+
+    ┌──────────┬──────────────┬──────────────────────────────┐
+    │ 智能分组  │  当前视图的   │   详情面板                    │
+    │ 我的列表  │  待办条目     │   标题 / 备注 / 日期 / 重复…   │
+    │（彩色图标）│  （圆形勾选） │   子任务                      │
+    └──────────┴──────────────┴──────────────────────────────┘
+
+设计取舍（与项目整体风格的对齐）
+--------------------------------------------------------------------------------
+* 左侧沿用全局的浅灰侧栏色（#f4f4f4），与主程序左侧导航同色，两块不打架。
+* **彩色只出现在两处**：清单图标与「今天」标题。勾选框、按钮、正文一律走灰阶，
+  这样既保住了「一眼看出这是哪个清单」的信息量，又不会把整屏染花。
+* Tk 画不出圆角与阴影，因此圆形勾选框、清单图标全部用 ``todo_icons`` 里的
+  Pillow 资产**自绘**；最终是「克制的桌面版苹果风」，不是像素级复刻。
+
+编辑即保存
+--------------------------------------------------------------------------------
+标题与备注在失焦或切换条目时写库（``_flush_editor``），没有「保存」按钮 ——
+与苹果一致。切换清单 / 搜索 / 勾选都会先 flush 一次，不会丢字。
+"""
+
+from __future__ import annotations
+
+import tkinter as tk
+from datetime import date, timedelta
+from tkinter import messagebox, simpledialog, ttk
+from typing import Optional
+
+import todo_icons
+from app_icons import scaled_px
+from todo_db import (
+    LIST_COLORS,
+    LIST_ICONS,
+    PRIORITY_LABELS,
+    REPEAT_RULES,
+    REPEAT_UNITS,
+    SMART_LISTS,
+    TodoDB,
+    TodoItem,
+    TodoList,
+    day_str,
+    parse_day,
+)
+from ui_components import create_flat_menu
+from ui_theme import MAIN_PALETTE, TYPOGRAPHY
+
+# 字体：页内大标题用 17pt 粗体（比全局 page_title 略大，用来和主壳标题区分层级）
+FONT_PANE_TITLE = ("Microsoft YaHei UI", 17, "bold")
+FONT_ROW_TITLE = ("Microsoft YaHei UI", 10)
+FONT_ROW_META = ("Microsoft YaHei UI", 9)
+FONT_SMALL_BOLD = ("Microsoft YaHei UI", 9, "bold")
+FONT_DETAIL_TITLE = ("Microsoft YaHei UI", 12, "bold")
+
+# 尺寸
+SIDEBAR_WIDTH = 226
+MIDDLE_WIDTH = 388
+ICON_PX = 15          # 线性小图标逻辑尺寸（与导航图标一致）
+TILE_PX = 15          # 清单图标逻辑尺寸
+CHECK_PX = 18         # 勾选框逻辑尺寸
+ROW_PAD_Y = 6
+
+# 智能分组的配色（沿用苹果的语义色，但只落在图标上）
+SMART_META = {
+    "today": ("sun", "#007AFF"),
+    "scheduled": ("calendar", "#FF3B30"),
+    "all": ("list", "#8E8E93"),
+    "flagged": ("flag", "#FF9500"),
+    "completed": ("subtask", "#8E8E93"),
+}
+WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+# 清单查不到时（数据异常、扩展名被手工改过）统一退回这个中灰，
+# 避免在页面里到处散落颜色字面量
+FALLBACK_COLOR = "#8E8E93"
+
+
+# =============================================================================
+# 通用小组件
+# =============================================================================
+
+def tint(widget, bg: str):
+    """把一棵控件树里所有 tk 控件的背景改成 bg（ttk 控件跳过）。
+
+    自绘行要整体变底色就得逐个改，tk 没有继承背景的概念。
+    """
+    try:
+        if isinstance(widget, tk.Frame) or isinstance(widget, tk.Label):
+            widget.configure(bg=bg)
+        elif isinstance(widget, tk.Canvas):
+            widget.configure(bg=bg)
+    except tk.TclError:
+        pass
+    for child in widget.winfo_children():
+        tint(child, bg)
+
+
+class ScrollArea(tk.Frame):
+    """竖直滚动容器（Canvas + 内嵌 Frame）。
+
+    两条约束来自本项目踩过的坑：
+    1. **先 pack 滚动条、后 pack 画布** —— 反过来的话画布请求宽度会把滚动条
+       挤出可视区（实测两个都只剩 1px）。
+    2. ``scrollregion`` 必须在内嵌帧尺寸变化时**立刻**更新，否则内容变矮之后
+       滚动区还停在旧高度，会出现「明明没铺满却能往下滑一大片」。
+    """
+
+    def __init__(self, master, *, bg: str, inner_bg: Optional[str] = None):
+        super().__init__(master, bg=bg)
+        self._bg = bg
+
+        self.vsb = ttk.Scrollbar(self, orient="vertical")
+        self.vsb.pack(side="right", fill="y")
+
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0,
+                                yscrollcommand=self.vsb.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.vsb.configure(command=self.canvas.yview)
+
+        self.inner = tk.Frame(self.canvas, bg=inner_bg or bg)
+        self._window = self.canvas.create_window((0, 0), window=self.inner,
+                                                 anchor="nw")
+
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<Enter>", self._bind_wheel)
+        self.canvas.bind("<Leave>", self._unbind_wheel)
+
+    # -- 尺寸同步 ------------------------------------------------------------
+    def _on_inner_configure(self, _event=None):
+        self.canvas.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfigure(self._window, width=event.width)
+        self._on_inner_configure()
+
+    # -- 滚轮 ---------------------------------------------------------------
+    def _bind_wheel(self, _event=None):
+        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
+
+    def _unbind_wheel(self, _event=None):
+        self.canvas.unbind_all("<MouseWheel>")
+
+    def _on_wheel(self, event):
+        if self.canvas.bbox("all") is None:
+            return
+        delta = -1 if event.delta > 0 else 1
+        self.canvas.yview_scroll(delta, "units")
+
+    # -- 对外 ---------------------------------------------------------------
+    def clear(self):
+        for child in self.inner.winfo_children():
+            child.destroy()
+
+    def scroll_top(self):
+        self.canvas.yview_moveto(0)
+
+
+# =============================================================================
+# 主页面
+# =============================================================================
+
+class TodoPage(ttk.Frame):
+    """待办 / 提醒事项页面。
+
+    使用方式（由 main.py 构建一次，之后靠 pack/pack_forget 切换）::
+
+        page = TodoPage(self.todo_page_container, self.todo_db)
+        page.pack(fill="both", expand=True)
+    """
+
+    def __init__(self, master, todo_db: TodoDB, *,
+                 palette=MAIN_PALETTE, typography=TYPOGRAPHY):
+        super().__init__(master)
+        self.palette = palette
+        self.typography = typography
+        self.db = todo_db
+
+        # 视图状态
+        self.current_scope = "today"     # 智能分组 key
+        self.current_list_id: Optional[int] = None  # 选中的真实清单
+        self.selected_item_id: Optional[int] = None
+        self.keyword = ""
+        self._groups: dict[str, tk.Frame] = {}      # 侧栏行缓存
+        self._row_widgets: dict[int, tk.Frame] = {}
+        self._loading = False                        # 载入编辑器时抑制写库
+        self._detail_area: Optional[ScrollArea] = None
+        self._empty_state: Optional[tk.Frame] = None
+
+        self._icon_px = scaled_px(self, ICON_PX)
+        self._tile_px = scaled_px(self, TILE_PX)
+        self._check_px = scaled_px(self, CHECK_PX)
+
+        self._build()
+        self.refresh_all()
+
+    # ==================================================================
+    # 构架
+    # ==================================================================
+    def _build(self):
+        palette = self.palette
+        panes = tk.Frame(self, bg=palette.surface)
+        panes.pack(fill="both", expand=True)
+
+        # —— 左：分组 + 清单 ——
+        self.sidebar = tk.Frame(panes, bg=palette.sidebar_bg, width=SIDEBAR_WIDTH)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
+        self._build_sidebar()
+
+        tk.Frame(panes, bg=palette.border, width=1).pack(side="left", fill="y")
+
+        # —— 中：条目列表 ——
+        self.middle = tk.Frame(panes, bg=palette.surface, width=MIDDLE_WIDTH)
+        self.middle.pack(side="left", fill="y")
+        self.middle.pack_propagate(False)
+        self._build_middle()
+
+        tk.Frame(panes, bg=palette.border, width=1).pack(side="left", fill="y")
+
+        # —— 右：详情（最后 pack，吃掉剩余宽度）——
+        self.detail = tk.Frame(panes, bg=palette.surface)
+        self.detail.pack(side="left", fill="both", expand=True)
+        self._build_detail()
+
+    # ------------------------------------------------------------------
+    # 左侧栏
+    # ------------------------------------------------------------------
+    def _build_sidebar(self):
+        palette = self.palette
+        wrap = tk.Frame(self.sidebar, bg=palette.sidebar_bg)
+        wrap.pack(fill="both", expand=True, padx=10, pady=(10, 8))
+
+        # 搜索框
+        search_box = tk.Frame(wrap, bg=palette.chip_bg)
+        search_box.pack(fill="x", pady=(0, 10))
+        tk.Label(search_box, image=todo_icons.glyph_image(
+            self._icon_px, "search", palette.text_muted),
+            bg=palette.chip_bg).pack(side="left", padx=(8, 4), pady=5)
+        self.search_var = tk.StringVar()
+        entry = tk.Entry(search_box, textvariable=self.search_var, bd=0,
+                         bg=palette.chip_bg, fg=palette.text_primary,
+                         font=self.typography.body, insertbackground=palette.text_primary)
+        entry.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=5)
+        entry.bind("<KeyRelease>", self._on_search_change)
+        self._search_entry = entry
+        self._search_placeholder = self._set_placeholder(entry, "搜索")
+
+        # 智能分组
+        for key, label in SMART_LISTS:
+            self._make_side_row(wrap, kind="smart", key=key, label=label)
+
+        tk.Frame(wrap, bg=palette.sidebar_bg, height=10).pack(fill="x")
+
+        # 「我的列表」标题行 + 新建
+        head = tk.Frame(wrap, bg=palette.sidebar_bg)
+        head.pack(fill="x", pady=(6, 2))
+        tk.Label(head, text="我的列表", bg=palette.sidebar_bg,
+                 fg=palette.text_muted, font=self.typography.nav_group,
+                 anchor="w").pack(side="left", padx=6)
+        add_btn = tk.Label(head, text="＋", bg=palette.sidebar_bg,
+                           fg=palette.text_muted, font=self.typography.body,
+                           cursor="hand2", padx=6)
+        add_btn.pack(side="right")
+        add_btn.bind("<Button-1>", lambda _e: self.new_list_dialog())
+        self._add_list_btn = add_btn
+
+        self._list_holder = tk.Frame(wrap, bg=palette.sidebar_bg)
+        self._list_holder.pack(fill="x")
+
+    def _make_side_row(self, parent, *, kind: str, key, label: str):
+        """侧栏一行：图标 + 名称 + 右侧计数。kind 为 smart / list。"""
+        palette = self.palette
+        row = tk.Frame(parent, bg=palette.sidebar_bg, cursor="hand2")
+        row.pack(fill="x")
+
+        accent = tk.Frame(row, width=2, bg=palette.sidebar_bg)
+        accent.pack(side="left", fill="y")
+
+        icon_holder = tk.Frame(row, bg=palette.sidebar_bg, width=self._tile_px,
+                               height=self._tile_px)
+        icon_holder.pack(side="left", padx=(8, 8), pady=ROW_PAD_Y)
+        icon_holder.pack_propagate(False)
+        icon = tk.Label(icon_holder, bg=palette.sidebar_bg, bd=0,
+                        highlightthickness=0)
+        icon.pack(fill="both", expand=True)
+
+        text = tk.Label(row, text=label, bg=palette.sidebar_bg,
+                        fg=palette.nav_text, font=self.typography.nav_item,
+                        anchor="w")
+        text.pack(side="left", fill="x", expand=True, pady=ROW_PAD_Y)
+
+        count = tk.Label(row, text="", bg=palette.sidebar_bg,
+                         fg=palette.text_muted, font=self.typography.caption)
+        count.pack(side="right", padx=(4, 10))
+
+        for widget in (row, accent, icon_holder, icon, text, count):
+            widget.bind("<Enter>", lambda _e, r=row: self._hover_side(r, kind, key))
+            widget.bind("<Leave>", lambda _e, r=row: self._leave_side(r, kind, key))
+        row.bind("<Button-1>", lambda _e, k=kind, kk=key: self._select_side(k, kk))
+        for widget in (accent, icon_holder, icon, text, count):
+            widget.bind("<Button-1>", lambda _e, k=kind, kk=key: self._select_side(k, kk))
+        if kind == "list":
+            row.bind("<Button-3>", lambda _e, kk=key: self._list_context_menu(kk))
+
+        if kind == "smart":
+            self._groups[f"smart:{key}"] = row
+            self._smart_rows = getattr(self, "_smart_rows", {})
+            self._smart_rows[key] = {"row": row, "accent": accent,
+                                     "icon_holder": icon_holder, "icon": icon,
+                                     "text": text, "count": count}
+        else:
+            self._groups[f"list:{key}"] = row
+            self._list_rows = getattr(self, "_list_rows", {})
+            self._list_rows[key] = {"row": row, "accent": accent,
+                                    "icon_holder": icon_holder, "icon": icon,
+                                    "text": text, "count": count}
+
+    def _hover_side(self, row, kind, key):
+        if row.cget("bg") == self.palette.sidebar_active:
+            return
+        self._paint_side_row(kind, key, bg=self.palette.sidebar_hover)
+
+    def _leave_side(self, row, kind, key):
+        state = self._row_state(kind, key)
+        if state == "active":
+            return
+        self._paint_side_row(kind, key, bg=self.palette.sidebar_bg)
+
+    def _row_state(self, kind, key) -> str:
+        if kind == "smart" and self.current_list_id is None and self.current_scope == key:
+            return "active"
+        if kind == "list" and self.current_list_id == key:
+            return "active"
+        return "normal"
+
+    def _paint_side_row(self, kind, key, *, bg=None):
+        rows = self._smart_rows if kind == "smart" else self._list_rows
+        widgets = rows.get(key)
+        if not widgets:
+            return
+        state = self._row_state(kind, key)
+        if bg is None:
+            bg = self.palette.sidebar_active if state == "active" else self.palette.sidebar_bg
+        fg = self.palette.text_primary if state == "active" else self.palette.nav_text
+        font = (self.typography.nav_item_active if state == "active"
+                else self.typography.nav_item)
+        accent = self.palette.accent if state == "active" else bg
+        for name in ("row", "icon_holder", "icon", "text", "count"):
+            widgets[name].configure(bg=bg)
+        widgets["accent"].configure(bg=accent)
+        widgets["text"].configure(fg=fg, font=font)
+        widgets["count"].configure(fg=(self.palette.text_secondary if state == "active"
+                                       else self.palette.text_muted))
+        widgets["icon"].configure(image=self._side_icon(kind, key))
+
+    def _side_icon(self, kind, key):
+        if kind == "smart":
+            name, color = SMART_META.get(key, ("list", FALLBACK_COLOR))
+            return todo_icons.glyph_image(self._icon_px, name, color)
+        todo_list = self.db.get_list(int(key))
+        if not todo_list:
+            return todo_icons.tile_image(self._tile_px, FALLBACK_COLOR, "list")
+        return todo_icons.tile_image(self._tile_px, todo_list.color, todo_list.icon)
+
+    def _select_side(self, kind, key):
+        self._flush_editor()
+        if kind == "smart":
+            self.current_scope = key
+            self.current_list_id = None
+        else:
+            self.current_list_id = int(key)
+            self.current_scope = "list"
+        self.selected_item_id = None
+        self.refresh_all()
+        if self.current_list_id is not None:
+            self._render_item_list()
+
+    def _list_context_menu(self, list_id):
+        self._show_menu([
+            ("编辑列表…", lambda: self.new_list_dialog(int(list_id))),
+            "---",
+            ("删除列表", lambda: self.delete_list(int(list_id))),
+        ])
+
+    # ------------------------------------------------------------------
+    # 中栏
+    # ------------------------------------------------------------------
+    def _build_middle(self):
+        palette = self.palette
+
+        header = tk.Frame(self.middle, bg=palette.surface)
+        header.pack(side="top", fill="x", padx=16, pady=(14, 6))
+        self.mid_title = tk.Label(header, text="今天", bg=palette.surface,
+                                  fg=palette.text_primary, font=FONT_PANE_TITLE,
+                                  anchor="w")
+        self.mid_title.pack(side="left")
+        self.mid_count = tk.Label(header, text="", bg=palette.surface,
+                                  fg=palette.text_muted,
+                                  font=self.typography.caption)
+        self.mid_count.pack(side="left", padx=(8, 0), pady=(8, 0))
+
+        more = tk.Label(header, text="⋯", bg=palette.surface,
+                        fg=palette.text_secondary, font=("Microsoft YaHei UI", 14),
+                        cursor="hand2", padx=6)
+        more.pack(side="right")
+        more.bind("<Button-1>", lambda _e: self._view_menu())
+
+        helper = tk.Label(self.middle, text="", bg=palette.surface,
+                          fg=palette.text_muted, font=self.typography.caption,
+                          anchor="w", justify="left")
+        helper.pack(side="top", fill="x", padx=16)
+        self.mid_helper = helper
+
+        # 底部快速新建（先 pack，占住底边）
+        add_bar = tk.Frame(self.middle, bg=palette.surface)
+        add_bar.pack(side="bottom", fill="x", padx=16, pady=(4, 12))
+        tk.Frame(add_bar, bg=palette.border, height=1).pack(fill="x", pady=(0, 8))
+        inner = tk.Frame(add_bar, bg=palette.surface)
+        inner.pack(fill="x")
+        tk.Label(inner, image=todo_icons.glyph_image(
+            self._icon_px, "plus", FALLBACK_COLOR), bg=palette.surface).pack(side="left")
+        self.quick_var = tk.StringVar()
+        quick = tk.Entry(inner, textvariable=self.quick_var, bd=0,
+                         bg=palette.surface, fg=palette.text_primary,
+                         font=self.typography.body,
+                         insertbackground=palette.text_primary)
+        quick.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        quick.bind("<Return>", lambda _e: self.quick_add())
+        self.quick_entry = quick
+        self._quick_placeholder = self._set_placeholder(
+            quick, "新提醒事项")
+
+        self.list_area = ScrollArea(self.middle, bg=palette.surface)
+        self.list_area.pack(side="top", fill="both", expand=True)
+
+    def _view_menu(self):
+        actions = [("按日期排序", lambda: self._noop("已按日期排序")),
+                   ("按优先级排序", lambda: self._noop("已按优先级排序")),
+                   "---"]
+        if self.current_list_id is not None:
+            actions.append(("编辑当前列表…",
+                            lambda: self.new_list_dialog(self.current_list_id)))
+            actions.append(("删除当前列表",
+                            lambda: self.delete_list(self.current_list_id)))
+        actions.append(("补充节假日日历…", self.manage_holidays_dialog))
+        self._show_menu(actions)
+
+    def _noop(self, text):
+        self.mid_helper.configure(text=text)
+
+    # ------------------------------------------------------------------
+    # 右栏
+    # ------------------------------------------------------------------
+    def _build_detail(self):
+        palette = self.palette
+        self._empty_state = tk.Frame(self.detail, bg=palette.surface)
+        tk.Label(self._empty_state, text="选择一条待办查看详情",
+                 bg=palette.surface, fg=palette.text_muted,
+                 font=self.typography.body).pack(expand=True)
+        self._empty_state.pack(fill="both", expand=True)
+
+    def _ensure_detail_area(self) -> ScrollArea:
+        if self._detail_area is None:
+            self._detail_area = ScrollArea(self.detail, bg=self.palette.surface)
+        return self._detail_area
+
+    # ==================================================================
+    # 数据 → 界面
+    # ==================================================================
+    def refresh_all(self):
+        """重画侧栏计数 + 中栏列表 + 右栏详情。"""
+        self._refresh_sidebar()
+        self._render_item_list()
+        self._render_detail()
+
+    def _refresh_sidebar(self):
+        counts = self.db.count_by_scope()
+        for key, _label in SMART_LISTS:
+            widgets = self._smart_rows.get(key)
+            if widgets:
+                value = counts.get(key, 0)
+                widgets["count"].configure(text=str(value) if value else "")
+        list_counts = self.db.open_count_by_list()
+
+        for child in self._list_holder.winfo_children():
+            child.destroy()
+        self._list_rows = {}
+        for todo_list in self.db.fetch_lists():
+            self._make_side_row(self._list_holder, kind="list",
+                                key=todo_list.id, label=todo_list.name)
+            widgets = self._list_rows.get(todo_list.id)
+            if widgets:
+                value = list_counts.get(todo_list.id, 0)
+                widgets["count"].configure(text=str(value) if value else "")
+
+        for key, _label in SMART_LISTS:
+            self._paint_side_row("smart", key)
+        for todo_list in self.db.fetch_lists():
+            self._paint_side_row("list", todo_list.id)
+
+    # -- 中栏列表 ---------------------------------------------------------
+    def _current_list(self) -> Optional[TodoList]:
+        if self.current_list_id is None:
+            return None
+        return self.db.get_list(self.current_list_id)
+
+    def _default_list_id(self) -> int:
+        if self.current_list_id:
+            return self.current_list_id
+        lists = self.db.fetch_lists()
+        return lists[0].id if lists else 0
+
+    def _fetch_current_items(self) -> list[TodoItem]:
+        scope = self.current_scope
+        if self.current_list_id is not None:
+            return self.db.fetch_items(scope="list", list_id=self.current_list_id,
+                                       keyword=self.keyword)
+        return self.db.fetch_items(scope=scope, keyword=self.keyword)
+
+    def _render_item_list(self):
+        palette = self.palette
+        area = self.list_area
+        area.clear()
+        self._row_widgets.clear()
+
+        todo_list = self._current_list()
+        if todo_list is not None:
+            title, color = todo_list.name, todo_list.color
+        else:
+            title = dict(SMART_LISTS).get(self.current_scope, "待办")
+            color = palette.text_primary
+
+        self.mid_title.configure(text=title, fg=color)
+        self.mid_helper.configure(text="")
+
+        items = self._fetch_current_items()
+        self._subtask_summary_cache(items)
+        self.mid_count.configure(text=f"{len(items)}" if items else "")
+
+        if not items:
+            self._render_empty_list(area, title)
+            return
+
+        # 智能分组视图按清单分组显示（苹果的「今天」页就是这样）
+        grouped = self.current_list_id is None and self.current_scope != "completed"
+        if grouped:
+            buckets: dict[int, list[TodoItem]] = {}
+            for item in items:
+                buckets.setdefault(item.list_id, []).append(item)
+            list_map = {l.id: l for l in self.db.fetch_lists()}
+            for list_id, bucket in buckets.items():
+                info = list_map.get(list_id)
+                self._make_group_header(area.inner, info, len(bucket))
+                for item in bucket:
+                    self._make_item_row(area.inner, item, info)
+        else:
+            info = todo_list
+            for item in items:
+                self._make_item_row(area.inner, item, info)
+
+        area._on_inner_configure()
+
+    def _render_empty_list(self, area: ScrollArea, title: str):
+        palette = self.palette
+        box = tk.Frame(area.inner, bg=palette.surface)
+        box.pack(fill="x", pady=48)
+        tk.Label(box, text=f"「{title}」里还没有待办", bg=palette.surface,
+                 fg=palette.text_muted,
+                 font=self.typography.body).pack()
+        tk.Label(box, text="在下方输入框里写一条，回车即可", bg=palette.surface,
+                 fg=palette.text_muted,
+                 font=self.typography.caption).pack(pady=(6, 0))
+
+    def _make_group_header(self, parent, info: Optional[TodoList], count: int):
+        palette = self.palette
+        head = tk.Frame(parent, bg=palette.surface)
+        head.pack(fill="x", padx=16, pady=(14, 2))
+        color = info.color if info else FALLBACK_COLOR
+        icon = info.icon if info else "list"
+        tk.Label(head, image=todo_icons.tile_image(self._tile_px, color, icon),
+                 bg=palette.surface).pack(side="left")
+        tk.Label(head, text=(info.name if info else "未分组"), bg=palette.surface,
+                 fg=palette.text_secondary, font=self.typography.caption,
+                 anchor="w").pack(side="left", padx=(6, 0))
+        tk.Label(head, text=str(count), bg=palette.surface,
+                 fg=palette.text_muted, font=self.typography.caption).pack(side="right")
+
+    def _make_item_row(self, parent, item: TodoItem, info: Optional[TodoList]):
+        palette = self.palette
+
+        row = tk.Frame(parent, bg=palette.surface, cursor="hand2")
+        row.pack(fill="x")
+
+        # 勾选框
+        check_holder = tk.Frame(row, bg=palette.surface)
+        check_holder.pack(side="left", padx=(16, 8), pady=ROW_PAD_Y, anchor="n")
+        check = tk.Label(check_holder, bg=palette.surface, bd=0,
+                         highlightthickness=0, cursor="hand2")
+        check.pack()
+
+        # 文本列
+        text_col = tk.Frame(row, bg=palette.surface)
+        text_col.pack(side="left", fill="x", expand=True, pady=ROW_PAD_Y)
+
+        title = tk.Label(text_col, text=item.title or "新提醒事项",
+                         bg=palette.surface, fg=palette.text_primary,
+                         font=FONT_ROW_TITLE, anchor="w", justify="left")
+        title.pack(fill="x", anchor="w")
+        if item.completed:
+            title.configure(fg=palette.text_muted)
+
+        sub_parts = []
+        if info is not None and (self.current_list_id is None
+                                 and self.current_scope != "completed"):
+            sub_parts.append(info.name)
+        summary = self._subtask_summary_for(item.id)
+        if summary:
+            sub_parts.append(f"{summary[0]}/{summary[1]} 个子任务")
+        elif item.notes:
+            sub_parts.append(item.notes.splitlines()[0][:24])
+        if item.rollover_count:
+            sub_parts.append(f"已顺延 {item.rollover_count} 次")
+        sub = None
+        if sub_parts:
+            sub = tk.Label(text_col, text=" · ".join(sub_parts), bg=palette.surface,
+                           fg=palette.text_muted, font=FONT_ROW_META,
+                           anchor="w", justify="left")
+            sub.pack(fill="x", anchor="w", pady=(2, 0))
+
+        # 右侧：日期 + 重复 / 优先级
+        right = tk.Frame(row, bg=palette.surface)
+        right.pack(side="right", padx=(8, 14), pady=ROW_PAD_Y, anchor="n")
+
+        marks = []
+        if item.priority:
+            marks.append(item.priority_mark)
+        if item.repeat_rule != "none":
+            marks.append("↻")
+        if marks:
+            tk.Label(right, text=" ".join(marks), bg=palette.surface,
+                     fg=palette.text_secondary, font=FONT_SMALL_BOLD).pack(anchor="e")
+
+        due_text, due_color = self._due_text(item)
+        if due_text:
+            tk.Label(right, text=due_text, bg=palette.surface, fg=due_color,
+                     font=FONT_ROW_META).pack(anchor="e", pady=(2, 0))
+
+        # 交互
+        for widget in (row, check_holder, check, text_col, title, right):
+            widget.bind("<Enter>", lambda _e, r=row, i=item: self._hover_row(r, i, True))
+            widget.bind("<Leave>", lambda _e, r=row, i=item: self._hover_row(r, i, False))
+        check.bind("<Button-1>", lambda _e, i=item.id: self.toggle_complete(i))
+        check_holder.bind("<Button-1>", lambda _e, i=item.id: self.toggle_complete(i))
+        for widget in (row, text_col, title):
+            widget.bind("<Button-1>", lambda _e, i=item.id: self.select_item(i))
+        row.bind("<Button-3>", lambda _e, i=item: self._item_context_menu(i))
+        if sub is not None:
+            sub.bind("<Button-1>", lambda _e, i=item.id: self.select_item(i))
+
+        self._row_widgets[item.id] = row
+        self._paint_item_row(item, row, check)
+
+    def _subtask_summary_for(self, item_id: int):
+        cache = getattr(self, "_subtask_cache", None) or {}
+        return cache.get(item_id)
+
+    def _due_text(self, item: TodoItem):
+        """日期文案与颜色：逾期红、今天近黑、未来灰。"""
+        palette = self.palette
+        due = parse_day(item.due_date)
+        if due is None:
+            return "", palette.text_muted
+        today = date.today()
+        delta = (due - today).days
+        if delta < 0:
+            text = due.strftime("%m月%d日")
+            return f"逾期 {text}", palette.danger
+        if delta == 0:
+            text = "今天"
+        elif delta == 1:
+            text = "明天"
+        elif delta == 2:
+            text = "后天"
+        elif 0 < delta <= 6:
+            text = WEEKDAY_CN[due.weekday()]
+        else:
+            text = due.strftime("%m月%d日")
+        if item.due_time:
+            text += f" {item.due_time}"
+        color = palette.text_secondary if delta <= 6 else palette.text_muted
+        return text, color
+
+    def _paint_item_row(self, item: TodoItem, row: tk.Frame, check: tk.Label):
+        palette = self.palette
+        info = self.db.get_list(item.list_id) if self.current_list_id is None else self._current_list()
+        color = info.color if info else FALLBACK_COLOR
+        selected = self.selected_item_id == item.id
+        bg = palette.sidebar_active if selected else palette.surface
+        tint(row, bg)
+        check.configure(image=todo_icons.checkbox_image(
+            self._check_px, color if not item.completed else color,
+            bool(item.completed)))
+
+    def _hover_row(self, row: tk.Frame, item: TodoItem, entering: bool):
+        if self.selected_item_id == item.id:
+            return
+        tint(row, self.palette.surface_alt if entering else self.palette.surface)
+
+    def _item_context_menu(self, item: TodoItem):
+        self._show_menu([
+            ("旗标" if not item.flagged else "取消旗标",
+             lambda: self.toggle_flag(item.id)),
+            ("优先级：无", lambda: self._set_priority(item.id, 0)),
+            ("优先级：叹号 !", lambda: self._set_priority(item.id, 1)),
+            ("优先级：!!", lambda: self._set_priority(item.id, 2)),
+            ("优先级：!!!", lambda: self._set_priority(item.id, 3)),
+            "---",
+            ("删除", lambda: self.delete_item(item.id)),
+        ])
+
+    # -- 右栏详情 ---------------------------------------------------------
+    def _render_detail(self):
+        palette = self.palette
+        item = self.db.get_item(self.selected_item_id) if self.selected_item_id else None
+
+        if item is None:
+            if self._detail_area is not None:
+                self._detail_area.pack_forget()
+            self._empty_state.pack(fill="both", expand=True)
+            return
+
+        self._empty_state.pack_forget()
+        area = self._ensure_detail_area()
+        area.pack(fill="both", expand=True)
+        area.clear()
+        area.scroll_top()
+
+        inner = area.inner
+        pad = tk.Frame(inner, bg=palette.surface)
+        pad.pack(fill="both", expand=True, padx=20, pady=(16, 24))
+
+        self._loading = True
+        try:
+            self._build_detail_header(pad, item)
+            self._build_detail_body(pad, item)
+        finally:
+            self._loading = False
+        area._on_inner_configure()
+
+    def _build_detail_header(self, parent, item: TodoItem):
+        palette = self.palette
+        info = self.db.get_list(item.list_id)
+        color = info.color if info else FALLBACK_COLOR
+
+        head = tk.Frame(parent, bg=palette.surface)
+        head.pack(fill="x")
+
+        check = tk.Label(head, bg=palette.surface, cursor="hand2", bd=0,
+                         highlightthickness=0,
+                         image=todo_icons.checkbox_image(
+                             scaled_px(self, 20), color, bool(item.completed)))
+        check.pack(side="left", pady=(4, 0))
+        check.bind("<Button-1>", lambda _e, i=item.id: self.toggle_complete(i))
+
+        self.title_var = tk.StringVar(value=item.title)
+        title = tk.Entry(head, textvariable=self.title_var, bd=0,
+                         bg=palette.surface, fg=palette.text_primary,
+                         font=FONT_DETAIL_TITLE, insertbackground=palette.text_primary)
+        title.pack(side="left", fill="x", expand=True, padx=(10, 0), pady=(2, 0))
+        title.bind("<FocusOut>", lambda _e: self._flush_editor())
+        title.bind("<Return>", lambda _e: self._flush_editor())
+        self.detail_title_entry = title
+
+    def _build_detail_body(self, parent, item: TodoItem):
+        palette = self.palette
+
+        # —— 备注（多行，就是「点开有一个小型备忘录」）——
+        tk.Label(parent, text="备注", bg=palette.surface, fg=palette.text_muted,
+                 font=self.typography.caption, anchor="w").pack(
+            fill="x", pady=(14, 4))
+        notes_wrap = tk.Frame(parent, bg=palette.surface_alt)
+        notes_wrap.pack(fill="x")
+        self.notes_text = tk.Text(notes_wrap, height=5, bd=0, wrap="word",
+                                  bg=palette.surface_alt,
+                                  fg=palette.text_primary,
+                                  font=self.typography.body,
+                                  insertbackground=palette.text_primary,
+                                  padx=10, pady=8)
+        self.notes_text.pack(fill="x")
+        self.notes_text.insert("1.0", item.notes)
+        self.notes_text.bind("<FocusOut>", lambda _e: self._flush_editor())
+        self._notes_placeholder = None
+        if not item.notes:
+            self._apply_notes_placeholder()
+
+        # —— 属性区 ——
+        tk.Frame(parent, bg=palette.border, height=1).pack(fill="x", pady=(16, 6))
+
+        meta = tk.Frame(parent, bg=palette.surface)
+        meta.pack(fill="x")
+
+        due = parse_day(item.due_date)
+        due_label = self._format_due_long(due)
+        self._make_meta_row(meta, "calendar", "日期", due_label or "无",
+                            self._date_menu, value_color=(
+                                palette.danger if due and due < date.today() else None))
+        self._make_meta_row(meta, "clock", "时间", item.due_time or "无",
+                            self._time_menu)
+        self._make_meta_row(meta, "repeat", "重复", item.repeat_label
+                            + (f"（{item.repeat_interval}{self._unit_label(item.repeat_unit)}）"
+                               if item.repeat_rule == "custom" else ""),
+                            self._repeat_menu)
+        self._make_meta_row(meta, "priority", "优先级",
+                            (PRIORITY_LABELS.get(item.priority, "无")
+                             + (f"  {item.priority_mark}" if item.priority else "")),
+                            self._priority_menu)
+        self._make_meta_row(meta, "flag", "旗标",
+                            "已标记" if item.flagged else "无",
+                            lambda _e, i=item: self.toggle_flag(i.id))
+        info = self.db.get_list(item.list_id)
+        self._make_meta_row(meta, "list", "列表",
+                            info.name if info else "未分组", self._list_menu,
+                            value_color=info.color if info else None)
+        self._make_meta_row(meta, "tag", "标签",
+                            " ".join(item.tags) if item.tags else "无",
+                            self._tags_dialog)
+        self._make_meta_row(meta, "sun", "跳过节假日",
+                            "开启" if item.skip_holidays else "关闭",
+                            lambda _e, i=item: self.toggle_skip_holidays(i.id))
+
+        # —— 子任务 ——
+        tk.Frame(parent, bg=palette.border, height=1).pack(fill="x", pady=(12, 6))
+        sub_head = tk.Frame(parent, bg=palette.surface)
+        sub_head.pack(fill="x")
+        tk.Label(sub_head, image=todo_icons.glyph_image(
+            self._icon_px, "subtask", palette.text_secondary),
+            bg=palette.surface).pack(side="left")
+        self._subtask_counter = tk.Label(sub_head, text="", bg=palette.surface,
+                                         fg=palette.text_secondary,
+                                         font=self.typography.caption)
+        self._subtask_counter.pack(side="left", padx=(6, 0))
+        self._subtask_holder = tk.Frame(parent, bg=palette.surface)
+        self._subtask_holder.pack(fill="x", pady=(4, 0))
+        self._render_subtasks(item)
+
+        sub_add = tk.Frame(parent, bg=palette.surface)
+        sub_add.pack(fill="x", pady=(6, 0))
+        tk.Label(sub_add, image=todo_icons.glyph_image(
+            self._icon_px, "plus", palette.text_muted),
+            bg=palette.surface).pack(side="left")
+        self.sub_var = tk.StringVar()
+        sub_entry = tk.Entry(sub_add, textvariable=self.sub_var, bd=0,
+                             bg=palette.surface, fg=palette.text_primary,
+                             font=self.typography.body,
+                             insertbackground=palette.text_primary)
+        sub_entry.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        sub_entry.bind("<Return>", lambda _e, i=item.id: self.add_subtask(i))
+        self.sub_entry = sub_entry
+
+        # —— 底部信息与删除 ——
+        tk.Frame(parent, bg=palette.border, height=1).pack(fill="x", pady=(16, 8))
+        footer = tk.Frame(parent, bg=palette.surface)
+        footer.pack(fill="x")
+        extra = []
+        if item.rollover_count:
+            extra.append(f"已顺延 {item.rollover_count} 次")
+        if item.original_due_date:
+            extra.append(f"原定 {item.original_due_date}")
+        if item.completed_at:
+            extra.append(f"完成于 {item.completed_at[:16].replace('T', ' ')}")
+        tk.Label(footer, text="　".join(extra) or "　", bg=palette.surface,
+                 fg=palette.text_muted, font=self.typography.caption,
+                 anchor="w").pack(side="left")
+        delete = tk.Label(footer, text="删除", bg=palette.surface,
+                          fg=palette.danger, font=self.typography.caption,
+                          cursor="hand2", padx=8)
+        delete.pack(side="right")
+        delete.bind("<Button-1>", lambda _e, i=item.id: self.delete_item(i))
+
+    def _apply_notes_placeholder(self):
+        """空备注时给一段灰色提示字（Tk 的 Text 没有原生 placeholder）。"""
+        placeholder = "添加备注…"
+        self.notes_text.insert("1.0", placeholder)
+        self.notes_text.configure(fg=self.palette.text_muted)
+        self._notes_placeholder = placeholder
+
+        def clear(_event=None):
+            if self._notes_placeholder and \
+                    self.notes_text.get("1.0", "end-1c") == self._notes_placeholder:
+                self.notes_text.delete("1.0", "end")
+            self.notes_text.configure(fg=self.palette.text_primary)
+            self.notes_text.unbind("<FocusIn>")
+
+        def restore(_event=None):
+            if not self.notes_text.get("1.0", "end-1c").strip():
+                self.notes_text.insert("1.0", placeholder)
+                self.notes_text.configure(fg=self.palette.text_muted)
+                self._notes_placeholder = placeholder
+
+        self.notes_text.bind("<FocusIn>", clear)
+        self.notes_text.bind("<FocusOut>", restore, add="+")
+
+    def _notes_value(self) -> str:
+        if self._notes_placeholder is None:
+            return self.notes_text.get("1.0", "end-1c")
+        text = self.notes_text.get("1.0", "end-1c")
+        return "" if text == self._notes_placeholder else text
+
+    def _make_meta_row(self, parent, glyph: str, label: str, value: str,
+                       command, *, value_color: Optional[str] = None):
+        palette = self.palette
+        row = tk.Frame(parent, bg=palette.surface, cursor="hand2")
+        row.pack(fill="x")
+        tk.Label(row, image=todo_icons.glyph_image(
+            self._icon_px, glyph, palette.text_secondary),
+            bg=palette.surface).pack(side="left", pady=6)
+        tk.Label(row, text=label, bg=palette.surface, fg=palette.text_primary,
+                 font=self.typography.body, anchor="w", width=9).pack(
+            side="left", padx=(10, 0), pady=6)
+        value_label = tk.Label(row, text=value, bg=palette.surface,
+                               fg=value_color or palette.text_secondary,
+                               font=self.typography.body, anchor="w")
+        value_label.pack(side="left", fill="x", expand=True, pady=6)
+        tk.Label(row, image=todo_icons.glyph_image(
+            self._icon_px, "chevron_right", palette.text_muted),
+            bg=palette.surface).pack(side="right", pady=6)
+
+        def enter(_event=None):
+            tint(row, palette.surface_alt)
+
+        def leave(_event=None):
+            tint(row, palette.surface)
+
+        for widget in row.winfo_children():
+            widget.bind("<Enter>", enter)
+            widget.bind("<Leave>", leave)
+            widget.bind("<Button-1>", command)
+        row.bind("<Enter>", enter)
+        row.bind("<Leave>", leave)
+        row.bind("<Button-1>", command)
+        return row
+
+    def _render_subtasks(self, item: TodoItem):
+        palette = self.palette
+        for child in self._subtask_holder.winfo_children():
+            child.destroy()
+        subs = self.db.fetch_subtasks(item.id)
+        done = sum(1 for s in subs if s.completed)
+        self._subtask_counter.configure(
+            text=f"子任务  {done}/{len(subs)}" if subs else "子任务")
+        for sub in subs:
+            row = tk.Frame(self._subtask_holder, bg=palette.surface)
+            row.pack(fill="x")
+            check = tk.Label(row, bg=palette.surface, cursor="hand2", bd=0,
+                             highlightthickness=0,
+                             image=todo_icons.checkbox_image(
+                                 scaled_px(self, 15), FALLBACK_COLOR,
+                                 bool(sub.completed)))
+            check.pack(side="left", pady=4)
+            text_label = tk.Label(row, text=sub.title, bg=palette.surface,
+                                  fg=(palette.text_muted if sub.completed
+                                      else palette.text_primary),
+                                  font=self.typography.body, anchor="w")
+            text_label.pack(side="left", fill="x", expand=True, padx=(10, 0), pady=4)
+            remove = tk.Label(row, text="✕", bg=palette.surface,
+                              fg=palette.text_muted, font=self.typography.caption,
+                              cursor="hand2", padx=6)
+            remove.pack(side="right")
+            check.bind("<Button-1>",
+                       lambda _e, s=sub: self._toggle_subtask(item.id, s.id,
+                                                              not s.completed))
+            remove.bind("<Button-1>", lambda _e, s=sub: self._remove_subtask(item.id, s.id))
+
+    # ==================================================================
+    # 日期 / 时间的本地化显示
+    # ==================================================================
+    @staticmethod
+    def _format_due_long(due: Optional[date]) -> str:
+        if due is None:
+            return ""
+        today = date.today()
+        delta = (due - today).days
+        if delta == 0:
+            return f"今天  周{WEEKDAY_CN[due.weekday()][1]}"
+        if delta == 1:
+            return f"明天  周{WEEKDAY_CN[due.weekday()][1]}"
+        if delta == -1:
+            return f"昨天  周{WEEKDAY_CN[due.weekday()][1]}"
+        return f"{due.strftime('%Y年%m月%d日')}  {WEEKDAY_CN[due.weekday()]}"
+
+    @staticmethod
+    def _unit_label(unit: str) -> str:
+        for key, label in REPEAT_UNITS:
+            if key == unit:
+                return label
+        return unit
+
+    # ==================================================================
+    # 交互：勾选 / 选择 / 增删
+    # ==================================================================
+    def _subtask_summary_cache(self, items: list[TodoItem]):
+        self._subtask_cache = self.db.subtask_summary([i.id for i in items])
+
+    def toggle_complete(self, item_id: int):
+        self._flush_editor()
+        result = self.db.set_completed(item_id, True)
+        if result.get("action") == "spawn" and result.get("next_due"):
+            self.mid_helper.configure(
+                text=f"重复项已完成，下一次：{result['next_due']}")
+        self.refresh_all()
+
+    def toggle_flag(self, item_id: int):
+        self._flush_editor()
+        self.db.toggle_flag(item_id)
+        self.refresh_all()
+
+    def toggle_skip_holidays(self, item_id: int):
+        """切换「跳过节假日」。重新打开时立刻把落点挪到工作日。"""
+        item = self.db.get_item(item_id)
+        if item is None:
+            return
+        turning_on = not item.skip_holidays
+        payload = {"skip_holidays": 1 if turning_on else 0}
+        if turning_on and item.due_date:
+            payload["due_date"] = self.db.shift_to_workday(item.due_date)
+        self.db.update_item(item_id, payload)
+        self.refresh_all()
+
+    def _set_priority(self, item_id: int, level: int):
+        self.db.update_item(item_id, {"priority": level})
+        self.refresh_all()
+
+    def select_item(self, item_id: int):
+        if self.selected_item_id == item_id:
+            return
+        self._flush_editor()
+        self.selected_item_id = item_id
+        for iid, row in self._row_widgets.items():
+            item = self.db.get_item(iid)
+            if item:
+                self._paint_item_row(item, row, self._find_check(row))
+        self._render_detail()
+
+    @staticmethod
+    def _find_check(row: tk.Frame) -> tk.Label:
+        try:
+            holder = row.winfo_children()[0]
+            return holder.winfo_children()[0]
+        except Exception:
+            return None
+
+    def delete_item(self, item_id: int):
+        if not messagebox.askyesno("删除待办", "确定删除这条待办吗？", parent=self):
+            return
+        self.db.delete_item(item_id)
+        if self.selected_item_id == item_id:
+            self.selected_item_id = None
+        self.refresh_all()
+
+    def quick_add(self):
+        title = self.quick_var.get().strip()
+        # 占位提示会被写进 textvariable，必须显式排除，
+        # 否则点一下回车就会凭空多出一条名为「新提醒事项」的待办
+        if not title or title == self._quick_placeholder:
+            return
+        payload = {"title": title, "list_id": self._default_list_id()}
+        if self.current_list_id is None and self.current_scope in ("today", "scheduled"):
+            payload["due_date"] = day_str(date.today())
+        new_id = self.db.add_item(payload)
+        self.quick_var.set("")
+        self._restore_placeholder(self.quick_entry, self.quick_var,
+                                  self._quick_placeholder)
+        self.selected_item_id = new_id
+        self.refresh_all()
+        self._focus_quick()
+
+    def _focus_quick(self):
+        try:
+            self.quick_entry.focus_set()
+        except Exception:
+            pass
+
+    def add_subtask(self, item: TodoItem):
+        title = self.sub_var.get().strip()
+        if not title:
+            return
+        self.db.add_subtask(item.id, title)
+        self.sub_var.set("")
+        self._render_subtasks(item)
+        self._refresh_current_rows()
+
+    def _toggle_subtask(self, item_id: int, subtask_id: int, completed: bool):
+        self.db.set_subtask_completed(subtask_id, completed)
+        item = self.db.get_item(item_id)
+        if item:
+            self._render_subtasks(item)
+        self._refresh_current_rows()
+
+    def _remove_subtask(self, item_id: int, subtask_id: int):
+        self.db.delete_subtask(subtask_id)
+        item = self.db.get_item(item_id)
+        if item:
+            self._render_subtasks(item)
+        self._refresh_current_rows()
+
+    def _refresh_current_rows(self):
+        """子任务变动后重画中栏（行上要显示 x/y 进度）。"""
+        self._render_item_list()
+
+    # ==================================================================
+    # 编辑器写入
+    # ==================================================================
+    def _flush_editor(self):
+        """把标题 / 备注写回数据库（失焦、切换条目、切换视图时调用）。"""
+        if self._loading or not self.selected_item_id:
+            return
+        item = self.db.get_item(self.selected_item_id)
+        if item is None:
+            return
+        title = self.title_var.get().strip() if hasattr(self, "title_var") else ""
+        notes = self._notes_value() if hasattr(self, "notes_text") else ""
+        payload = {}
+        if title and title != item.title:
+            payload["title"] = title
+        if notes != item.notes:
+            payload["notes"] = notes
+        if payload:
+            self.db.update_item(item.id, payload)
+            row = self._row_widgets.get(item.id)
+            if row:
+                self._render_item_list()
+        # 标题被清空时兜底，避免出现一条没有名字的待办
+        if not title and not item.title:
+            self.db.update_item(item.id, {"title": "新提醒事项"})
+
+    # ==================================================================
+    # 弹层：日期 / 时间 / 重复 / 优先级 / 列表 / 标签
+    # ==================================================================
+    def _show_menu(self, actions):
+        """弹出扁平菜单。
+
+        必须把菜单对象挂在 ``self`` 上留一个引用：tk_popup 只是把菜单交给
+        Tk 显示、随即返回，Python 侧一旦没有引用，菜单对象会被 GC 回收并
+        连带销毁，表现为「点了没反应」。
+        """
+        menu = create_flat_menu(self, actions)
+        self._active_menu = menu
+        try:
+            menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
+        return menu
+
+    def _popup(self, actions):
+        self._show_menu(actions)
+
+    def _set_due(self, item: TodoItem, day: Optional[date]):
+        """写入日期的统一入口：按「跳过节假日」规则落到工作日。
+
+        单次待办且开启跳过时，选到周末或法定节假日会自动挪到下一个工作日；
+        重复项不在这里挪 —— 它每次推进时自己处理，两边都挪会跟周期日打架。
+        """
+        if day is None:
+            self.db.update_item(item.id, {"due_date": ""})
+            return
+        value = day_str(day)
+        if item.skip_holidays and item.repeat_rule == "none":
+            value = self.db.shift_to_workday(value)
+        self.db.update_item(item.id, {"due_date": value})
+
+    def _date_menu(self, _event=None):
+        item = self.db.get_item(self.selected_item_id)
+        if item is None:
+            return
+        today = date.today()
+        weekend = today + timedelta(days=(5 - today.weekday()) % 7 or 7)
+
+        self._popup([
+            ("今天", lambda: self._set_due(item, today)),
+            ("明天", lambda: self._set_due(item, today + timedelta(days=1))),
+            ("本周末", lambda: self._set_due(item, weekend)),
+            ("下个工作日", lambda: self._set_due(
+                item, self.db.next_workday(today, include_self=False))),
+            "---",
+            ("自定…", lambda: self._pick_date_dialog(item.id)),
+            ("清除日期", lambda: self._set_due(item, None)),
+        ])
+
+    def _pick_date_dialog(self, item_id: int):
+        """自定日期：一个小月历，点日期即选。"""
+        palette = self.palette
+        item = self.db.get_item(item_id)
+        if item is None:
+            return
+        current = parse_day(item.due_date) or date.today()
+
+        dlg = tk.Toplevel(self)
+        dlg.title("选择日期")
+        dlg.configure(bg=palette.surface)
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+        self._center_on_parent(dlg, 300, 340)
+
+        state = {"year": current.year, "month": current.month}
+
+        header = tk.Frame(dlg, bg=palette.surface)
+        header.pack(fill="x", padx=14, pady=(14, 6))
+        title = tk.Label(header, bg=palette.surface, fg=palette.text_primary,
+                         font=self.typography.subtitle, anchor="w")
+        title.pack(side="left", fill="x", expand=True)
+        # 月份切换放在标题行右侧（先 pack 下个月、再上个月，读起来就是「下 / 上」）
+        for text, delta in (("下个月 ›", 1), ("‹ 上个月", -1)):
+            btn = tk.Label(header, text=text, bg=palette.surface,
+                           fg=palette.text_secondary,
+                           font=self.typography.caption, cursor="hand2", padx=6)
+            btn.pack(side="right")
+            btn.bind("<Button-1>", lambda _e, d=delta: shift(d))
+
+        grid_holder = tk.Frame(dlg, bg=palette.surface)
+        grid_holder.pack(fill="x", padx=14)
+
+        tk.Label(dlg, text="灰色日期为周末或节假日，选它会自动落到工作日",
+                 bg=palette.surface, fg=palette.text_muted,
+                 font=self.typography.caption).pack(anchor="w", padx=14,
+                                                    pady=(8, 12))
+
+        def pick(day: date):
+            self._set_due(item, day)
+            dlg.destroy()
+            self.refresh_all()
+
+        def shift(delta: int):
+            month = state["month"] + delta
+            year = state["year"]
+            if month < 1:
+                month, year = 12, year - 1
+            elif month > 12:
+                month, year = 1, year + 1
+            state.update({"year": year, "month": month})
+            render()
+
+        def render():
+            title.configure(text=f"{state['year']} 年 {state['month']} 月")
+            for child in grid_holder.winfo_children():
+                child.destroy()
+            for idx, name in enumerate(("一", "二", "三", "四", "五", "六", "日")):
+                tk.Label(grid_holder, text=name, bg=palette.surface,
+                         fg=palette.text_muted, font=self.typography.caption,
+                         width=3).grid(row=0, column=idx, pady=(0, 4))
+            first = date(state["year"], state["month"], 1)
+            start = first.weekday()
+            days = (date(state["year"] + (state["month"] == 12),
+                         (state["month"] % 12) + 1, 1) - first).days
+            for offset in range(days):
+                day = first + timedelta(days=offset)
+                r, c = divmod(start + offset, 7)
+                is_work = self.db.is_workday(day)
+                is_today = day == date.today()
+                fg = palette.text_primary if is_work else palette.text_muted
+                # 今天用一块浅灰底标出来：强调色与正文同为 #1c1c1c，
+                # 只靠字色根本看不出哪天是今天
+                base_bg = palette.sidebar_active if is_today else palette.surface
+                cell = tk.Label(grid_holder, text=str(day.day), width=3, pady=5,
+                                bg=base_bg, fg=fg,
+                                font=(self.typography.nav_item_active if is_today
+                                      else (self.typography.body if is_work
+                                            else self.typography.caption)),
+                                cursor="hand2")
+                cell.grid(row=r + 1, column=c)
+                cell.bind("<Enter>",
+                          lambda _e, w=cell: w.configure(bg=palette.surface_alt))
+                cell.bind("<Leave>",
+                          lambda _e, w=cell, b=base_bg: w.configure(bg=b))
+                cell.bind("<Button-1>", lambda _e, d=day: pick(d))
+
+        render()
+
+    def _time_menu(self, _event=None):
+        item = self.db.get_item(self.selected_item_id)
+        if item is None:
+            return
+
+        def set_time(text: str):
+            self.db.update_item(item.id, {"due_time": text})
+            self.refresh_all()
+
+        self._popup([
+            ("上午 9:00", lambda: set_time("09:00")),
+            ("中午 12:00", lambda: set_time("12:00")),
+            ("下午 14:00", lambda: set_time("14:00")),
+            ("下午 18:00", lambda: set_time("18:00")),
+            "---",
+            ("自定…", lambda: self._ask_time(item.id)),
+            ("清除时间", lambda: set_time("")),
+        ])
+
+    def _ask_time(self, item_id: int):
+        value = simpledialog.askstring("时间", "请输入时间（HH:MM，例如 08:30）",
+                                       initialvalue="09:00", parent=self)
+        if not value:
+            return
+        text = value.strip()
+        try:
+            parts = text.replace("：", ":").split(":")
+            hour, minute = int(parts[0]), int(parts[1])
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError
+        except Exception:
+            messagebox.showwarning("格式不对", "时间格式应为 HH:MM，例如 08:30", parent=self)
+            return
+        self.db.update_item(item_id, {"due_time": f"{hour:02d}:{minute:02d}"})
+        self.refresh_all()
+
+    def _repeat_menu(self, _event=None):
+        item = self.db.get_item(self.selected_item_id)
+        if item is None:
+            return
+
+        def set_rule(rule: str):
+            self.db.update_item(item.id, {"repeat_rule": rule})
+            self.refresh_all()
+
+        actions = [(label, (lambda r=rule: set_rule(r)))
+                   for rule, label in REPEAT_RULES]
+        actions.append("---")
+        actions.append(("重复结束于…", self._repeat_until_dialog))
+        self._popup(actions)
+
+    def _repeat_until_dialog(self):
+        item = self.db.get_item(self.selected_item_id)
+        if item is None:
+            return
+        value = simpledialog.askstring(
+            "重复结束", "重复到哪一天为止？（YYYY-MM-DD，留空表示永不结束）",
+            initialvalue=item.repeat_until or "", parent=self)
+        if value is None:
+            return
+        text = value.strip()
+        if text and parse_day(text) is None:
+            messagebox.showwarning("格式不对", "日期格式应为 YYYY-MM-DD", parent=self)
+            return
+        self.db.update_item(item.id, {"repeat_until": text})
+        self.refresh_all()
+
+    def _priority_menu(self, _event=None):
+        item = self.db.get_item(self.selected_item_id)
+        if item is None:
+            return
+
+        def set_level(level: int):
+            self.db.update_item(item.id, {"priority": level})
+            self.refresh_all()
+
+        actions = [("无", lambda: set_level(0)),
+                   ("低  !", lambda: set_level(1)),
+                   ("中  !!", lambda: set_level(2)),
+                   ("高  !!!", lambda: set_level(3))]
+        self._popup(actions)
+
+    def _list_menu(self, _event=None):
+        item = self.db.get_item(self.selected_item_id)
+        if item is None:
+            return
+
+        def move(list_id: int):
+            self.db.update_item(item.id, {"list_id": list_id})
+            self.refresh_all()
+
+        actions = [(f"●  {l.name}", (lambda lid=l.id: move(lid)))
+                   for l in self.db.fetch_lists()]
+        self._popup(actions)
+
+    def _tags_dialog(self, _event=None):
+        item = self.db.get_item(self.selected_item_id)
+        if item is None:
+            return
+        value = simpledialog.askstring(
+            "标签", "多个标签用空格或逗号分隔", 
+            initialvalue=" ".join(item.tags), parent=self)
+        if value is None:
+            return
+        tags = [t.strip() for t in value.replace(",", " ").split() if t.strip()]
+        self.db.update_item(item.id, {"tags": tags})
+        self.refresh_all()
+
+    # ==================================================================
+    # 清单的新建 / 编辑 / 删除
+    # ==================================================================
+    def new_list_dialog(self, list_id: Optional[int] = None):
+        """新建或编辑清单：名称 + 12 色盘 + 图标盘。"""
+        palette = self.palette
+        editing = self.db.get_list(list_id) if list_id else None
+        state = {
+            "color": editing.color if editing else LIST_COLORS[5][1],
+            "icon": editing.icon if editing else LIST_ICONS[0],
+        }
+
+        dlg = tk.Toplevel(self)
+        dlg.title("编辑列表" if editing else "新建列表")
+        dlg.configure(bg=palette.surface)
+        dlg.transient(self.winfo_toplevel())
+        dlg.resizable(False, False)
+
+        # 大图标预览
+        preview_holder = tk.Frame(dlg, bg=palette.surface)
+        preview_holder.pack(pady=(18, 8))
+        preview = tk.Label(preview_holder, bg=palette.surface)
+        preview.pack()
+
+        tk.Label(dlg, text="列表名称", bg=palette.surface, fg=palette.text_muted,
+                 font=self.typography.caption).pack(anchor="w", padx=24, pady=(6, 4))
+        name_var = tk.StringVar(value=editing.name if editing else "")
+        name_entry = tk.Entry(dlg, textvariable=name_var, bd=0,
+                              bg=palette.surface_alt, fg=palette.text_primary,
+                              font=self.typography.body,
+                              insertbackground=palette.text_primary)
+        name_entry.pack(fill="x", padx=24, ipady=7)
+
+        def refresh_preview():
+            preview.configure(image=todo_icons.tile_image(
+                scaled_px(self, 34), state["color"], state["icon"]))
+
+        # 12 色盘
+        tk.Label(dlg, text="颜色", bg=palette.surface, fg=palette.text_muted,
+                 font=self.typography.caption).pack(anchor="w", padx=24, pady=(16, 6))
+        color_grid = tk.Frame(dlg, bg=palette.surface)
+        color_grid.pack(padx=24)
+        color_cells = {}
+
+        def choose_color(value: str):
+            state["color"] = value
+            for key, cell in color_cells.items():
+                cell.configure(highlightbackground=(palette.accent if key == value
+                                                    else palette.surface))
+            refresh_preview()
+            refresh_icon_tiles()
+
+        for idx, (_label, value) in enumerate(LIST_COLORS):
+            r, c = divmod(idx, 6)
+            # 用 Frame 而不是 Label 画色块：Label 的 width 以**字符**为单位，
+            # 会跟着字体大小漂移，做不出稳定的正方形色盘。
+            cell = tk.Frame(color_grid, bg=value, width=34, height=34,
+                            highlightthickness=2,
+                            highlightbackground=palette.surface,
+                            cursor="hand2")
+            cell.grid(row=r, column=c, padx=5, pady=5)
+            cell.grid_propagate(False)
+            cell.bind("<Button-1>", lambda _e, v=value: choose_color(v))
+            color_cells[value] = cell
+
+        # 图标盘
+        tk.Label(dlg, text="图标", bg=palette.surface, fg=palette.text_muted,
+                 font=self.typography.caption).pack(anchor="w", padx=24, pady=(14, 6))
+        icon_grid = tk.Frame(dlg, bg=palette.surface)
+        icon_grid.pack(padx=24, pady=(0, 8))
+        icon_cells = {}
+
+        def choose_icon(value: str):
+            state["icon"] = value
+            for key, cell in icon_cells.items():
+                cell.configure(highlightbackground=(palette.accent if key == value
+                                                    else palette.surface))
+            refresh_preview()
+
+        def refresh_icon_tiles():
+            """图标盘按当前颜色渲染。
+
+            全用灰底的话，二十个一模一样的灰色小方块上压着白色细图形，
+            肉眼几乎分不出来；上色之后既看得清，也顺手预览了成品效果。
+            """
+            for key, cell in icon_cells.items():
+                cell.configure(image=todo_icons.tile_image(
+                    scaled_px(self, 22), state["color"], key))
+
+        for idx, name in enumerate(LIST_ICONS):
+            r, c = divmod(idx, 10)
+            cell = tk.Label(icon_grid, bg=palette.surface,
+                            highlightthickness=2,
+                            highlightbackground=palette.surface,
+                            cursor="hand2", padx=3, pady=3)
+            cell.grid(row=r, column=c)
+            cell.bind("<Button-1>", lambda _e, v=name: choose_icon(v))
+            icon_cells[name] = cell
+
+        footer = tk.Frame(dlg, bg=palette.surface)
+        footer.pack(fill="x", padx=24, pady=(14, 16))
+
+        def save():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showwarning("缺少名称", "请先给列表起个名字", parent=dlg)
+                return
+            if editing:
+                self.db.update_list(editing.id, name=name,
+                                    color=state["color"], icon=state["icon"])
+            else:
+                new_id = self.db.add_list(name, state["color"], state["icon"])
+                self.current_list_id = new_id
+                self.current_scope = "list"
+            dlg.destroy()
+            self.refresh_all()
+
+        ttk.Button(footer, text="取消", style="Quiet.TButton",
+                   command=dlg.destroy).pack(side="right", padx=(8, 0))
+        ttk.Button(footer, text="保存", style="Primary.TButton",
+                   command=save).pack(side="right")
+
+        choose_color(state["color"])
+        choose_icon(state["icon"])
+        self._autosize_dialog(dlg, 400)
+        name_entry.focus_set()
+        dlg.bind("<Return>", lambda _e: save())
+
+    def delete_list(self, list_id: int):
+        todo_list = self.db.get_list(list_id)
+        if todo_list is None:
+            return
+        if len(self.db.fetch_lists()) <= 1:
+            messagebox.showinfo("无法删除", "至少要保留一个列表。", parent=self)
+            return
+        if not messagebox.askyesno(
+                "删除列表",
+                f"确定删除「{todo_list.name}」吗？\n列表里的待办也会一并删除。",
+                parent=self):
+            return
+        self.db.delete_list(list_id)
+        if self.current_list_id == list_id:
+            self.current_list_id = None
+            self.current_scope = "today"
+        self.selected_item_id = None
+        self.refresh_all()
+
+    # ------------------------------------------------------------------
+    # 节假日日历管理
+    # ------------------------------------------------------------------
+    def manage_holidays_dialog(self):
+        """查看 / 增删节假日日历（次年安排公布后可在这里补录）。"""
+        palette = self.palette
+        dlg = tk.Toplevel(self)
+        dlg.title("节假日日历")
+        dlg.configure(bg=palette.surface)
+        dlg.transient(self.winfo_toplevel())
+        self._center_on_parent(dlg, 460, 520)
+
+        tk.Label(dlg, text="节假日日历", bg=palette.surface,
+                 fg=palette.text_primary,
+                 font=self.typography.subtitle).pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(dlg, text="内置已公布的年份；次年安排公布后可在这里补录。"
+                          "「调休上班」用于把某个周末标记成工作日。",
+                 bg=palette.surface, fg=palette.text_muted,
+                 font=self.typography.caption, wraplength=420,
+                 justify="left").pack(anchor="w", padx=18)
+
+        area = ScrollArea(dlg, bg=palette.surface)
+        area.pack(fill="both", expand=True, padx=18, pady=(10, 8))
+
+        def reload():
+            area.clear()
+            entries = self.db.fetch_holidays()
+            if not entries:
+                tk.Label(area.inner, text="日历为空", bg=palette.surface,
+                         fg=palette.text_muted,
+                         font=self.typography.body).pack(pady=20)
+            current_year = None
+            for entry in entries:
+                year = entry.day[:4]
+                if year != current_year:
+                    current_year = year
+                    tk.Label(area.inner, text=f"{year} 年", bg=palette.surface,
+                             fg=palette.text_muted,
+                             font=self.typography.nav_group).pack(
+                        anchor="w", pady=(8, 2))
+                row = tk.Frame(area.inner, bg=palette.surface)
+                row.pack(fill="x")
+                tk.Label(row, text=entry.day, bg=palette.surface,
+                         fg=palette.text_primary, font=self.typography.body,
+                         width=12, anchor="w").pack(side="left", pady=3)
+                kind_color = (palette.success if entry.kind == "workday"
+                              else palette.text_secondary)
+                tk.Label(row, text=("调休上班" if entry.kind == "workday" else "放假"),
+                         bg=palette.surface, fg=kind_color,
+                         font=self.typography.caption, width=8).pack(side="left")
+                tk.Label(row, text=entry.name, bg=palette.surface,
+                         fg=palette.text_muted, font=self.typography.caption,
+                         anchor="w").pack(side="left", fill="x", expand=True)
+                remove = tk.Label(row, text="✕", bg=palette.surface,
+                                  fg=palette.text_muted,
+                                  font=self.typography.caption, cursor="hand2",
+                                  padx=6)
+                remove.pack(side="right")
+                remove.bind("<Button-1>",
+                            lambda _e, d=entry.day: (self.db.delete_holiday(d), reload()))
+            area._on_inner_configure()
+
+        add_bar = tk.Frame(dlg, bg=palette.surface)
+        add_bar.pack(fill="x", padx=18, pady=(0, 4))
+        tk.Label(dlg, text="格式：日期 YYYY-MM-DD　名称（可留空）　类型",
+                 bg=palette.surface, fg=palette.text_muted,
+                 font=self.typography.caption).pack(anchor="w", padx=18,
+                                                    pady=(0, 12))
+        day_var = tk.StringVar()
+        name_var = tk.StringVar()
+        kind_var = tk.StringVar(value="放假")
+        tk.Entry(add_bar, textvariable=day_var, bd=0, bg=palette.surface_alt,
+                 fg=palette.text_primary, font=self.typography.body,
+                 insertbackground=palette.text_primary, width=12).pack(
+            side="left", ipady=6)
+        tk.Entry(add_bar, textvariable=name_var, bd=0, bg=palette.surface_alt,
+                 fg=palette.text_primary, font=self.typography.body,
+                 insertbackground=palette.text_primary, width=10).pack(
+            side="left", padx=6, ipady=6)
+        combo = ttk.Combobox(add_bar, textvariable=kind_var, width=9,
+                             state="readonly",
+                             values=["放假", "调休上班"])
+        combo.pack(side="left")
+
+        def add():
+            day = day_var.get().strip()
+            if parse_day(day) is None:
+                messagebox.showwarning("格式不对", "日期格式应为 YYYY-MM-DD", parent=dlg)
+                return
+            kind = "workday" if kind_var.get() == "调休上班" else "holiday"
+            self.db.set_holiday(day, name_var.get().strip() or "自定义", kind)
+            day_var.set("")
+            name_var.set("")
+            reload()
+
+        ttk.Button(add_bar, text="添加", style="Quiet.TButton",
+                   command=add).pack(side="left", padx=6)
+
+        reload()
+
+    # ------------------------------------------------------------------
+    def _autosize_dialog(self, dlg: tk.Toplevel, width: int, min_height: int = 0):
+        """按内容实际高度定尺寸。
+
+        固定高度会让内容少的弹窗把按钮吊在半空（实测「新建列表」就是这样），
+        所以让 Tk 先算完请求高度再定几何。
+        """
+        dlg.update_idletasks()
+        height = max(min_height, dlg.winfo_reqheight())
+        self._center_on_parent(dlg, width, height)
+
+    def _center_on_parent(self, dlg: tk.Toplevel, width: int, height: int):
+        root = self.winfo_toplevel()
+        try:
+            x = root.winfo_rootx() + (root.winfo_width() - width) // 2
+            y = root.winfo_rooty() + (root.winfo_height() - height) // 3
+            dlg.geometry(f"{width}x{height}+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            dlg.geometry(f"{width}x{height}")
+
+    # ------------------------------------------------------------------
+    def _set_placeholder(self, entry: tk.Entry, text: str) -> str:
+        """给无边框输入框加灰色占位提示，返回占位文案。
+
+        返回值的用途很重要：占位字会被写进 ``textvariable``，
+        读取时若不把它排除掉，就会把提示语当成用户输入。
+        """
+        entry.insert(0, text)
+        entry.configure(fg=self.palette.text_muted)
+
+        def on_focus_in(_event=None):
+            if entry.get() == text:
+                entry.delete(0, "end")
+                entry.configure(fg=self.palette.text_primary)
+
+        def on_focus_out(_event=None):
+            self._restore_placeholder(entry, None, text)
+
+        entry.bind("<FocusIn>", on_focus_in)
+        entry.bind("<FocusOut>", on_focus_out)
+        return text
+
+    def _restore_placeholder(self, entry: tk.Entry, var, text: str):
+        """输入被清空后把占位提示放回去。"""
+        if entry.get().strip():
+            return
+        entry.delete(0, "end")
+        entry.insert(0, text)
+        entry.configure(fg=self.palette.text_muted)
+
+    # ------------------------------------------------------------------
+    # 搜索
+    # ------------------------------------------------------------------
+    def _on_search_change(self, _event=None):
+        value = self.search_var.get().strip()
+        # 占位提示「搜索」会被写进 textvariable，必须排除，
+        # 否则一进页面就等于带着「搜索」这个关键词过滤
+        if value == self._search_placeholder:
+            value = ""
+        if value == self.keyword:
+            return
+        self._flush_editor()
+        self.keyword = value
+        self._render_item_list()
+
+    # ------------------------------------------------------------------
+    # 对外：主壳切到本页时调用
+    # ------------------------------------------------------------------
+    def refresh(self):
+        """进入页面时刷新：先做一次顺延，再重画。"""
+        self.db.rollover()
+        self._subtask_summary_cache(self._fetch_current_items())
+        self.refresh_all()
