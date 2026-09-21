@@ -158,12 +158,16 @@ from credentials_page import CredentialsPage
 from process_page import ProcessPage
 from ui_theme import MAIN_PALETTE, THEME, TYPOGRAPHY
 from dialog_form_style import apply_dialog_form_style, create_form_entry, create_form_frame, create_form_label
+import app_version
+import markdown_view
 
 
 # =============================================================================
 # 04. 全局常量定义
 # =============================================================================
-APP_TITLE = "个人系统 v1.4.0"
+# 版本号 / 更新日志集中在 app_version.py（以前是硬编码，重打包多少次界面都一样，
+# 用户没法判断手上是不是新版）。顶栏、窗口标题、所有弹窗都显示这同一串。
+APP_TITLE = app_version.APP_TITLE
 EXPIRY_MODULE_TITLE = "服务器与云服务到期情况"
 CURRENT_PROJECT_NAME = "ServerTimeDemo"
 # Windows Mutex 名称：同一机器同时只能运行一个实例（打包后 exe 互斥）
@@ -3274,6 +3278,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             ("备份", self._backup_data),
             ("恢复备份", self._restore_backup),
             ("初始化密码", self.reset_password_from_app),
+            ("更新日志", self.show_changelog),
         ):
             self._make_topbar_action(inner, text, command)
 
@@ -3297,6 +3302,57 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         label.bind("<Leave>", lambda _e: label.configure(bg=palette.surface, fg=palette.text_secondary))
         label.bind("<Button-1>", lambda _e: command())
         return label
+
+    def show_changelog(self):
+        """顶栏「更新日志」：渲染 app_version.VERSION_HISTORY。
+
+        版本号以前是写死的字符串，换多少次 exe 界面都一模一样；现在顶栏那串
+        vX.Y.Z 直接来自 app_version.py，点这里能看到每一版到底改了什么。
+        """
+        win = tk.Toplevel(self)
+        win.title(f"更新日志 · {APP_TITLE}")
+        win.minsize(560, 420)
+        apply_dialog_form_style(win, MAIN_PALETTE, style_prefix="Changelog")
+
+        header = ttk.Frame(win, padding=(18, 14, 18, 6))
+        header.pack(fill="x")
+        ttk.Label(header, text=APP_TITLE, font=FONT_TITLE).pack(anchor="w")
+        ttk.Label(header,
+                  text=f"发布日期 {app_version.APP_RELEASE_DATE} · "
+                       f"共 {len(app_version.VERSION_HISTORY)} 个版本",
+                  foreground=COLOR_MUTED,
+                  font=FONT_CAPTION).pack(anchor="w", pady=(4, 0))
+
+        body = ttk.Frame(win, padding=(18, 0, 18, 6))
+        body.pack(fill="both", expand=True)
+        # 滚动条先 pack：同一容器里 expand 的内容区会把后 pack 的定宽控件
+        # 挤成 0 像素并被 Tk 直接不映射（看不见，也不报错）
+        bar = ttk.Scrollbar(body, orient="vertical")
+        bar.pack(side="right", fill="y")
+        text = tk.Text(body, wrap="word", relief="flat", bd=0,
+                       highlightthickness=0, bg=COLOR_BG, fg=COLOR_TEXT,
+                       font=(markdown_view.FONT_FAMILY, markdown_view.BASE_SIZE),
+                       padx=4, pady=2, yscrollcommand=bar.set)
+        text.pack(side="left", fill="both", expand=True)
+        bar.configure(command=text.yview)
+
+        # 复用笔记区的渲染器：标题分级、列表、加粗都现成，不用再写一套排版
+        markdown_view.setup_tags(text)
+        markdown_view.render(text, app_version.changelog_markdown(),
+                             empty_hint="（还没有记录任何版本）")
+        text.configure(state="disabled")
+
+        footer = ttk.Frame(win, padding=(18, 6, 18, 14))
+        footer.pack(fill="x")
+        ttk.Button(footer, text="关闭", command=win.destroy).pack(side="right")
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.transient(self)
+        # Toplevel 默认落在屏幕左上角，离主窗口很远 —— 居中到主窗口上
+        win.update_idletasks()
+        w, h = 760, 620
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - w) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - h) // 2)
+        win.geometry(f"{w}x{h}+{x}+{y}")
 
     def _backup_data(self):
         try:
