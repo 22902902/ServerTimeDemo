@@ -174,17 +174,19 @@ def test_wired_into_ui():
     spec = ROOT / "ExpiryManager_fixed.spec"
     if spec.exists():
         spec_src = spec.read_text(encoding="utf-8", errors="replace")
+        # 以 main.py 实际 import 的本地模块为准，避免「加了模块忘了写 spec」
+        # 只在新增时才会被发现（历史上就是这么漏掉 app_version 的）
+        need = ["app_version", "markdown_view", "todo_db", "todo_page", "todo_icons"]
+        missing = [n for n in need if n not in spec_src]
         check("打包 spec 把新模块写进了 hiddenimports",
-              "app_version" in spec_src and "markdown_view" in spec_src,
-              "漏了的话运行版一进工具箱就 ImportError")
+              not missing, f"漏了 {missing}（运行版会 ImportError）")
         # excludes 名单是「明确不打包」的意思，写进去等于自断经脉。
         # 注意：任何 spec 都有 `excludes=[]` 这一行，所以要取方括号里的内容判，
         # 不能只搜 "excludes" 这个词（上一版就是这么写错的，恒真无意义）
         m = re.search(r"excludes=\[(.*?)\]", spec_src, re.S)
         excluded = m.group(1) if m else ""
         check("新模块没被 excludes 排除",
-              "app_version" not in excluded and "markdown_view" not in excluded,
-              excluded.strip())
+              not [n for n in need if n in excluded], excluded.strip())
 
 
 def main() -> int:
