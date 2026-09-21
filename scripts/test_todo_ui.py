@@ -36,6 +36,7 @@ M. 完成态     勾上 + 标题划一道横线（含详情标题）；勾选后
 N. 显示已完成 开关持久化 / 已完成沉底带划线 / 点圆圈恢复 / 逾期不再标红
 O. 到点提醒窗 贴屏幕右下角 / 头部不重复标题 / 「全部完成」「稍后提醒」真写库
 P. 主程序接线 到点弹窗 vs 早已过点只走托盘 / 30 秒巡检自续期 / 出错不断循环
+Q. 拖动排序   清单行按住可重排：阈值 / 插入线 / 落库 / 拖出边界 / 不改选中
 
 用法：
     python scripts/test_todo_ui.py
@@ -70,6 +71,7 @@ from todo_page import (                           # noqa: E402
     ScrollArea,
     TodoAlertDialog,
     TodoPage,
+    compute_drop_order,
 )
 from ui_theme import MAIN_PALETTE, THEME          # noqa: E402
 
@@ -1126,6 +1128,169 @@ def settle(root, n: int = 12) -> None:
 
 
 # ===========================================================================
+# Q. 清单拖动排序
+# ===========================================================================
+def test_reorder_ui(page: TodoPage, db: TodoDB, root) -> None:
+    section("[Q] 清单拖动排序（绑定 / 阈值 / 插入线 / 落库 / 边界）")
+
+    # —— 纯函数：间隙号 -> 新顺序 ——
+    check("compute_drop_order：末尾拖到最前",
+          compute_drop_order([1, 2, 3], 3, 0) == [3, 1, 2])
+    check("compute_drop_order：首项拖到最后",
+          compute_drop_order([1, 2, 3], 1, 3) == [2, 3, 1])
+    check("compute_drop_order：往下挪一格",
+          compute_drop_order([1, 2, 3], 1, 2) == [2, 1, 3])
+    check("compute_drop_order：拖回原间隙 = 不动",
+          compute_drop_order([1, 2, 3], 1, 1) == [1, 2, 3])
+    check("compute_drop_order：不修改入参",
+          (lambda src: (compute_drop_order(src, 1, 3), src)[1])([1, 2, 3])
+          == [1, 2, 3])
+
+    holder = page._list_holder
+
+    def snap():
+        """现取左栏行的引用 —— refresh_all 会把整列行重建。"""
+        settle(root)
+        ids = list(page._list_rows)
+        rows = [page._list_rows[i]["row"] for i in ids]
+        return ids, rows, (rows[0].winfo_height() if rows else 0)
+
+    def ev(y):
+        return types.SimpleNamespace(y_root=y)
+
+    def drag(src_index, dest_local_y):
+        """按下第 src 行 -> 拖到 holder 局部 dest_local_y -> 松手。"""
+        ids, rows, height = snap()
+        base = holder.winfo_rooty()
+        start = base + rows[src_index].winfo_y() + height / 2
+        page._list_drag_press(ids[src_index], ev(start))
+        page._list_drag_motion(ids[src_index], ev(base + dest_local_y))
+        state = dict(page._drag) if page._drag else {}
+        page._list_drag_release(ids[src_index], ev(base + dest_local_y))
+        settle(root)
+        return state
+
+    db_order = lambda: [l.id for l in db.fetch_lists()]
+    shown = lambda: [w["text"].cget("text") for w in page._list_rows.values()]
+
+    ids, rows, height = snap()
+    check("至少两个清单才有得拖", len(ids) >= 2, len(ids))
+
+    # —— 绑定：清单行走拖动链路，智能分组不走 ——
+    row0 = page._list_rows[ids[0]]["row"]
+    check("清单行绑了 <B1-Motion>", bool(row0.bind("<B1-Motion>")))
+    check("清单行绑了 <ButtonRelease-1>", bool(row0.bind("<ButtonRelease-1>")))
+    check("清单行保留右键菜单", bool(row0.bind("<Button-3>")))
+    smart_row = page._smart_rows["today"]["row"]
+    check("智能分组不参与拖动", not smart_row.bind("<B1-Motion>"))
+    check("智能分组仍是单击选中", bool(smart_row.bind("<Button-1>")))
+
+    # —— 拖到末尾 ——
+    before = db_order()
+    ids, rows, height = snap()
+    state = drag(0, rows[-1].winfo_y() + height + height / 2)
+    check("拖动被标记为 moved", state.get("moved") is True, state)
+    check("插入间隙 = 末位", state.get("index") == len(before), state)
+    check("库里顺序轮转（第 1 个挪到最后）",
+          db_order() == before[1:] + before[:1], db_order())
+    check("左栏跟着重排", shown() == [l.name for l in db.fetch_lists()], shown())
+
+    # —— 阈值：手抖不算拖 ——
+    before = db_order()
+    ids, rows, height = snap()
+    base = holder.winfo_rooty()
+    start = base + rows[0].winfo_y() + height / 2
+    page._list_drag_press(ids[0], ev(start))
+    page._list_drag_motion(ids[0], ev(start + 2))
+    check("挪 2px 不算拖", page._drag["moved"] is False, page._drag)
+    page._list_drag_release(ids[0], ev(start + 2))
+    settle(root)
+    check("顺序没变", db_order() == before, db_order())
+    check("原地松手 = 单击：选中该清单", page.current_list_id == ids[0],
+          page.current_list_id)
+
+    # —— 插入指示线 ——
+    page.current_list_id = None            # 先取消选中，免得行底色是 active
+    page.current_scope = "today"
+    page.refresh_all()
+    ids, rows, height = snap()
+    base = holder.winfo_rooty()
+    start = base + rows[0].winfo_y() + height / 2
+    page._list_drag_press(ids[0], ev(start))
+    page._list_drag_motion(ids[0], ev(base + rows[1].winfo_y() + height / 2))
+    settle(root)
+    line = page._drop_line
+    check("拖动中出现了插入线", line is not None)
+    if line is not None:
+        check("线高 2px", line.winfo_height() == 2, line.winfo_height())
+        check("线用 place 定位（不挤动其它行）", line.winfo_manager() == "place",
+              line.winfo_manager())
+        check("线落在第 2 行上沿",
+              abs(line.winfo_y() - (rows[1].winfo_y() - 1)) <= 2,
+              (line.winfo_y(), rows[1].winfo_y()))
+    check("被拖那行压暗",
+          page._list_rows[ids[0]]["row"].cget("bg") == page.palette.sidebar_hover,
+          page._list_rows[ids[0]]["row"].cget("bg"))
+    check("左边那条 2px 竖条一起压暗（不留浅缝）",
+          page._list_rows[ids[0]]["accent"].cget("bg")
+          == page.palette.sidebar_hover,
+          page._list_rows[ids[0]]["accent"].cget("bg"))
+    check("鼠标变成抓取状", holder.cget("cursor") == "fleur", holder.cget("cursor"))
+
+    # 拖动中鼠标会扫过别的行，hover 不该把「拿起来」的视觉冲掉
+    other = ids[1]
+    page._hover_side(page._list_rows[other]["row"], "list", other)
+    check("拖动中 hover 不生效",
+          page._list_rows[other]["row"].cget("bg") == page.palette.sidebar_bg,
+          page._list_rows[other]["row"].cget("bg"))
+
+    page._list_drag_release(ids[0], ev(base + rows[1].winfo_y() + height / 2))
+    settle(root)
+    check("松手后插入线收掉", page._drop_line is None)
+    check("鼠标形状恢复", holder.cget("cursor") in ("", "arrow"),
+          holder.cget("cursor"))
+
+    # —— 拖出侧栏上下边界：夹到两端，不能丢 ——
+    ids, rows, height = snap()
+    state = drag(len(ids) - 1, -300)
+    check("拖到侧栏上方 -> 排到最前", db_order()[0] == ids[-1], db_order())
+    check("间隙被夹到 0", state.get("index") == 0, state)
+    ids, rows, height = snap()
+    state = drag(0, 10_000)
+    check("拖到侧栏下方 -> 排到最后", db_order()[-1] == ids[0], db_order())
+    check("间隙被夹到末位", state.get("index") == len(ids), state)
+
+    # —— 拖动重排不改「当前选中的清单」——
+    ids, rows, height = snap()
+    page.current_list_id = ids[0]
+    state = drag(1, rows[0].winfo_y() - 5)
+    check("拖动重排不改当前选中", page.current_list_id == ids[0],
+          page.current_list_id)
+    check("但顺序确实动了（说明真拖了）", state.get("moved") is True, state)
+
+    # —— 重画时拖动态要清干净（否则会握着已销毁的控件）——
+    page._drag = {"list_id": ids[0], "start_y": 0, "offset": 0.0,
+                  "moved": True, "index": 1}
+    page._drop_line = tk.Frame(holder, bg=page.palette.accent, height=2)
+    page.refresh_all()
+    check("重画后 _drag 归零", page._drag is None, page._drag)
+    check("重画后 _drop_line 归零", page._drop_line is None)
+
+    # —— 新增的清单排末尾、不参与既有顺序 ——
+    db.add_list("拖动测试用清单")
+    page.refresh_all()
+    settle(root)
+    check("新建清单排在最后", db.fetch_lists()[-1].name == "拖动测试用清单",
+          [l.name for l in db.fetch_lists()])
+    check("界面最后一行也是它", shown()[-1] == "拖动测试用清单", shown())
+
+    # —— 异常输入：对界面上不存在的行松手不能炸 ——
+    page._list_drag_press(999999, ev(base))
+    page._list_drag_release(999999, ev(base))
+    check("对不存在的行松手不抛异常", True)
+
+
+# ===========================================================================
 def main_test() -> None:
     tmpdir = Path(tempfile.mkdtemp(prefix="todo_ui_"))
     db = TodoDB(tmpdir / "ui.db")
@@ -1160,6 +1325,7 @@ def main_test() -> None:
         test_show_completed(page, db, data)
         test_alert_dialog(page, db, data)
         test_alert_wiring(page, db, data, root)
+        test_reorder_ui(page, db, root)
     finally:
         try:
             page._flush_editor()

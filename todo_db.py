@@ -1018,6 +1018,34 @@ class TodoDB:
         )
         self.conn.commit()
 
+    def reorder_lists(self, ordered_ids: list[int]) -> int:
+        """按给定顺序重写清单的 sort_order，返回参与排序的清单总数。
+
+        界面拖完一次调用一次。传进来的 id **保序去重**；库里存在但没被点名的
+        清单按原有顺序接在末尾 —— 少传了谁也不会把它弄丢，更不会被挪到前面。
+        """
+        rows = self.conn.execute(
+            "SELECT id FROM todo_lists ORDER BY sort_order ASC, id ASC"
+        ).fetchall()
+        existing = [int(r["id"]) for r in rows]
+        known = set(existing)
+
+        head: list[int] = []
+        for raw_id in ordered_ids:
+            list_id = int(raw_id)
+            if list_id in known and list_id not in head:
+                head.append(list_id)
+        moved = set(head)
+        final = head + [list_id for list_id in existing if list_id not in moved]
+
+        now = _now()
+        self.conn.executemany(
+            "UPDATE todo_lists SET sort_order = ?, updated_at = ? WHERE id = ?",
+            [(index, now, list_id) for index, list_id in enumerate(final)],
+        )
+        self.conn.commit()
+        return len(final)
+
     def delete_list(self, list_id: int) -> tuple[int, int]:
         """删除清单，连同其下的待办与子任务。
 

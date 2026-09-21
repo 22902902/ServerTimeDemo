@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import subprocess
 import sys
@@ -60,9 +61,9 @@ def summarise(name: str, interpreter: str) -> tuple[int, int, str]:
 
 def main(argv: list[str]) -> int:
     if not argv:
-        try:
-            import tkinter  # noqa: F401
-        except ImportError:
+        # 用 find_spec 探测而不是 import：pyflakes 不认 noqa（那是 flake8 的），
+        # 真 import 进来又不用，会被报一条「imported but unused」
+        if importlib.util.find_spec("tkinter") is None:
             print("当前解释器没有 tkinter，界面类套件跑不起来。")
             print(r"请改用系统 Python：C:\Users\shaoy\AppData\Local\Programs"
                   r"\Python\Python312\python.exe")

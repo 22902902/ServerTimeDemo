@@ -25,6 +25,7 @@ F. 智能分组      count_by_scope / fetch_items 各视图 / open_count_by_list
 I. 显示已完成    include_completed 在四个视图都生效 / 已完成沉底 / 偏好持久化
 J. 到点提醒      alert_moment / pending_alerts（刚过点 vs 早已过点）/ 同一条不重复响 /
                  改时间·顺延·勾选都会让提醒记录作废 / 稍后提醒 / 老库自动补列
+K. 清单排序      reorder_lists（保序去重 / 缺漏接末尾 / 未知 id 忽略 / sort_order 连续）
 G. 增删改查      清单 / 待办 / 子任务 / 标签 / 手工维护日历
 H. 辅助函数      parse_day / day_str / add_months / add_years
 
@@ -878,6 +879,67 @@ def test_alerts() -> None:
     check("二次打开老库不报错", True)
 
 
+# ===========================================================================
+# K. 清单拖动排序
+# ===========================================================================
+def test_reorder() -> None:
+    section("[K] 清单拖动排序（保序去重 / 缺漏接末尾 / sort_order 连续）")
+    db = fresh_db("reorder")
+    db.seed_default_lists()
+
+    order = lambda: [l.id for l in db.fetch_lists()]
+    names = lambda: [l.name for l in db.fetch_lists()]
+
+    check("默认三个清单", len(order()) == 3, names())
+
+    start = order()
+    db.reorder_lists(list(reversed(start)))
+    check("整体反转生效", order() == list(reversed(start)), names())
+    check("名称跟着反了", names() == ["生活", "工作", "提醒事项"], names())
+
+    cur = order()
+    db.reorder_lists([cur[2]] + cur[:2])
+    check("末尾项提到最前", order() == [cur[2], cur[0], cur[1]], names())
+
+    # 少传了谁，谁就按原序接在末尾 —— 不能把清单弄丢
+    cur = order()
+    db.reorder_lists([cur[1]])
+    rest = [i for i in cur if i != cur[1]]
+    check("没点名的接在末尾而不是消失", order() == [cur[1]] + rest, names())
+    check("清单总数不变", len(order()) == 3, len(order()))
+
+    cur = order()
+    db.reorder_lists([9999, cur[0]])
+    check("未知 id 被忽略", order() == cur, names())
+
+    cur = order()
+    db.reorder_lists([cur[0], cur[0], cur[1], cur[2]])
+    check("重复 id 去重", order() == cur, names())
+
+    cur = order()
+    db.reorder_lists([])
+    check("空列表不动顺序", order() == cur, names())
+
+    raw = [r[0] for r in db.conn.execute(
+        "SELECT sort_order FROM todo_lists ORDER BY sort_order").fetchall()]
+    check("sort_order 被重写成连续整数", raw == [0, 1, 2], raw)
+
+    check("返回值 = 清单数", db.reorder_lists(order()) == 3)
+
+    marked = names()
+    path = db.db_path
+    db.close()
+    # 重开一次：顺序得是从库里读出来的，而不是留在内存里的
+    db2 = TodoDB(path)
+    check("重开库后顺序保持", [l.name for l in db2.fetch_lists()] == marked,
+          [l.name for l in db2.fetch_lists()])
+    db2.add_list("新清单")
+    check("新建清单排在末尾",
+          [l.name for l in db2.fetch_lists()] == marked + ["新清单"],
+          [l.name for l in db2.fetch_lists()])
+    db2.close()
+
+
 def main_test() -> None:
     print("=" * 78)
     print("待办模块回归测试：数据层 + 节假日引擎")
@@ -892,6 +954,7 @@ def main_test() -> None:
     test_show_completed()
     test_alerts()
     test_crud()
+    test_reorder()
 
 
 if __name__ == "__main__":

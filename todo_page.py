@@ -84,6 +84,9 @@ FALLBACK_COLOR = "#8E8E93"
 ALERT_WIDTH = 340          # 固定宽度：通知要一眼看完，不做自适应
 ALERT_MIN_HEIGHT = 116
 ALERT_MARGIN = 24          # 距屏幕右边 / 下边的留白
+DRAG_THRESHOLD = 5         # 按住后纵向挪这么多像素才算「拖」，否则当点击
+DROP_LINE_H = 2            # 拖动时插入指示线的高度
+DROP_LINE_PAD = 8          # 插入线在侧栏里的左右留白
 ALERT_BOTTOM_GAP = 68      # 给任务栏留的位置
 
 
@@ -105,6 +108,23 @@ def tint(widget, bg: str):
         pass
     for child in widget.winfo_children():
         tint(child, bg)
+
+def compute_drop_order(ordered_ids, dragged_id, index):
+    """把 dragged_id 挪到 index 号间隙后，返回新的顺序列表。
+
+    ``index`` 是相对**原序列**的间隙号（0..len），被拖项自己不占位：
+
+        [A, B, C] 把 C 拖到间隙 0 -> [C, A, B]
+        [A, B, C] 把 A 拖到间隙 2 -> [B, A, C]
+
+    抽成纯函数是因为「间隙号 -> 新顺序」这个换算是拖动里唯一算错会静默
+    错位的地方（拖了没反应 / 跳错位置），单独钉住最好测。
+    """
+    rest = [item for item in ordered_ids if item != dragged_id]
+    before = [item for item in ordered_ids[:index] if item != dragged_id]
+    cut = len(before)
+    return rest[:cut] + [dragged_id] + rest[cut:]
+
 
 # 带删除线的字体缓存：键是 (字族, 字号, 字重...)，见 strike_font()
 _STRIKE_FONTS: dict = {}
@@ -379,6 +399,8 @@ class TodoPage(ttk.Frame):
         self._row_widgets: dict[int, tk.Frame] = {}
         self._loading = False                        # 载入编辑器时抑制写库
         self._detail_area: Optional[ScrollArea] = None
+        self._drag: Optional[dict] = None             # 清单拖动排序的进行态
+        self._drop_line: Optional[tk.Frame] = None    # 插入位置那条横线
         self._empty_state: Optional[tk.Frame] = None
 
         self._icon_px = scaled_px(self, ICON_PX)
@@ -491,11 +513,22 @@ class TodoPage(ttk.Frame):
         for widget in (row, accent, icon_holder, icon, text, count):
             widget.bind("<Enter>", lambda _e, r=row: self._hover_side(r, kind, key))
             widget.bind("<Leave>", lambda _e, r=row: self._leave_side(r, kind, key))
-        row.bind("<Button-1>", lambda _e, k=kind, kk=key: self._select_side(k, kk))
-        for widget in (accent, icon_holder, icon, text, count):
-            widget.bind("<Button-1>", lambda _e, k=kind, kk=key: self._select_side(k, kk))
         if kind == "list":
+            # 清单行按住可以拖动重排。按下只记起点，真挪动过才算拖 ——
+            # 没挪动就走单击（选中它），见 _list_drag_release。
+            for widget in (row, accent, icon_holder, icon, text, count):
+                widget.bind("<Button-1>",
+                            lambda e, kk=key: self._list_drag_press(kk, e))
+                widget.bind("<B1-Motion>",
+                            lambda e, kk=key: self._list_drag_motion(kk, e))
+                widget.bind("<ButtonRelease-1>",
+                            lambda e, kk=key: self._list_drag_release(kk, e))
             row.bind("<Button-3>", lambda _e, kk=key: self._list_context_menu(kk))
+        else:
+            row.bind("<Button-1>", lambda _e, k=kind, kk=key: self._select_side(k, kk))
+            for widget in (accent, icon_holder, icon, text, count):
+                widget.bind("<Button-1>",
+                            lambda _e, k=kind, kk=key: self._select_side(k, kk))
 
         if kind == "smart":
             self._groups[f"smart:{key}"] = row
@@ -511,11 +544,16 @@ class TodoPage(ttk.Frame):
                                     "text": text, "count": count}
 
     def _hover_side(self, row, kind, key):
+        # 拖动中鼠标会扫过别的行，别让 hover 把「拿起来」的视觉冲掉
+        if self._drag and self._drag["moved"]:
+            return
         if row.cget("bg") == self.palette.sidebar_active:
             return
         self._paint_side_row(kind, key, bg=self.palette.sidebar_hover)
 
     def _leave_side(self, row, kind, key):
+        if self._drag and self._drag["moved"]:
+            return
         state = self._row_state(kind, key)
         if state == "active":
             return
@@ -569,6 +607,120 @@ class TodoPage(ttk.Frame):
         self.refresh_all()
         if self.current_list_id is not None:
             self._render_item_list()
+
+    # -- 清单拖动排序 ---------------------------------------------------
+    def _list_drag_press(self, list_id, event):
+        widgets = self._list_rows.get(int(list_id))
+        # 记下鼠标按在该行内的偏移：换位看的是被拖行的**中心线**，
+        # 不是鼠标点 —— 否则按住行的下缘时会提前一整行换位，不跟手
+        offset = (event.y_root - widgets["row"].winfo_rooty()) if widgets else 0.0
+        self._drag = {"list_id": int(list_id), "start_y": event.y_root,
+                      "offset": offset, "moved": False, "index": None}
+
+    def _list_drag_motion(self, list_id, event):
+        drag = self._drag
+        if not drag:
+            return
+        if not drag["moved"]:
+            # 手抖一两个像素不算拖，否则每次点清单都会变成重排
+            if abs(event.y_root - drag["start_y"]) < DRAG_THRESHOLD:
+                return
+            drag["moved"] = True
+            self._begin_drag_visual(drag["list_id"])
+        row = self._list_rows.get(drag["list_id"], {}).get("row")
+        height = row.winfo_height() if row is not None else 0
+        drag["index"] = self._drop_index(
+            event.y_root - drag["offset"] + height / 2)
+        self._place_drop_line(drag["index"])
+
+    def _list_drag_release(self, list_id, event):
+        drag = self._drag
+        self._drag = None
+        if not drag:
+            return
+        if not drag["moved"]:
+            # 原地松手 = 单击：选清单
+            self._select_side("list", int(list_id))
+            return
+        order = list(self._list_rows)
+        index = drag["index"]
+        if index is None:
+            index = len(order)
+        new_order = compute_drop_order(order, int(list_id), index)
+        self._hide_drop_line()
+        if new_order != order:
+            self.db.reorder_lists(new_order)
+        self.refresh_all()
+
+    def _drop_index(self, center_y) -> int:
+        """被拖行的中心线落在第几号间隙（0..清单数）。
+
+        传进来的是**被拖行中心**的屏幕 y，不是鼠标点。统一换算到
+        _list_holder 的局部坐标再比 —— 行是 pack 出来的，用行自己的
+        winfo_y()/winfo_height() 算中线，不写死行高。
+        """
+        order = list(self._list_rows)
+        local_y = center_y - self._list_holder.winfo_rooty()
+        for index, list_id in enumerate(order):
+            row = self._list_rows[list_id]["row"]
+            # 用 <=：中心线正好压在某行中线上时插到该行**之前** ——
+            # 拖回自己原来的位置时结果就是「顺序不变」，不会抖一下
+            if local_y <= row.winfo_y() + row.winfo_height() / 2:
+                return index
+        return len(order)
+
+    def _begin_drag_visual(self, list_id):
+        """被拖的那行压暗一档，表示「拿起来了」。"""
+        widgets = self._list_rows.get(int(list_id))
+        if not widgets:
+            return
+        # accent 是行左边那 2px 竖条，也要一起压暗，否则会留一道浅缝
+        for name in ("row", "accent", "icon_holder", "icon", "text", "count"):
+            widgets[name].configure(bg=self.palette.sidebar_hover)
+        widgets["text"].configure(fg=self.palette.text_muted)
+        widgets["count"].configure(fg=self.palette.text_muted)
+        try:
+            self._list_holder.configure(cursor="fleur")
+        except tk.TclError:
+            pass
+
+    def _place_drop_line(self, index):
+        """在目标间隙画一条强调色横线。
+
+        用 place 定位而不是往 pack 序列里插控件 —— 插进去会把下面所有行
+        推下去，行的 y 跟着变，插入位置就会自己抖起来。
+        """
+        order = list(self._list_rows)
+        if not order:
+            return
+        if index <= 0:
+            y = 0
+        elif index >= len(order):
+            y = self._list_holder.winfo_height() - DROP_LINE_H
+        else:
+            y = self._list_rows[order[index]]["row"].winfo_y() - 1
+        line = self._drop_line
+        if line is None:
+            line = tk.Frame(self._list_holder, bg=self.palette.accent,
+                            height=DROP_LINE_H)
+            self._drop_line = line
+        width = max(40, self._list_holder.winfo_width() - DROP_LINE_PAD * 2)
+        line.place(x=DROP_LINE_PAD, y=max(0, y), width=width, height=DROP_LINE_H)
+        line.lift()
+
+    def _hide_drop_line(self):
+        """收掉插入线并恢复鼠标形状（幂等）。"""
+        line = self._drop_line
+        self._drop_line = None
+        try:
+            self._list_holder.configure(cursor="")
+        except tk.TclError:
+            pass
+        if line is not None:
+            try:
+                line.destroy()
+            except tk.TclError:
+                pass
 
     def _list_context_menu(self, list_id):
         self._show_menu([
@@ -679,6 +831,11 @@ class TodoPage(ttk.Frame):
                 value = counts.get(key, 0)
                 widgets["count"].configure(text=str(value) if value else "")
         list_counts = self.db.open_count_by_list()
+
+        # 下面会把 _list_holder 的子控件全部销毁（包括拖动的插入线），
+        # 引用要跟着清掉，否则会拿着一个已销毁的控件
+        self._drag = None
+        self._drop_line = None
 
         for child in self._list_holder.winfo_children():
             child.destroy()
