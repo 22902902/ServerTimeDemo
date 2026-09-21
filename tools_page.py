@@ -79,6 +79,9 @@ CARD_TITLE_MAX = 16      # 标题最大字符数，超出截断，防止换行�
 CARD_HINT_MAX = 11       # 副标题最大字符数
 FAVORITE_LIMIT = 8       # 收藏横条最多显示几个
 RECENT_LIMIT = 8         # 最近使用横条最多显示几个
+TAG_STRIP_LIMIT = 12     # 标签横条最多显示几个（长尾标签靠搜索框找）
+DRAG_THRESHOLD = 6       # 按住左键移动超过这么多像素才算拖拽，否则算单击
+GHOST_ALPHA = 0.94       # 拖拽影子窗口的不透明度（能看见底下的分类胶囊）
 LABEL_VPAD = 6           # tk.Label 单行 reqheight 比 linespace 多的那 6px（实测）
 
 # ---- 四种排列 ----
@@ -651,8 +654,12 @@ class ToolsPage(ttk.Frame):
         except tk.TclError:
             pass
 
-        # 拖拽状态
+        # 拖拽状态（tool_id/x/y 在 _on_card_press 记起点，dragging 在 _on_drag_motion 置位）
         self._drag_data = {"tool_id": None, "from_toolbar": False, "widget": None}
+        self._drag_ghost: Optional[tk.Toplevel] = None   # 跟着指针的影子窗口
+        self._drag_cats_shown = False                    # 拖拽期间是否把空分类也摆出来了
+        self._drop_active_name: Optional[str] = None     # 当前高亮的投放目标分类
+        self._status_keyword = ""                        # 状态条恢复时要知道当前关键词
 
         # 关键：先初始化表，再读设置
         self._init_db()
@@ -979,7 +986,7 @@ class ToolsPage(ttk.Frame):
     # 搜索框（启动器主入口）
     # ------------------------------------------------------------------
 
-    SEARCH_PLACEHOLDER = "搜索工具：支持名称 / 别名 / 分类 / 文件名"
+    SEARCH_PLACEHOLDER = "搜索工具：名称 / 别名 / 标签 / 分类（有输入即全局搜索）"
 
     def _select_all_search(self, _event=None):
         self.search_entry.selection_range(0, "end")
@@ -1162,8 +1169,26 @@ class ToolsPage(ttk.Frame):
         self._category_chips[name] = chip
         return chip
 
+    def _create_new_category_chip(self):
+        """分类栏末尾的「+ 新建分类」。
+
+        分类是「逻辑归属」而不是物理文件夹之后，建分类成了一件很轻的事
+        （拖一下就能归类），入口自然该摆在分类栏里。
+        底色与页面同色、只用悬停浅底 —— 它是入口，不是又一颗分类胶囊。
+        """
+        chip = RoundedChip(
+            self.category_container, "+ 新建分类",
+            canvas_bg=COLOR_BG, bg=COLOR_BG, fg=COLOR_MUTED,
+            hover_bg=COLOR_CHIP_BG, hover_fg=COLOR_TEXT,
+            active_bg=COLOR_CHIP_BG, active_fg=COLOR_TEXT,
+            padx=9, pady=2, font=("Microsoft YaHei", 9),
+            command=self._add_category_dialog)
+        chip.pack(side="left", padx=(0, 6), pady=1)
+        self.category_buttons.append(chip)
+        return chip
+
     # ------------------------------------------------------------------
-    # 快捷横条：收藏 / 最近使用
+    # 快捷横条：收藏 / 最近使用 / 标签
     # ------------------------------------------------------------------
 
     def _build_quick_strips(self):
@@ -1177,8 +1202,10 @@ class ToolsPage(ttk.Frame):
         favourites = launcher.favorite_tools(tools)[:FAVORITE_LIMIT]
         fav_ids = {launcher.tool_id(t) for t in favourites}
         recents = launcher.recent_tools(tools, RECENT_LIMIT, exclude_ids=fav_ids)
+        # 标签横条按「全库」统计，不按当前包 —— 标签的意义就是跨包找东西
+        tags = tools_db.list_tag_counts(self.db, limit=TAG_STRIP_LIMIT)
 
-        if not favourites and not recents:
+        if not favourites and not recents and not tags:
             self._strips_frame.pack_forget()
             return
 
@@ -1192,6 +1219,8 @@ class ToolsPage(ttk.Frame):
             self._build_strip_row("收藏", favourites)
         if recents:
             self._build_strip_row("最近", recents)
+        if tags:
+            self._build_tag_row(tags)
 
     def _build_strip_row(self, title, items):
         """一条快捷横条（收藏 / 最近）。单击即启动，悬停变近黑底作强提示。"""
@@ -1214,6 +1243,33 @@ class ToolsPage(ttk.Frame):
             # 单击即启动 —— 横条存在的意义就是「一下点开」，不做二次确认
             chip.bind("<Button-3>", lambda e, i=tid: self._show_tool_menu(e, i))
 
+    def _build_tag_row(self, tag_counts):
+        """标签横条：点一下就按该标签全局搜（跨分类、跨包）。
+
+        标签是用户自己起的检索词，比分类更贴近「我想找什么」。摆一排出来
+        点一下就能搜，比让人先回忆标签名再手打一遍强得多。
+        """
+        row = tk.Frame(self._strips_frame, bg=COLOR_BG)
+        row.pack(fill="x", pady=(0, 2))
+        tk.Label(row, text="标签", bg=COLOR_BG, fg=COLOR_MUTED,
+                 font=("Microsoft YaHei", 9), width=4, anchor="w").pack(side="left")
+        for tag, _count in tag_counts:
+            chip = RoundedChip(
+                row, f"#{tag}", canvas_bg=COLOR_BG,
+                bg=COLOR_CHIP_BG, fg=COLOR_TEXT,
+                hover_bg=COLOR_ACCENT, hover_fg=COLOR_ACCENT_TEXT,
+                active_bg=COLOR_CHIP_BG, active_fg=COLOR_TEXT,
+                padx=9, pady=3, font=("Microsoft YaHei", 9),
+                command=lambda t=tag: self._search_tag(t))
+            chip.pack(side="left", padx=(0, 6))
+
+    def _search_tag(self, tag: str):
+        """点标签 = 把标签填进搜索框，走的就是全局搜索那条路。"""
+        self._search_placeholder_on = False
+        self.search_entry.configure(foreground=COLOR_TEXT)
+        self.search_var.set(tag)          # trace → _refresh_grid
+        self._focus_search()
+
     # ------------------------------------------------------------------
     # 状态条
     # ------------------------------------------------------------------
@@ -1222,7 +1278,8 @@ class ToolsPage(ttk.Frame):
         self.status_var = tk.StringVar(value="")
         self._status_bar = create_status_bar(self, self.status_var, padding=(24, 8))
 
-    def _update_status(self, tools=None, matched=None, keyword="", extra=""):
+    def _update_status(self, tools=None, matched=None, keyword="", extra="",
+                       global_scope: bool = False):
         """状态条：数量 / 重名提醒 / 当前光标。"""
         if tools is None:
             tools = getattr(self, "_all_tools", [])
@@ -1231,7 +1288,10 @@ class ToolsPage(ttk.Frame):
 
         parts = []
         if keyword:
-            parts.append(f"匹配 {len(matched)} / {len(tools)}")
+            # 「全局」要写出来：有关键词时分类栏与包的过滤都被绕过了，
+            # 不说明的话用户会以为分类栏失灵了
+            scope = "全局" if global_scope else "本包"
+            parts.append(f"匹配 {len(matched)} / {len(tools)}（{scope}）")
         else:
             parts.append(f"共 {len(matched)} 个工具")
 
@@ -1248,9 +1308,25 @@ class ToolsPage(ttk.Frame):
             parts.append(extra)
         elif keyword and not matched:
             # 只在「搜了但没搜到」时提示换词；套件本来就空的时候这么说很奇怪
-            parts.append("没有匹配项，试试别名或分类")
+            parts.append("没有匹配项，试试别名 / 标签 / 分类")
 
         self.status_var.set("  ·  ".join(parts))
+
+    def _flash_status(self, text, *, ms: int = 4000):
+        """临时状态提示，几秒后自动回到常规状态条内容。
+
+        拖拽改分类这种动作需要即时反馈，但没必要弹窗 —— 拖一次弹一次
+        「已移动 + 确定」，拖十次就是十次打断。
+        """
+        self.status_var.set(f"✓ {text}")
+        self.after(ms, self._restore_status)
+
+    def _restore_status(self):
+        keyword = getattr(self, "_status_keyword", "")
+        self._update_status(getattr(self, "_all_tools", []),
+                            getattr(self, "_visible_tools", []),
+                            keyword, extra=self._cursor_label(),
+                            global_scope=bool(keyword))
 
     def _build_main_area(self):
         """中间：左网格 + 中折叠按钮 + 右编辑（默认折叠 + 可展开）"""
@@ -1361,6 +1437,18 @@ class ToolsPage(ttk.Frame):
         ttk.Label(parent, text='（可选，如 "F0"、"FF" 等简称，显示在名称下方）',
                   foreground=COLOR_MUTED, font=("", 8)).pack(anchor="w", pady=(0, 8))
 
+        ttk.Label(parent, text="标签:").pack(anchor="w")
+        self.edit_tags_var = tk.StringVar()
+        ttk.Entry(parent, textvariable=self.edit_tags_var).pack(fill="x", pady=(0, 2))
+        ttk.Label(parent, text="用 | 、 ， 分隔（竖线 / 顿号 / 逗号都认），可跨分类全局搜",
+                  foreground=COLOR_MUTED, font=("", 8), justify="left",
+                  wraplength=self._right_default_width - 48).pack(anchor="w")
+        self.edit_tags_preview = ttk.Label(parent, text="", foreground=COLOR_MUTED,
+                                           font=("", 8), justify="left",
+                                           wraplength=self._right_default_width - 48)
+        self.edit_tags_preview.pack(anchor="w", pady=(0, 8))
+        self.edit_tags_var.trace_add("write", lambda *_: self._update_tags_preview())
+
         ttk.Label(parent, text="路径(相对 Tools):").pack(anchor="w")
         path_frame = ttk.Frame(parent)
         path_frame.pack(fill="x", pady=(0, 2))
@@ -1385,8 +1473,24 @@ class ToolsPage(ttk.Frame):
                         variable=self.edit_admin_var).pack(anchor="w", pady=(0, 6))
 
         ttk.Label(parent, text="描述:").pack(anchor="w")
-        self.edit_desc_text = tk.Text(parent, height=4, wrap="word")
-        self.edit_desc_text.pack(fill="x", pady=(0, 8))
+        # 描述框做成「卡片」形态：白底 + 1px 极浅描边 + 内边距。
+        # 原来那个裸 tk.Text 自带灰底 + 凹陷边框，跟旁边一套浅色输入框完全不是
+        # 一家，摆在面板里就是一块补丁（用户截图点名的就是它）。
+        desc_card = tk.Frame(parent, bg=COLOR_CARD, bd=0,
+                             highlightthickness=1,
+                             highlightbackground=COLOR_BORDER_LIGHT)
+        desc_card.pack(fill="x", pady=(0, 2))
+        self.edit_desc_text = tk.Text(
+            desc_card, height=4, wrap="word", relief="flat", bd=0,
+            highlightthickness=0, bg=COLOR_CARD, fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT, font=("Microsoft YaHei UI", 9),
+            padx=8, pady=6, spacing1=1, spacing3=2)
+        self.edit_desc_text.pack(fill="both", expand=True)
+        self._desc_placeholder = "这个工具是干什么的、什么场景用…"
+        self._desc_placeholder_on = False
+        self._install_desc_placeholder()
+        ttk.Label(parent, text="可多行；保存时自动去掉首尾空白",
+                  foreground=COLOR_MUTED, font=("", 8)).pack(anchor="w", pady=(0, 8))
 
         btn_frame = ttk.Frame(parent)
         btn_frame.pack(fill="x")
@@ -1398,6 +1502,57 @@ class ToolsPage(ttk.Frame):
                    command=self._toggle_favorite).pack(fill="x", pady=2)
         ttk.Button(btn_frame, text="🗑 删除",
                    command=self._delete_selected_tool).pack(fill="x", pady=2)
+
+    # ---- 描述框的占位文案（Tk 的 Text 没有 placeholder，只能自己接管） ----
+
+    def _install_desc_placeholder(self):
+        def on_focus_in(_event=None):
+            if self._desc_placeholder_on:
+                self._desc_placeholder_on = False
+                self.edit_desc_text.delete("1.0", "end")
+                self.edit_desc_text.configure(fg=COLOR_TEXT)
+
+        def on_focus_out(_event=None):
+            if not self.edit_desc_text.get("1.0", "end").strip():
+                self._show_desc_placeholder()
+
+        self.edit_desc_text.bind("<FocusIn>", on_focus_in)
+        self.edit_desc_text.bind("<FocusOut>", on_focus_out)
+
+    def _show_desc_placeholder(self):
+        self._desc_placeholder_on = True
+        self.edit_desc_text.delete("1.0", "end")
+        self.edit_desc_text.insert("1.0", self._desc_placeholder)
+        self.edit_desc_text.configure(fg=COLOR_MUTED)
+
+    def _set_desc_value(self, text: str):
+        """写入描述正文；空内容就显示占位文案（而不是留一个大白框）。"""
+        self._desc_placeholder_on = False
+        self.edit_desc_text.delete("1.0", "end")
+        if text:
+            self.edit_desc_text.insert("1.0", text)
+            self.edit_desc_text.configure(fg=COLOR_TEXT)
+        else:
+            self._show_desc_placeholder()
+
+    def _get_desc_value(self) -> str:
+        """取描述正文 —— 占位文案不算内容，否则会把提示语存进库里。"""
+        if self._desc_placeholder_on:
+            return ""
+        return self.edit_desc_text.get("1.0", "end").strip()
+
+    def _update_tags_preview(self):
+        """标签框下方的「已识别」预览：顺手把分隔符规则演示出来。"""
+        if not hasattr(self, "edit_tags_preview"):
+            return
+        tags = launcher.split_tags(self.edit_tags_var.get())
+        if tags:
+            text = f"已识别 {len(tags)} 个：{' · '.join(tags)}"
+        else:
+            text = "还没填标签"
+        self.edit_tags_preview.configure(text=text)
+
+    # ---- 右侧面板折叠（默认折叠） ----
 
     def _toggle_right_panel(self):
         """右侧编辑面板折叠/展开（默认折叠）"""
@@ -1605,8 +1760,12 @@ class ToolsPage(ttk.Frame):
         """当前包下全部未删除工具（不按分类 / 关键词过滤）。"""
         return tools_db.list_tools(self.db, package=self.current_package)
 
-    def _refresh_categories(self):
-        """按「当前包 → 有工具的分类」重绘 chip 条，并带上数量。"""
+    def _refresh_categories(self, *, include_empty: bool = False):
+        """按「当前包 → 有工具的分类」重绘 chip 条，并带上数量。
+
+        ``include_empty=True`` 时连空分类一起摆出来 —— 平时空分类是噪音，
+        但拖拽时它们是「能放进去的地方」，必须看得见、才点得到。
+        """
         for chip in self.category_buttons:
             chip.destroy()
         self.category_buttons.clear()
@@ -1620,15 +1779,27 @@ class ToolsPage(ttk.Frame):
         all_categories = tools_db.list_categories(self.db, package=self.current_package)
         entries = [("全部", sum(counts.values()), None)]
         for category in all_categories:
-            if counts.get(category["name"], 0) > 0:
-                entries.append((category["name"], counts[category["name"]], category["id"]))
+            if include_empty or counts.get(category["name"], 0) > 0:
+                entries.append((category["name"], counts.get(category["name"], 0),
+                                category["id"]))
 
-        # 当前分类已被删空 / 移走时，自动退回「全部」，免得停在一个空页面上
-        if self.current_category not in {name for name, _, _ in entries}:
-            self.current_category = "全部"
+        # 当前分类已被删空 / 移走时退回「全部」，免得停在一个空页面上；
+        # 但「刚新建的空分类」要留着 —— 用户建完分类的下一件事就是往里拖工具，
+        # 这时候把他踢回「全部」正好把刚建的东西藏起来。
+        names = {name for name, _, _ in entries}
+        if self.current_category not in names:
+            match = [c for c in all_categories if c["name"] == self.current_category]
+            if match:
+                entries.append((self.current_category, 0, match[0]["id"]))
+            else:
+                self.current_category = "全部"
 
         for name, count, category_id in entries:
             self._create_category_chip(name, count, category_id)
+
+        # ★ 末尾固定一颗「+ 新建分类」：分类是用户自己长出来的，
+        #   入口摆在分类栏里才找得到（埋在设置对话框里等于没有）
+        self._create_new_category_chip()
 
         # 同步到编辑区下拉（这里要保留空分类，用户可能正想把工具改进去）
         if hasattr(self, "edit_category_combo"):
@@ -1729,14 +1900,24 @@ class ToolsPage(ttk.Frame):
 
         tools = self._fetch_package_tools()
         self._all_tools = tools
-        if self.current_category != "全部":
-            tools = [t for t in tools
-                     if (t.get("category") or "未分类") == self.current_category]
-
         keyword = self._current_keyword()
-        matched = launcher.rank_tools(tools, keyword)
+        self._status_keyword = keyword
+
+        if keyword:
+            # ★ 有输入就是「全局搜索」：忽略分类栏与包过滤。
+            #   标签天生是跨分类、跨包的检索入口，被当前分类挡住就等于搜不到。
+            pool = tools_db.list_tools(self.db)
+        else:
+            if self.current_category != "全部":
+                tools = [t for t in tools
+                         if (t.get("category") or "未分类") == self.current_category]
+            pool = tools
+
+        matched = launcher.rank_tools(pool, keyword)
         self._visible_tools = matched
-        hints = launcher.compute_hints(self._all_tools)
+        # 副标题消歧要算在「可能出现的那一整批」里：跨包命中的同名工具，
+        # 它的兄弟都在别的包里，只算当前包的话副标题会空着
+        hints = launcher.compute_hints(pool)
 
         cols = self._grid_columns()
         # grid 的 columnconfigure 是持久化的：从 21 列的图标排列切到单列列表时，
@@ -1764,8 +1945,8 @@ class ToolsPage(ttk.Frame):
                     self._set_cursor(first, quiet=True)
 
         self._refresh_strips(self._all_tools)
-        self._update_status(self._all_tools, matched, keyword,
-                            extra=self._cursor_label())
+        self._update_status(pool, matched, keyword, extra=self._cursor_label(),
+                            global_scope=bool(keyword))
 
     # ------------------------------------------------------------------
     # 排列：格子尺寸 / 列数 / 分派
@@ -1919,6 +2100,10 @@ class ToolsPage(ttk.Frame):
                 continue
             widget.bind("<Button-1>",
                         lambda e, tid=tool_id: self._on_card_press(e, tid))
+            # 拖拽：按下记起点（_on_card_press 里做了），移动 + 松开走拖拽那条路。
+            # 少了这两个绑定，拖动就只会「选中一下」——鼠标底下什么都没发生。
+            widget.bind("<B1-Motion>", self._on_drag_motion)
+            widget.bind("<ButtonRelease-1>", self._on_drag_release)
             widget.bind("<Double-Button-1>",
                         lambda e, tid=tool_id: self._run_tool_by_id(tid))
             widget.bind("<Button-3>",
@@ -1937,12 +2122,16 @@ class ToolsPage(ttk.Frame):
         self._tooltips.append(tip)
 
     def _tooltip_text(self, tool):
+        """浮层文案 —— 图标/文件夹排列没有标签列，标签只能在这儿露出来。"""
         name = (tool.get("name") or "").strip() or "未命名"
         category = tool.get("category") or "未分类"
+        tags = launcher.tool_tags(tool)
+        if tags:
+            category = f"{category} · " + " ".join(f"#{tag}" for tag in tags)
         if self.view_mode == "icon":
             # 图标排列连名字都没有，两样都得给
             return name, category
-        # 文件夹排列名字已经常显，浮层只补「它属于哪个分类」
+        # 文件夹排列名字已经常显，浮层只补「它属于哪个分类」+ 标签
         return category, ""
 
     # ------------------------------------------------------------------
@@ -2053,6 +2242,14 @@ class ToolsPage(ttk.Frame):
                              width=10, anchor="w", cursor="hand2")
         cat_label.pack(side="right", padx=(8, 0))
 
+        # 标签列：列表排列一行信息量最大，标签只在这儿常显（其它排列靠浮层）
+        tags_text = " ".join(f"#{tag}" for tag in launcher.tool_tags(tool))
+        tag_label = tk.Label(
+            row_frame, text=self._fit_px(tags_text, 120, self._hint_font),
+            bg=COLOR_BG, fg=COLOR_MUTED, font=self._hint_font,
+            width=16 if tags_text else 0, anchor="w", cursor="hand2")
+        tag_label.pack(side="right", padx=(8, 0))
+
         name_label = tk.Label(
             row_frame, text=self._fit_px(tool.get("name") or "", 230,
                                          self._name_font),
@@ -2061,7 +2258,8 @@ class ToolsPage(ttk.Frame):
         name_label.pack(side="left")
 
         # 路径吃掉剩下的宽度
-        used = 8 + LIST_ROW_ICON + 8 + 230 + 100 + 40 + 28
+        # 230=名称 100=分类 130=标签列 40=星标 28=各处 padding
+        used = 8 + LIST_ROW_ICON + 8 + 230 + 100 + 130 + 40 + 28
         budget = max(self._available_grid_width() - used, 60)
         path_label = tk.Label(
             row_frame, text=self._fit_px(self._row_path_text(tool), budget,
@@ -2073,7 +2271,7 @@ class ToolsPage(ttk.Frame):
         self._register_cell(tool, row_frame,
                             (icon_label, name_label, cat_label, star))
         self._bind_tool_cell([row_frame, icon_label, name_label, cat_label,
-                              path_label], tool_id, row_frame)
+                              tag_label, path_label], tool_id, row_frame)
         return row_frame
 
 
@@ -2229,6 +2427,8 @@ class ToolsPage(ttk.Frame):
         for widget in (card, icon_label, name_label, hint_label):
             widget.bind("<Button-1>",
                         lambda e, tid=tool_id: self._on_card_press(e, tid))
+            widget.bind("<B1-Motion>", self._on_drag_motion)
+            widget.bind("<ButtonRelease-1>", self._on_drag_release)
             widget.bind("<Double-Button-1>",
                         lambda e, tid=tool_id: self._run_tool_by_id(tid))
             widget.bind("<Button-3>",
@@ -2491,8 +2691,9 @@ class ToolsPage(ttk.Frame):
         self.edit_args_var.set(tool["args"] or "")
         self.edit_category_var.set(tool["category"] or "未分类")
         self.edit_admin_var.set(bool(tool["run_as_admin"]))
-        self.edit_desc_text.delete("1.0", "end")
-        self.edit_desc_text.insert("1.0", tool["description"] or "")
+        self.edit_tags_var.set(tool.get("tags") or "")
+        self._update_tags_preview()
+        self._set_desc_value(tool.get("description") or "")
 
         if tool.get("icon_path") and Path(tool["icon_path"]).exists():
             self._set_preview_icon(tool["icon_path"])
@@ -2546,7 +2747,8 @@ class ToolsPage(ttk.Frame):
             args=self.edit_args_var.get().strip(),
             category=self.edit_category_var.get().strip() or "未分类",
             run_as_admin=self.edit_admin_var.get(),
-            description=self.edit_desc_text.get("1.0", "end").strip(),
+            description=self._get_desc_value(),
+            tags=launcher.normalize_tags(self.edit_tags_var.get()),
         )
         self.icon_cache.clear()
         self._refresh_all()
@@ -2589,7 +2791,8 @@ class ToolsPage(ttk.Frame):
         self.edit_args_var.set("")
         self.edit_category_var.set("")
         self.edit_admin_var.set(False)
-        self.edit_desc_text.delete("1.0", "end")
+        self.edit_tags_var.set("")
+        self._set_desc_value("")
         self.icon_preview_label.configure(text="(无)", image="")
 
     def _toggle_favorite(self):
@@ -2706,6 +2909,20 @@ class ToolsPage(ttk.Frame):
         menu.add_command(label="取消收藏" if favourited else "收藏",
                           command=lambda: self._toggle_favorite_by_id(tool_id))
         menu.add_command(label="编辑", command=lambda: self._select_tool(tool_id))
+        # 拖拽之外的第二条路：不想拖（或拖不准）的人也得能改分类。
+        # 列表/文件夹排列里拖拽落点本来就小，有个菜单兜底才稳。
+        move_menu = tk.Menu(menu, tearoff=0)
+        menu.add_cascade(label="移动到分类", menu=move_menu)
+        current_cat = (tool.get("category") or "未分类") if tool else ""
+        cats = tools_db.list_categories(self.db, package=self.current_package)
+        for cat in (cats or tools_db.list_categories(self.db)):
+            cat_name = cat["name"]
+            move_menu.add_command(
+                label=f"✓ {cat_name}" if cat_name == current_cat else cat_name,
+                command=lambda n=cat_name: self._apply_category_move(tool_id, n))
+        move_menu.add_separator()
+        move_menu.add_command(label="新建分类…",
+                              command=lambda: self._add_category_dialog(tool_id))
         menu.add_separator()
         menu.add_command(label="抽图标",
                           command=lambda: (self._select_tool(tool_id),
@@ -2747,34 +2964,60 @@ class ToolsPage(ttk.Frame):
     # 分类管理
     # ------------------------------------------------------------------
 
-    def _add_category_dialog(self):
-        """新增分类对话框（★ 分类=文件夹，同时创建 Tools/<name>/）"""
-        dlg = SimpleInputDialog(self, title=f"新增分类（归属包：{self.current_package}）",
+    def _add_category_dialog(self, move_tool_id: Optional[int] = None):
+        """弹输入框拿到名字，剩下交给 _create_category。"""
+        dlg = SimpleInputDialog(self, title=f"新建分类（归属包：{self.current_package}）",
                                 label="分类名称:", default="")
         self.wait_window(dlg)
-        if dlg.result:
-            name = dlg.result.strip()
-            if not name:
-                return
-            existing = {c["name"] for c in tools_db.list_categories(self.db)}
-            if name in existing:
+        if not dlg.result:
+            return
+        name = dlg.result.strip()
+        if name:
+            self._create_category(name, move_tool_id=move_tool_id)
+
+    def _create_category(self, name: str, *, move_tool_id: Optional[int] = None) -> bool:
+        """真正建分类：**只写数据库，不建物理文件夹**。
+
+        分类现在是「逻辑归属」—— 拖拽改分类只改 DB 的 category 字段、物理文件
+        一动不动；既然文件不再按分类摆放，新建分类也就没必要在 Tools 下留一个
+        空目录。（用「拖入 exe」添加工具时，拷贝那一步会自己建目标目录。）
+
+        和弹窗拆开是为了能被单测直接调用：建分类这件事不该只能靠「点开对话框」验证。
+        带 ``move_tool_id`` 时顺手把那个工具移进来（右键菜单里的「新建分类…」）。
+        """
+        name = (name or "").strip()
+        if not name:
+            return False
+
+        existing = {c["name"] for c in tools_db.list_categories(self.db)}
+        if name in existing:
+            if move_tool_id is None:
                 messagebox.showwarning("提示", f"分类 '{name}' 已存在。", parent=self)
-                return
-            try:
-                # ★ 归属当前包
-                pkg = tools_db.list_packages(self.db)
-                pkg_id = None
-                for p in pkg:
-                    if p["name"] == self.current_package:
-                        pkg_id = p["id"]; break
-                tools_db.add_category(self.db, name, package_id=pkg_id)
-                # ★ 物理创建文件夹
-                cat_dir = self.tools_dir / name
-                cat_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
-                messagebox.showerror("错误", f"创建分类失败：\n{e}", parent=self)
-                return
-            self._refresh_categories()
+            else:
+                self._apply_category_move(move_tool_id, name)
+            return False
+
+        pkg_id = next((p["id"] for p in tools_db.list_packages(self.db)
+                       if p["name"] == self.current_package), None)
+        try:
+            tools_db.add_category(self.db, name, package_id=pkg_id)
+        except Exception as e:
+            messagebox.showerror("错误", f"创建分类失败：\n{e}", parent=self)
+            return False
+
+        moved = False
+        if move_tool_id is not None:
+            tools_db.update_tool(self.db, move_tool_id, category=name)
+            moved = True
+        # 建完直接切过去 —— 下一步就是把工具拖进来
+        self.current_category = name
+        self._refresh_categories()
+        self._refresh_grid()
+        if moved:
+            self._flash_status(f"已新建分类「{name}」并把工具移了进去 · 物理文件未移动")
+        else:
+            self._flash_status(f"已新建分类「{name}」 · 把工具拖进去即可")
+        return True
 
     def _show_category_menu(self, event, category_id: int, name: str):
         """分类右键菜单：重命名/移动到包/删除"""
@@ -2932,42 +3175,145 @@ class ToolsPage(ttk.Frame):
     # 拖拽
     # ------------------------------------------------------------------
 
-    def _on_drag_start(self, event, tool_id: int, from_toolbar: bool = False):
-        self._drag_data = {
-            "tool_id": tool_id, "from_toolbar": from_toolbar,
-            "widget": event.widget
-        }
-
     def _on_drag_motion(self, event):
-        pass
+        """按住左键移动：越过阈值才真正开始拖，之后让影子窗口跟着指针跑。
+
+        Tk 没有跨控件拖放（tkdnd 只管「从资源管理器拖文件进来」），
+        影子窗口、落点判定、投放高亮都得自己来 —— 没有影子窗口的话，
+        用户根本不知道自己拖起来了。
+        """
+        data = getattr(self, "_drag_data", None)
+        if not data or data.get("tool_id") is None:
+            return
+        if not data.get("dragging"):
+            x0, y0 = data.get("x"), data.get("y")
+            if x0 is None or y0 is None:
+                return
+            if (abs(event.x_root - x0) < DRAG_THRESHOLD
+                    and abs(event.y_root - y0) < DRAG_THRESHOLD):
+                return
+            data["dragging"] = True
+            self._start_drag_ghost(data["tool_id"], event.x_root, event.y_root)
+        self._move_drag_ghost(event.x_root, event.y_root)
+        self._highlight_drop_category(self._drop_category_at(event.x_root, event.y_root))
+
+    def _start_drag_ghost(self, tool_id: int, x_root: int, y_root: int):
+        """建一个无边框影子窗口（跟着指针走）。"""
+        tool = tools_db.get_tool(self.db, tool_id) or {}
+        ghost = tk.Toplevel(self)
+        ghost.overrideredirect(True)
+        try:
+            ghost.attributes("-topmost", True)
+            ghost.attributes("-alpha", GHOST_ALPHA)
+        except tk.TclError:
+            pass
+        card = tk.Frame(ghost, bg=COLOR_CARD, bd=0,
+                        highlightthickness=1, highlightbackground=COLOR_BORDER)
+        card.pack()
+        icon = tk.Label(card, bg=COLOR_CARD)
+        icon.pack(side="left", padx=(8, 6), pady=6)
+        self._load_tool_icon(tool, icon, size=32)
+        text = tk.Frame(card, bg=COLOR_CARD)
+        text.pack(side="left", padx=(0, 12), pady=6)
+        tk.Label(text, text=tool.get("name") or "未命名", bg=COLOR_CARD,
+                 fg=COLOR_TEXT, font=self._name_font, anchor="w").pack(anchor="w")
+        tk.Label(text, text="松手放到分类上（文件不会移动）", bg=COLOR_CARD,
+                 fg=COLOR_MUTED, font=self._hint_font, anchor="w").pack(anchor="w")
+        self._drag_ghost = ghost
+        self._move_drag_ghost(x_root, y_root)
+        # 拖拽期间把空分类也摆出来：它们平时是噪音，此刻是「能放进去的地方」
+        if not self._drag_cats_shown:
+            self._drag_cats_shown = True
+            self._refresh_categories(include_empty=True)
+
+    def _move_drag_ghost(self, x_root: int, y_root: int):
+        ghost = getattr(self, "_drag_ghost", None)
+        if ghost is None:
+            return
+        try:
+            ghost.geometry(f"+{x_root + 14}+{y_root + 16}")
+        except tk.TclError:
+            pass
+
+    def _end_drag_ghost(self):
+        ghost = getattr(self, "_drag_ghost", None)
+        self._drag_ghost = None
+        if ghost is None:
+            return
+        try:
+            ghost.destroy()
+        except tk.TclError:
+            pass
+
+    def _drop_category_at(self, x_root: int, y_root: int):
+        """指针底下是哪个分类胶囊；不是分类就返回 None。
+
+        分类胶囊是 Canvas 自绘控件，命中靠 winfo_containing + 沿控件树上溯
+        （注册投放目标时打了 _drop_kind 标记），比手算矩形稳得多。
+        """
+        try:
+            widget = self.winfo_containing(x_root, y_root)
+        except tk.TclError:
+            return None
+        for _ in range(12):
+            if widget is None:
+                return None
+            if getattr(widget, "_drop_kind", None) == "category":
+                return getattr(widget, "_drop_cat_name", None)
+            widget = getattr(widget, "master", None)
+        return None
+
+    def _highlight_drop_category(self, name):
+        """给指针底下的分类胶囊打「松手就落这儿」的高亮，其余恢复常态。"""
+        if name == getattr(self, "_drop_active_name", None):
+            return
+        self._drop_active_name = name
+        for cat_name, chip in self._category_chips.items():
+            setter = getattr(chip, "set_drop_highlight", None)
+            if setter is None:
+                continue
+            try:
+                setter(cat_name == name)
+            except tk.TclError:
+                pass
 
     def _on_drag_release(self, event):
-        # 判断拖拽距离：超过 5px 才算拖拽，否则保持选中不动作
-        x0 = self._drag_data.get("x", event.x_root)
-        y0 = self._drag_data.get("y", event.y_root)
-        if abs(event.x_root - x0) < 5 and abs(event.y_root - y0) < 5:
-            return  # 单击：已在 _on_card_press 选中过了
-        widget = event.widget.winfo_containing(event.x_root, event.y_root)
-        if not widget:
+        """松开左键：落在分类胶囊上就改归属，落在别处什么都不做。"""
+        data = dict(getattr(self, "_drag_data", None) or {})
+        self._drag_data = {}
+        dragging = bool(data.get("dragging"))
+        target = self._drop_category_at(event.x_root, event.y_root)
+        self._end_drag_ghost()
+        self._highlight_drop_category(None)
+        if self._drag_cats_shown:
+            # 收起空分类。注意顺序：先清高亮再重建，否则新建的胶囊会带着旧高亮
+            self._drag_cats_shown = False
+            self._refresh_categories()
+        if not dragging:
+            return              # 没越过阈值 = 单击，选中在 _on_card_press 里做过
+        tool_id = data.get("tool_id")
+        if tool_id is None or not target:
             return
-        target = widget
-        while target is not None:
-            kind = getattr(target, '_drop_kind', None)
-            if kind == "category":
-                tool_id = self._drag_data.get("tool_id")
-                if tool_id:
-                    cat_name = getattr(target, '_drop_cat_name', None)
-                    tool = tools_db.get_tool(self.db, tool_id)
-                    if tool and cat_name and tool["category"] != cat_name:
-                        tools_db.update_tool(self.db, tool_id, category=cat_name)
-                        self._refresh_all()
-                        messagebox.showinfo(
-                            "已移动",
-                            f"「{tool['name']}」已移到「{cat_name}」",
-                            parent=self
-                        )
-                return
-            target = target.master
+        self._apply_category_move(tool_id, target)
+
+    def _apply_category_move(self, tool_id: int, category_name: str) -> bool:
+        """把工具挪到目标分类：**只写数据库，物理文件一动不动**。
+
+        分类就是 DB 的 category 字段（「逻辑归属」），扫描也不会再拿目录名
+        去覆盖它，所以拖拽 = 改一行数据。这正是「文件不用动」的实现方式。
+        """
+        tool = tools_db.get_tool(self.db, tool_id)
+        if not tool:
+            return False
+        old = tool.get("category") or "未分类"
+        if old == category_name:
+            return False
+        tools_db.update_tool(self.db, tool_id, category=category_name)
+        self._refresh_all()
+        self._paint_card(tool_id)
+        self._flash_status(
+            f"「{tool.get('name')}」已从「{old}」移到「{category_name}」· 物理文件未移动")
+        return True
 
     def _make_category_drop_target(self, widget, category_id: int, category_name: str):
         """把分类胶囊注册为 drop target：拖动工具到该分类上即改变分类。

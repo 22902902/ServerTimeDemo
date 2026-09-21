@@ -17,6 +17,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# 标签的拆词 / 统计规则放在 tools_launcher（纯逻辑层，可脱离窗口单测），
+# 这里只负责取数，避免分隔符规则在两处各写一遍。
+import tools_launcher
+
 
 # =============================================================================
 # 表结构
@@ -33,6 +37,7 @@ CREATE TABLE IF NOT EXISTS tool_items (
     args TEXT DEFAULT '',
     run_as_admin INTEGER DEFAULT 0,
     description TEXT DEFAULT '',
+    tags TEXT DEFAULT '',
     is_favorite INTEGER DEFAULT 0,
     sort_order INTEGER DEFAULT 0,
     is_builtin INTEGER DEFAULT 0,
@@ -114,6 +119,14 @@ def init_all_tool_tables(conn: sqlite3.Connection):
     if "alias" not in cols:
         try:
             conn.execute("ALTER TABLE tool_items ADD COLUMN alias TEXT DEFAULT ''")
+            conn.commit()
+        except Exception:
+            pass
+    # ★ 迁移：旧库表加 tags 列（标签 —— 启动器按标签跨分类全局搜索）
+    #    缺列时 field_text() 会退成空串，老库只是「没有标签」，不会崩。
+    if "tags" not in cols:
+        try:
+            conn.execute("ALTER TABLE tool_items ADD COLUMN tags TEXT DEFAULT ''")
             conn.commit()
         except Exception:
             pass
@@ -263,8 +276,15 @@ def upsert_tool_by_path(conn, path: str, name: str, category: str = "未分类",
         "SELECT id FROM tool_items WHERE path=? AND is_deleted=0", (path,)
     ).fetchone()
     if row:
+        # ★ 分类不再被扫描结果覆盖：分类现在是「用户手工维护的归属」
+        #   （拖拽 / 右键改分类），扫描只负责发现新文件。旧实现每次重扫都
+        #   把手工分类冲回目录名 —— 用户刚拖好的分类一扫就没了。
+        #   仅当原分类为空或「未分类」时才用目录名兜底。
         conn.execute(
-            "UPDATE tool_items SET name=?, category=?, icon_path=?, updated_at=? WHERE id=?",
+            "UPDATE tool_items SET name=?, "
+            "category=CASE WHEN COALESCE(category, '') IN ('', '未分类') "
+            "THEN ? ELSE category END, "
+            "icon_path=?, updated_at=? WHERE id=?",
             (name, category, icon_path, now, row["id"])
         )
         conn.commit()
@@ -281,12 +301,13 @@ def upsert_tool_by_path(conn, path: str, name: str, category: str = "未分类",
 
 def add_tool(conn, name: str, path: str, category: str = "未分类",
              args: str = "", run_as_admin: bool = False,
-             description: str = "", icon_path: str = "") -> int:
+             description: str = "", icon_path: str = "", tags: str = "") -> int:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor = conn.execute(
-        "INSERT INTO tool_items (name, path, category, args, run_as_admin, description, icon_path, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (name, path, category, args, int(run_as_admin), description, icon_path, now, now)
+        "INSERT INTO tool_items (name, path, category, args, run_as_admin, description, tags, icon_path, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (name, path, category, args, int(run_as_admin), description,
+         tools_launcher.normalize_tags(tags), icon_path, now, now)
     )
     conn.commit()
     return cursor.lastrowid
@@ -294,7 +315,7 @@ def add_tool(conn, name: str, path: str, category: str = "未分类",
 
 def update_tool(conn, tool_id: int, **kwargs) -> bool:
     allowed = {"name", "alias", "path", "icon_path", "category", "args",
-               "run_as_admin", "description", "is_favorite", "sort_order"}
+               "run_as_admin", "description", "tags", "is_favorite", "sort_order"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return False
@@ -302,6 +323,9 @@ def update_tool(conn, tool_id: int, **kwargs) -> bool:
         fields["run_as_admin"] = int(bool(fields["run_as_admin"]))
     if "is_favorite" in fields:
         fields["is_favorite"] = int(bool(fields["is_favorite"]))
+    if "tags" in fields:
+        # 存储形态统一在数据层收口：调用方随便传 "a、b" / "a|b" / "a,b" 都一样
+        fields["tags"] = tools_launcher.normalize_tags(fields["tags"])
     set_clause = ", ".join(f"{k}=?" for k in fields)
     values = list(fields.values()) + [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tool_id]
     conn.execute(f"UPDATE tool_items SET {set_clause}, updated_at=? WHERE id=?", values)
@@ -376,12 +400,14 @@ def list_tools(conn, category: str = "", keyword: str = "",
                      "WHERE tp.name = ?)")
             params.append(package)
     if keyword:
-        # ★ 补上 alias / category：用户往往记得别名（如 "FF"）或分类，
-        #    却记不住全名；过去只搜 name/description/args 会搜不到。
+        # ★ 补上 alias / category / tags：用户往往记得别名（如 "FF"）、
+        #    分类或标签，却记不住全名；过去只搜 name/description/args 会搜不到。
+        #    （启动器的 UI 搜索走 rank_tools 的模糊排序，这里是给其它入口的 SQL 兜底）
         sql += (" AND (name LIKE ? OR description LIKE ? OR args LIKE ? "
-                "OR COALESCE(alias,'') LIKE ? OR COALESCE(category,'') LIKE ?)")
+                "OR COALESCE(alias,'') LIKE ? OR COALESCE(category,'') LIKE ? "
+                "OR COALESCE(tags,'') LIKE ?)")
         kw = f"%{keyword}%"
-        params.extend([kw, kw, kw, kw, kw])
+        params.extend([kw, kw, kw, kw, kw, kw])
     if favorites_only:
         sql += " AND is_favorite=1"
     # ★ 排序：sort_key 指定则按该字段排，否则默认按 分类+s序
@@ -394,6 +420,22 @@ def list_tools(conn, category: str = "", keyword: str = "",
     else:
         sql += " ORDER BY category, sort_order, name"
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def list_tag_counts(conn, package: str = "", limit: int = 0) -> list[tuple[str, int]]:
+    """统计标签使用次数：[(标签, 个数)]，个数降序、标签升序。
+
+    标签是「跨分类、跨包」的检索入口，所以默认不做包过滤 —— 在这儿按包缩一遍，
+    等于把「全局搜标签」又关回抽屉里。确实要按包看时才传 package。
+    """
+    sql = "SELECT COALESCE(tags, '') AS tags FROM tool_items WHERE is_deleted=0"
+    params: list = []
+    if package and package != "常用工具":
+        sql += (" AND category IN (SELECT tc.name FROM tool_categories tc "
+                "LEFT JOIN tool_packages tp ON tc.package_id = tp.id "
+                "WHERE tp.name = ?)")
+        params.append(package)
+    return tools_launcher.popular_tags(conn.execute(sql, params).fetchall(), limit)
 
 
 def list_deleted_paths(conn) -> set[str]:

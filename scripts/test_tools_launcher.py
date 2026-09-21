@@ -239,6 +239,144 @@ def test_strips():
           len(long_name) == 10 and long_name.endswith("…"), f"实际 {long_name!r}")
 
 
+def test_tool_tags():
+    print("\n[A5] 标签：分隔符解析 / 逐标签打分 / 统计")
+
+    check("竖线 / 逗号 / 顿号 / 分号 / 空格都是分隔符",
+          launcher.split_tags("FTP、网络 ftp|ssh, 工具；dev")
+          == ["FTP", "网络", "ssh", "工具", "dev"],
+          str(launcher.split_tags("FTP、网络 ftp|ssh, 工具；dev")))
+    check("全角逗号 / 全角竖线 / 全角分号也认",
+          launcher.split_tags("a，b｜c；d") == ["a", "b", "c", "d"])
+    check("大小写不敏感去重、保留首次写法",
+          launcher.split_tags("FTP、ftp、Ftp") == ["FTP"])
+    check("空段与首尾空白被吃掉", launcher.split_tags("  , , ftp  ,, ") == ["ftp"])
+    check("空值 / None 安全",
+          launcher.split_tags(None) == [] and launcher.split_tags("") == [])
+
+    # 这几个字符不能当分隔符 —— 它们本身就常出现在标签里
+    check("不把 / + # 当分隔符（C/C++、C# 是完整标签）",
+          launcher.split_tags("C/C++，C#") == ["C/C++", "C#"],
+          str(launcher.split_tags("C/C++，C#")))
+    check("标签数有上限（防止一行黏进上百个词）",
+          len(launcher.split_tags(" ".join(f"t{i}" for i in range(80))))
+          == launcher.TAG_MAX)
+
+    check("normalize_tags 存成 | 连接",
+          launcher.normalize_tags(" FTP 、网络 ftp ") == "FTP|网络")
+    check("tool_tags 兼容老库（缺 tags 列）", launcher.tool_tags({"name": "x"}) == [])
+
+    tagged = {"name": "putty", "tags": "ftp|网络", "path": "a/putty.exe"}
+    check("标签完全相等拿满分",
+          launcher.best_tag_score("ftp", tagged) == launcher.SCORE_EXACT,
+          str(launcher.best_tag_score("ftp", tagged)))
+    check("标签前缀命中", launcher.best_tag_score("ft", tagged) is not None)
+    check("不跨标签误命中（'tp网' 不算命中）",
+          launcher.best_tag_score("tp网", tagged) is None,
+          str(launcher.best_tag_score("tp网", tagged)))
+    check("没有标签时返回 None", launcher.best_tag_score("ftp", {"name": "x"}) is None)
+
+    # 关键语义：按标签搜时，标签命中要压过「名字里恰好含这几个字母」
+    bytag = {"name": "小工具", "tags": "ftp", "path": "a/x.exe"}
+    byname = {"name": "8uftp", "tags": "", "path": "a/8uftp.exe"}
+    check("标签完全命中 排在 名字子串命中 之前",
+          launcher.score_tool("ftp", bytag) > launcher.score_tool("ftp", byname),
+          f"{launcher.score_tool('ftp', bytag)} vs {launcher.score_tool('ftp', byname)}")
+    ranked = launcher.rank_tools([byname, bytag], "ftp")
+    check("rank_tools 把标签命中的排到最前",
+          launcher.field_text(ranked[0], "name") == "小工具")
+
+    counts = launcher.popular_tags(
+        [{"tags": "ftp|网络"}, {"tags": "ftp|ssh"}, {"tags": "网络"}, {"tags": ""}])
+    # ftp 与 网络 各 2 次（网络 来自第 1、3 条），同分按名字升序 → ssh 垫底
+    check("标签统计：个数降序、同分按名字升序",
+          counts == [("ftp", 2), ("网络", 2), ("ssh", 1)], str(counts))
+    check("标签统计支持 limit",
+          len(launcher.popular_tags([{"tags": "a|b|c"}], limit=2)) == 2)
+    check("标签统计大小写不敏感合并",
+          launcher.popular_tags([{"tags": "FTP"}, {"tags": "ftp"}]) == [("FTP", 2)])
+
+
+def test_tags_db():
+    print("\n[A6] 数据层：tags 列迁移 / 扫描不覆盖手工分类")
+
+    tmp = Path(tempfile.gettempdir()) / f"wb_tags_db_{os.getpid()}.db"
+    if tmp.exists():
+        tmp.unlink()
+    conn = sqlite3.connect(str(tmp))
+    conn.row_factory = sqlite3.Row
+    try:
+        # 造一个「老库」：tool_items 里没有 tags 列
+        conn.execute("""CREATE TABLE tool_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, alias TEXT, path TEXT,
+            icon_path TEXT, category TEXT, args TEXT, run_as_admin INTEGER,
+            description TEXT, is_favorite INTEGER, sort_order INTEGER,
+            is_builtin INTEGER, is_deleted INTEGER DEFAULT 0, last_run_at TEXT,
+            run_count INTEGER, created_at TEXT, updated_at TEXT)""")
+        conn.execute("INSERT INTO tool_items (name, path, category, is_deleted) "
+                     "VALUES ('8uftp', 'FTP/8uftp.exe', 'FTP', 0)")
+        conn.commit()
+
+        tools_db.init_all_tool_tables(conn)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(tool_items)").fetchall()]
+        check("老库启动时自动补上 tags 列", "tags" in cols)
+
+        tools_db.update_tool(conn, 1, tags="FTP、 工具 ftp")
+        check("update_tool 规范化后落库",
+              tools_db.get_tool(conn, 1)["tags"] == "FTP|工具",
+              str(tools_db.get_tool(conn, 1)["tags"]))
+
+        # 手工改分类（拖拽 / 右键改的就是这条），之后重扫不能把它冲回目录名
+        tools_db.update_tool(conn, 1, category="我的网络")
+        tools_db.upsert_tool_by_path(conn, "FTP/8uftp.exe", "8uftp", "FTP")
+        check("重扫不覆盖用户手工分类",
+              tools_db.get_tool(conn, 1)["category"] == "我的网络",
+              str(tools_db.get_tool(conn, 1)["category"]))
+
+        # 反过来：还是「未分类」的，才该由目录名兜底
+        conn.execute("INSERT INTO tool_items (name, path, category, is_deleted) "
+                     "VALUES ('x', 'dev/x.exe', '未分类', 0)")
+        conn.commit()
+        tools_db.upsert_tool_by_path(conn, "dev/x.exe", "x", "开发工具")
+        got = conn.execute(
+            "SELECT category FROM tool_items WHERE path='dev/x.exe'").fetchone()
+        check("未分类仍由目录名兜底", got["category"] == "开发工具", got["category"])
+
+        putty_id = tools_db.add_tool(conn, name="putty", path="net/putty.exe",
+                                     category="我的网络", tags="ssh,telnet 网络")
+        check("add_tool 也规范化标签",
+              tools_db.get_tool(conn, putty_id)["tags"] == "ssh|telnet|网络",
+              str(tools_db.get_tool(conn, putty_id)["tags"]))
+        check("list_tag_counts 统计全库标签",
+              dict(tools_db.list_tag_counts(conn)) ==
+              {"FTP": 1, "工具": 1, "ssh": 1, "telnet": 1, "网络": 1},
+              str(tools_db.list_tag_counts(conn)))
+        check("list_tag_counts 支持 limit",
+              len(tools_db.list_tag_counts(conn, limit=2)) == 2)
+        check("SQL 关键词也能命中标签",
+              [r["name"] for r in tools_db.list_tools(conn, keyword="telnet")]
+              == ["putty"])
+        check("按分类过滤仍正常",
+              [r["name"] for r in tools_db.list_tools(conn, category="我的网络")]
+              == ["8uftp", "putty"],
+              str([r["name"] for r in tools_db.list_tools(conn, category="我的网络")]))
+        # 软删要走专用入口：update_tool 的字段白名单故意不含 is_deleted
+        # （否则「改个描述」的代码路径能顺手把工具删掉）
+        tools_db.delete_tool(conn, putty_id)
+        check("软删除的工具不进标签统计",
+              dict(tools_db.list_tag_counts(conn)) == {"FTP": 1, "工具": 1},
+              str(tools_db.list_tag_counts(conn)))
+        check("update_tool 拒绝偷改 is_deleted（只能用 delete_tool）",
+              tools_db.update_tool(conn, putty_id, is_deleted=0) is False,
+              "update_tool 竟然接受了 is_deleted")
+    finally:
+        conn.close()
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # B. 真实窗口层
 # ---------------------------------------------------------------------------
@@ -283,6 +421,7 @@ def test_real_page():
         _assert_launch_with_args(page, conn)
         _assert_status_bar(page)
         _assert_view_modes(page, root)
+        _assert_tags_and_drag(page, conn, root)
     finally:
         try:
             root.destroy()
@@ -919,6 +1058,163 @@ def _assert_view_modes(page, root):
           tools_db.get_setting(page.db, "view_mode", "") == "card")
 
 
+def _all_chips(widget):
+    """递归收集 RoundedChip（标签 / 分类 / 收藏横条都是它画的）。
+
+    胶囊的文案是 Canvas 图元，没有 -text 选项，得走 .text 属性，
+    不能用 tk.Label 那套 cget。
+    """
+    found = []
+    for child in widget.winfo_children():
+        if isinstance(child, RoundedChip):
+            found.append(child)
+        found.extend(_all_chips(child))
+    return found
+
+
+def _chip_by_text(widget, text):
+    for chip in _all_chips(widget):
+        if chip.text == text:
+            return chip
+    return None
+
+
+def _assert_tags_and_drag(page, conn, root):
+    """标签横条 / 全局搜索 / 拖拽改分类 / 描述占位。"""
+    print("\n[B7] 标签横条 / 全局搜索 / 拖拽改分类 / 描述占位")
+
+    # 右侧编辑面板是懒建的：不展开的话 edit_desc_text 这些属性还不存在
+    if not page._right_visible:
+        page._toggle_right_panel()
+        root.update()
+
+    # ---- 描述占位：提示语是壳子，不能当成内容存进库 ----
+    page._set_desc_value("")
+    check("描述为空时取值为空（占位文案不算内容）",
+          page._get_desc_value() == "", repr(page._get_desc_value()))
+    page._set_desc_value("一段描述")
+    check("描述有内容时能原样取回", page._get_desc_value() == "一段描述")
+
+    # ---- 给一个工具打标签；另建两个空分类当投放目标 ----
+    first = page._visible_tools[0]
+    tid = launcher.tool_id(first)
+    tools_db.update_tool(page.db, tid, tags="探针标签,other")
+    tools_db.add_category(conn, "拖拽目标分类")
+    tools_db.add_category(conn, "诱饵空分类")   # 全程不往里放东西，用来验「松手后收起」
+    page._refresh_all()
+    root.update()
+
+    # ---- 标签横条 ----
+    tag_chip = _chip_by_text(page._strips_frame, "#探针标签")
+    check("标签横条出现该标签胶囊", tag_chip is not None,
+          str([c.text for c in _all_chips(page._strips_frame)]))
+    check("标签胶囊挂在横条区（不是分类栏）",
+          _chip_by_text(page._category_bar, "#探针标签") is None)
+
+    # 点标签 = 填进搜索框 = 全局搜索（跨分类、跨包）
+    if tag_chip is not None:
+        page.current_category = "拖拽目标分类"      # 故意停在「没有这个工具」的分类
+        page._refresh_categories()
+        root.update()
+        tag_chip._invoke()
+        root.update()
+        names = [t["name"] for t in page._visible_tools]
+        check("点标签即全局搜（当前分类里没有也搜得到）",
+              first["name"] in names,
+              f"当前分类={page.current_category} 命中={names[:5]}")
+        check("全局搜时状态条注明「全局」",
+              "全局" in page.status_var.get(), page.status_var.get())
+        page._search_placeholder_on = False
+        page.search_var.set("")
+        root.update()
+
+    # ---- 拖拽改分类 ----
+    page.current_category = "全部"
+    page._search_placeholder_on = False
+    page.search_var.set("")
+    page._refresh_all()
+    root.update()
+
+    card = page.icon_widgets.get(tid)
+    check("目标工具在当前视图里", card is not None)
+    check("空分类平时不进分类栏",
+          "拖拽目标分类" not in page._category_chips
+          and "诱饵空分类" not in page._category_chips,
+          str(list(page._category_chips)))
+
+    if card is not None:
+        before_path = tools_db.get_tool(page.db, tid)["path"]
+        before_category = tools_db.get_tool(page.db, tid)["category"]
+
+        ev = type("E", (), {})
+        e = ev(); e.widget = card
+        e.x_root = card.winfo_rootx() + 4
+        e.y_root = card.winfo_rooty() + 4
+        page._on_card_press(e, tid)
+        root.update()
+        check("按下先选中（拖拽前就选中了）", page.selected_tool_id == tid)
+
+        e2 = ev(); e2.widget = card
+        e2.x_root = e.x_root + 40          # 超过 DRAG_THRESHOLD
+        e2.y_root = e.y_root + 40
+        page._on_drag_motion(e2)
+        root.update()
+        check("越过阈值后出现影子窗口（否则用户不知道拖起来了）",
+              page._drag_ghost is not None)
+        check("拖拽期间空分类被摆出来（否则放不进去）",
+              "拖拽目标分类" in page._category_chips
+              and "诱饵空分类" in page._category_chips,
+              str(list(page._category_chips)))
+
+        tchip = page._category_chips.get("拖拽目标分类")
+        px, py = tchip.winfo_rootx() + 5, tchip.winfo_rooty() + 5
+        check("落点判定命中目标分类",
+              page._drop_category_at(px, py) == "拖拽目标分类",
+              f"point=({px},{py}) 命中={page._drop_category_at(px, py)!r}")
+
+        # 再动一下、动到胶囊上：这次该出现「松手就落这儿」的高亮
+        e2b = ev(); e2b.widget = card; e2b.x_root = px; e2b.y_root = py
+        page._on_drag_motion(e2b)
+        root.update()
+        check("拖到分类上时该分类进入投放高亮",
+              page._drop_active_name == "拖拽目标分类",
+              str(page._drop_active_name))
+
+        e3 = ev(); e3.widget = card; e3.x_root = px; e3.y_root = py
+        page._on_drag_release(e3)
+        root.update()
+
+        after = tools_db.get_tool(page.db, tid)
+        check("松手后分类已落库",
+              after["category"] == "拖拽目标分类",
+              f"{before_category!r} -> {after['category']!r}")
+        check("物理路径一字未动（分类只是逻辑归属）",
+              after["path"] == before_path, after["path"])
+        check("松手后影子窗口消失", page._drag_ghost is None)
+        check("松手后高亮清空", page._drop_active_name is None,
+              str(page._drop_active_name))
+        check("松手后没收到东西的空分类又收起来",
+              "诱饵空分类" not in page._category_chips,
+              str(list(page._category_chips)))
+        check("拖拽不新建物理目录（分类只是 DB 里的一行）",
+              not (ROOT / "Tools" / "拖拽目标分类").exists())
+
+        # ---- 原地松手 = 单击，不该改分类 ----
+        fresh = tools_db.get_tool(page.db, tid)
+        page._on_card_press(e, tid)
+        e4 = ev(); e4.widget = card; e4.x_root = e.x_root + 1; e4.y_root = e.y_root + 1
+        page._on_drag_motion(e4)
+        page._on_drag_release(e4)
+        root.update()
+        check("原地松手（没越过阈值）不改分类",
+              tools_db.get_tool(page.db, tid)["category"] == fresh["category"])
+
+    # ---- 新建分类入口摆在分类栏里 ----
+    new_chip = _chip_by_text(page._category_bar, "+ 新建分类")
+    check("分类栏末尾有「+ 新建分类」入口（不埋在设置里）", new_chip is not None,
+          str([c.text for c in _all_chips(page._category_bar)]))
+
+
 # ---------------------------------------------------------------------------
 # [C] 图标抽取 / 无图标底牌 / 圆角胶囊
 # ---------------------------------------------------------------------------
@@ -1152,6 +1448,8 @@ def main():
     test_ranking()
     test_hints()
     test_strips()
+    test_tool_tags()
+    test_tags_db()
     test_icon_extraction()
     test_letter_tile()
     test_rounded_chip()
