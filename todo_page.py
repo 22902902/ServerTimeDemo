@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from datetime import date, timedelta
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import font as tkfont, messagebox, simpledialog, ttk
 from typing import Optional
 
 import todo_icons
@@ -97,6 +97,37 @@ def tint(widget, bg: str):
         pass
     for child in widget.winfo_children():
         tint(child, bg)
+
+# 带删除线的字体缓存：键是 (字族, 字号, 字重...)，见 strike_font()
+_STRIKE_FONTS: dict = {}
+
+
+def strike_font(base, widget):
+    """把元组字体转成带删除线的 ``tkinter.font.Font``。
+
+    Tk 只有 ``Font`` 对象支持 ``overstrike``（``underline`` 同理），
+    元组字体 ``("Microsoft YaHei UI", 10)`` 带不动 —— 「已完成」的
+    那道横线只能走这条路。字号字重仍取自传入的字体常量，不新增样式。
+
+    缓存有两个坑：
+    * 键要带字族 / 字号 / 字重，否则 10pt 正文与 12pt 粗体会互相串用；
+    * ``Font`` 绑在某个 Tk 解释器上，解释器换了（测试里 destroy 后重开
+      root）旧对象就是废的，所以命中缓存后要 ``actual()`` 探一次活。
+    """
+    key = tuple(base)
+    cached = _STRIKE_FONTS.get(key)
+    if cached is not None:
+        try:
+            cached.actual()
+            return cached
+        except tk.TclError:
+            _STRIKE_FONTS.pop(key, None)
+    styles = tuple(base[2:])
+    font = tkfont.Font(root=widget, family=base[0], size=base[1],
+                       weight=("bold" if "bold" in styles else "normal"),
+                       overstrike=1)
+    _STRIKE_FONTS[key] = font
+    return font
 
 
 class ScrollArea(tk.Frame):
@@ -613,7 +644,10 @@ class TodoPage(ttk.Frame):
                          font=FONT_ROW_TITLE, anchor="w", justify="left")
         title.pack(fill="x", anchor="w")
         if item.completed:
-            title.configure(fg=palette.text_muted)
+            # 「已完成」的样子＝左侧勾上 + 标题中间划一道横线（与苹果一致）。
+            # 只变灰太容易被看漏，尤其一屏里混着未完项的时候。
+            title.configure(fg=palette.text_muted,
+                            font=strike_font(FONT_ROW_TITLE, title))
 
         sub_parts = []
         if info is not None and (self.current_list_id is None
@@ -704,7 +738,7 @@ class TodoPage(ttk.Frame):
         bg = palette.sidebar_active if selected else palette.surface
         tint(row, bg)
         check.configure(image=todo_icons.checkbox_image(
-            self._check_px, color if not item.completed else color,
+            self._check_px, color,
             bool(item.completed)))
 
     def _hover_row(self, row: tk.Frame, item: TodoItem, entering: bool):
@@ -772,6 +806,10 @@ class TodoPage(ttk.Frame):
         title = tk.Entry(head, textvariable=self.title_var, bd=0,
                          bg=palette.surface, fg=palette.text_primary,
                          font=FONT_DETAIL_TITLE, insertbackground=palette.text_primary)
+        if item.completed:
+            # 列表上划了、点进来又是正常字，会让人怀疑自己刚才勾没勾上
+            title.configure(fg=palette.text_muted,
+                            font=strike_font(FONT_DETAIL_TITLE, title))
         title.pack(side="left", fill="x", expand=True, padx=(10, 0), pady=(2, 0))
         title.bind("<FocusOut>", lambda _e: self._flush_editor())
         title.bind("<Return>", lambda _e: self._flush_editor())
@@ -966,7 +1004,9 @@ class TodoPage(ttk.Frame):
             text_label = tk.Label(row, text=sub.title, bg=palette.surface,
                                   fg=(palette.text_muted if sub.completed
                                       else palette.text_primary),
-                                  font=self.typography.body, anchor="w")
+                                  font=(strike_font(self.typography.body, row)
+                                        if sub.completed else self.typography.body),
+                                  anchor="w")
             text_label.pack(side="left", fill="x", expand=True, padx=(10, 0), pady=4)
             remove = tk.Label(row, text="✕", bg=palette.surface,
                               fg=palette.text_muted, font=self.typography.caption,
@@ -1010,10 +1050,15 @@ class TodoPage(ttk.Frame):
     def toggle_complete(self, item_id: int):
         self._flush_editor()
         result = self.db.set_completed(item_id, True)
+        self.refresh_all()
+        # 提示必须写在重画之后：_render_item_list() 会把 helper 清空，
+        # 写在前面等于白写（原先的「重复项已完成」就是这么被吞掉的）。
+        # 单次项勾完就从当前视图消失、只剩左栏计数 +1，这句是唯一的回执。
         if result.get("action") == "spawn" and result.get("next_due"):
             self.mid_helper.configure(
                 text=f"重复项已完成，下一次：{result['next_due']}")
-        self.refresh_all()
+        elif result.get("action") == "done":
+            self.mid_helper.configure(text="已完成 · 可在左侧「已完成」里找到")
 
     def toggle_flag(self, item_id: int):
         self._flush_editor()

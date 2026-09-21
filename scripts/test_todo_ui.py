@@ -32,6 +32,7 @@ I. 勾选       单次 vs 重复（留快照 + 推进）
 J. 视图切换   智能分组 ↔ 真实清单
 K. 菜单       8 个入口全部可走通，结构合法
 L. 资产       图标字典一一对应、图标盘按当前颜色渲染
+M. 完成态     勾上 + 标题划一道横线（含详情标题）；勾选后的回执不被重画吞掉
 
 用法：
     python scripts/test_todo_ui.py
@@ -127,6 +128,31 @@ def descend(widget, cls) -> list:
             out.append(child)
         out.extend(descend(child, cls))
     return out
+
+
+def find_label(widget, text: str):
+    """在控件树里找 text 等于给定值的 tk.Label（递归）。找不到回 None。"""
+    if widget is None:
+        return None
+    try:
+        if isinstance(widget, tk.Label) and widget.cget("text") == text:
+            return widget
+    except tk.TclError:                 # 控件已被 destroy（切视图会重建整列行）
+        return None
+    for child in widget.winfo_children():
+        got = find_label(child, text)
+        if got is not None:
+            return got
+    return None
+
+
+def font_attr(widget, option: str) -> int:
+    """读控件**实际生效**的字体属性。
+
+    Tk 里删除线只有 ``font.Font`` 对象带得动，元组字体带不动 —— 所以必须问
+    真正生效的那一层：``font actual <spec> -overstrike``（字体名与描述串都吃）。
+    """
+    return int(widget.tk.call("font", "actual", widget.cget("font"), f"-{option}"))
 
 
 # ===========================================================================
@@ -513,6 +539,77 @@ def test_toggle(page: TodoPage, db: TodoDB, data: dict) -> None:
 
 
 # ===========================================================================
+# M. 完成态
+# ===========================================================================
+def test_completed_style(page: TodoPage, db: TodoDB, data: dict) -> None:
+    section("[M] 完成态：勾上 + 标题划一道横线")
+
+    # 已完成项只出现在「已完成」视图（其余视图按苹果的路子过滤掉），
+    # 所以「划了线」在「已完成」里验，「没划线」在别的视图里验。
+    #
+    # 注意：切视图会 _row_widgets.clear() + 重建整列行控件，旧 Label 立刻
+    # destroy —— 它的 cget()/winfo_* 全部变成 "invalid command name"。
+    # 所以属性一律**当场读成数值**留存，不要留着控件引用跨视图比较。
+    done_items = db.fetch_items(scope="completed")
+    done_item = next((i for i in done_items if i.repeat_rule == "none"), None) \
+        or (done_items[0] if done_items else None)
+    check("数据层里存在已完成项", done_item is not None, f"n={len(done_items)}")
+
+    page._select_side("smart", "completed")
+    settle(page)
+    title_done = find_label(page._row_widgets.get(done_item.id), done_item.title)
+    check("「已完成」视图里找得到该条目", title_done is not None,
+          f"行={list(page._row_widgets)}")
+    over_done = font_attr(title_done, "overstrike") if title_done else None
+    size_done = font_attr(title_done, "size") if title_done else None
+    fg_done = title_done.cget("fg") if title_done else ""
+    check("已完成项标题字体带删除线（overstrike=1）", over_done == 1,
+          f"overstrike={over_done}")
+    check("已完成项标题是灰字", fg_done == MAIN_PALETTE.text_muted, fg_done)
+
+    page._select_side("smart", "today")
+    settle(page)
+    open_items = db.fetch_items(scope="today")
+    open_item = open_items[0] if open_items else None
+    title_open = find_label(page._row_widgets.get(open_item.id), open_item.title) \
+        if open_item is not None else None
+    over_open = font_attr(title_open, "overstrike") if title_open else None
+    size_open = font_attr(title_open, "size") if title_open else None
+    check("今天视图里找得到未完成项", title_open is not None)
+    check("未完成项标题不带删除线（overstrike=0）", over_open == 0,
+          f"overstrike={over_open}")
+    # 字号必须一致：完成态只该多一道线，不该变成另一种字体
+    check("两个状态字号一致（只是多了道线）",
+          size_done is not None and size_done == size_open,
+          f"{size_done} vs {size_open}")
+
+    # 详情面板：列表上划了、点进来又是正常字，会让人怀疑刚才勾没勾上
+    page.select_item(done_item.id)
+    settle(page)
+    over_entry_done = font_attr(page.detail_title_entry, "overstrike")
+    check("详情标题（已完成）带删除线", over_entry_done == 1,
+          f"overstrike={over_entry_done}")
+    if open_item is not None:
+        page.select_item(open_item.id)
+        settle(page)
+        check("详情标题（未完成）不带删除线",
+              font_attr(page.detail_title_entry, "overstrike") == 0,
+              f"overstrike={font_attr(page.detail_title_entry, 'overstrike')}")
+
+    # 勾选后的回执：提示写在 refresh_all() 之前会被重画清空 —— 等于没写
+    new_id = db.add_item({"title": "回执用的一条", "list_id": data["work"].id,
+                          "due_date": day_str(data["today"]), "skip_holidays": 0})
+    page.refresh_all()
+    settle(page)
+    page.mid_helper.configure(text="")
+    page.toggle_complete(new_id)
+    settle(page)
+    hint = page.mid_helper.cget("text")
+    check("单次项勾选后给出回执", "已完成" in hint, repr(hint))
+    check("回执没被重画吞掉", hint != "", repr(hint))
+
+
+# ===========================================================================
 # J. 视图切换
 # ===========================================================================
 def test_scope_switch(page: TodoPage, db: TodoDB, data: dict) -> None:
@@ -649,6 +746,7 @@ def main_test() -> None:
         test_due_write(page, db, data)
         test_quick_add(page, db)
         test_toggle(page, db, data)
+        test_completed_style(page, db, data)
         test_scope_switch(page, db, data)
         test_menus(page, db, data)
         test_assets()
