@@ -640,6 +640,8 @@ class ToolsPage(ttk.Frame):
         self._view_chips: dict[str, RoundedChip] = {}
         self._grid_cols_now: int = 0            # 上一次渲染用的列数，用于判断要不要重排
         self._relayout_job = None               # 窗口缩放防抖
+        self._pending_layout = False            # 画布还没量出尺寸，等第一次真实 Configure
+        self._first_layout_job = None           # 首帧排版的 after_idle 句柄
         self._tooltips: list[HoverTooltip] = []  # 重建网格时统一销毁
         # 图标模式下「图标 + 角标」的容器，_paint_card 要连它一起重涂
         self._icon_holders: dict[int, tk.Frame] = {}
@@ -1073,6 +1075,9 @@ class ToolsPage(ttk.Frame):
         self._cat_scroll = ttk.Scrollbar(cat_area, orient="horizontal",
                                           command=self._cat_canvas.xview)
         self._cat_canvas.configure(xscrollcommand=self._cat_scroll.set)
+        # 画布宽度变了要重新判断「装不装得下」：映射前宽度是 1，那时算出来的
+        # 结论会一直留在界面上（见 _update_category_scroll）
+        self._cat_canvas.bind("<Configure>", lambda e: self._update_category_scroll())
 
         self.category_container = tk.Frame(self._cat_canvas, bg=COLOR_BG)
         self._cat_window = self._cat_canvas.create_window(
@@ -1131,6 +1136,13 @@ class ToolsPage(ttk.Frame):
     def _update_category_scroll(self):
         bbox = self._cat_canvas.bbox("all")
         if not bbox:
+            return
+        # ★ 还没映射时 winfo_width() 报 1，据此判断必然「放不下」，于是一条横滚条
+        #   被永久挂上 —— 内容其实装得下（实测胶囊 664px、画布 932px，杠还在）。
+        #   这时先按「不需要」处理，等 <Configure> 拿到真实宽度再定。
+        if not self._cat_canvas.winfo_ismapped() or self._cat_canvas.winfo_width() <= 1:
+            if self._cat_scroll.winfo_ismapped():
+                self._cat_scroll.pack_forget()
             return
         need = (bbox[2] - bbox[0]) > self._cat_canvas.winfo_width() + 1
         shown = bool(self._cat_scroll.winfo_ismapped())
@@ -1398,6 +1410,10 @@ class ToolsPage(ttk.Frame):
                          if e.widget == self.canvas else None)
         # 除了让内层 Frame 跟着变宽，还要在图标/文件夹排列下重算能放几格
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+        # <Configure> 可能在真正映射之前就带着 1x1 到达；映射那一下再试一次，
+        # 保证首帧一定用的是量好的宽度
+        self.canvas.bind("<Map>", lambda e: self._pending_layout
+                         and self._schedule_initial_layout())
         # 滚轮只在指针进入网格时才接管：原来裸 bind_all，在右侧编辑面板的文本框里
         # 滚动时滚的其实是背后的网格，很难受
         self.canvas.bind("<Enter>",
@@ -1920,6 +1936,23 @@ class ToolsPage(ttk.Frame):
         hints = launcher.compute_hints(pool)
 
         cols = self._grid_columns()
+
+        # ★ 图标 / 文件夹排列的列数跟着窗口宽度走。页面建好但还没切过去时，Tk 对
+        #   未映射控件一律报 1x1，按这个宽度只会排出 1~2 列（内容高过一屏），
+        #   等真正映射了再重排 —— 用户看到的就是「进页面先竖排、0.x 秒后才跳回
+        #   正常」，中间那下还能滚。所以这种时候干脆先不排，把首帧让给第一次
+        #   拿到真实尺寸的 <Configure>。
+        if matched and self.view_mode in ("icon", "folder") and not self._canvas_measured():
+            self._pending_layout = True
+            self._reset_grid_columns(self._grid_cols_now)
+            self._grid_cols_now = 0
+            self._schedule_initial_layout()
+            self._refresh_strips(self._all_tools)
+            self._update_status(pool, matched, keyword, extra=self._cursor_label(),
+                                global_scope=bool(keyword))
+            return
+
+        self._pending_layout = False
         # grid 的 columnconfigure 是持久化的：从 21 列的图标排列切到单列列表时，
         # 残留的 weight 会把那唯一一列压成 1/21 宽。所以每轮先把旧列权重归零。
         self._reset_grid_columns(max(self._grid_cols_now, cols))
@@ -1945,6 +1978,7 @@ class ToolsPage(ttk.Frame):
                     self._set_cursor(first, quiet=True)
 
         self._refresh_strips(self._all_tools)
+        self._sync_canvas_region()
         self._update_status(pool, matched, keyword, extra=self._cursor_label(),
                             global_scope=bool(keyword))
 
@@ -2022,8 +2056,55 @@ class ToolsPage(ttk.Frame):
             except tk.TclError:
                 return
 
+    def _canvas_measured(self) -> bool:
+        """画布拿到真实尺寸了吗。
+
+        页面建好但还没切过去时，Tk 对未映射的控件一律报 1x1；照这个宽度排
+        「文件夹」排列只会排出一两列竖排 —— 正是要根治的那个首帧错版式。
+        """
+        try:
+            return (bool(self.canvas.winfo_ismapped())
+                    and self.canvas.winfo_width() > 1
+                    and self.canvas.winfo_height() > 1)
+        except tk.TclError:
+            return False
+
+    def _schedule_initial_layout(self):
+        """首帧排版：尺寸一到就排，不走 140ms 防抖。
+
+        防抖是给「拖窗口」用的。进页面那一次若也等 140ms，用户先看到的就是按
+        兜底/过小宽度排出来的错版式 —— 那个「跳一下」的来源。
+        """
+        if self._first_layout_job is not None:
+            return
+        self._first_layout_job = self.after_idle(self._run_first_layout)
+
+    def _run_first_layout(self):
+        self._first_layout_job = None
+        if not self._pending_layout or not self.winfo_exists():
+            return
+        if not self._canvas_measured():
+            return                      # 还没映射：等 <Map> / <Configure> 再叫醒
+        self._pending_layout = False
+        self._refresh_grid()
+
+    def _sync_canvas_region(self):
+        """立刻把滚动区收到内容真实高度。
+
+        scrollregion 原来只靠 grid_frame 的 <Configure> 被动更新，重排那一下框架
+        高度还是旧值 —— 于是出现「内容只有两行，却能滚进一大片空白」。
+        """
+        try:
+            self.canvas.update_idletasks()
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except tk.TclError:
+            pass
+
     def _on_canvas_configure(self, event):
         self.canvas.itemconfigure(self.canvas_window, width=event.width)
+        if self._pending_layout:
+            self._run_first_layout()    # 首帧同步排，别让错版式先上屏
+            return
         self._schedule_relayout()
 
     def _schedule_relayout(self):
@@ -2043,6 +2124,9 @@ class ToolsPage(ttk.Frame):
     def _relayout_now(self):
         self._relayout_job = None
         if not self.winfo_exists():
+            return
+        if self._pending_layout:
+            self._run_first_layout()
             return
         if self._grid_columns() != self._grid_cols_now:
             self._refresh_grid()
@@ -3248,19 +3332,47 @@ class ToolsPage(ttk.Frame):
     def _drop_category_at(self, x_root: int, y_root: int):
         """指针底下是哪个分类胶囊；不是分类就返回 None。
 
-        分类胶囊是 Canvas 自绘控件，命中靠 winfo_containing + 沿控件树上溯
-        （注册投放目标时打了 _drop_kind 标记），比手算矩形稳得多。
+        分类胶囊是 Canvas 自绘控件，先走 winfo_containing + 沿控件树上溯
+        （注册投放目标时打了 _drop_kind 标记）；命中不了再按几何矩形自己判。
+        两条路都要：前者能正确处理遮挡与裁剪，后者在 winfo_containing 不可用时
+        （远程桌面断开、虚拟显示、指针底下压着别的置顶窗口）仍能投放 ——
+        拖半天放不进去比算错几像素难受得多。
         """
         try:
             widget = self.winfo_containing(x_root, y_root)
         except tk.TclError:
-            return None
+            widget = None
         for _ in range(12):
             if widget is None:
-                return None
+                break
             if getattr(widget, "_drop_kind", None) == "category":
                 return getattr(widget, "_drop_cat_name", None)
             widget = getattr(widget, "master", None)
+        return self._drop_category_by_rect(x_root, y_root)
+
+    def _drop_category_by_rect(self, x_root: int, y_root: int):
+        """按胶囊自己的屏幕矩形判命中（winfo_containing 的兜底）。"""
+        cv = self._cat_canvas
+        try:
+            vis_left = cv.winfo_rootx()
+            vis_right = vis_left + cv.winfo_width()
+        except tk.TclError:
+            return None
+        for chip in self._category_chips.values():
+            if getattr(chip, "_drop_kind", None) != "category":
+                continue
+            try:
+                if not chip.winfo_ismapped() or chip.winfo_width() <= 1:
+                    continue
+                left, top = chip.winfo_rootx(), chip.winfo_rooty()
+                w, h = chip.winfo_width(), chip.winfo_height()
+            except tk.TclError:
+                continue
+            # 横向滚动到可视区之外的胶囊不该还能接住投放
+            if left + w <= vis_left or left >= vis_right:
+                continue
+            if left <= x_root < left + w and top <= y_root < top + h:
+                return getattr(chip, "_drop_cat_name", None)
         return None
 
     def _highlight_drop_category(self, name):

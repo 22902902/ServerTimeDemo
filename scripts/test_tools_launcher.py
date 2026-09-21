@@ -422,6 +422,7 @@ def test_real_page():
         _assert_status_bar(page)
         _assert_view_modes(page, root)
         _assert_tags_and_drag(page, conn, root)
+        _assert_first_layout(root, tmp_db)
     finally:
         try:
             root.destroy()
@@ -1213,6 +1214,113 @@ def _assert_tags_and_drag(page, conn, root):
     new_chip = _chip_by_text(page._category_bar, "+ 新建分类")
     check("分类栏末尾有「+ 新建分类」入口（不埋在设置里）", new_chip is not None,
           str([c.text for c in _all_chips(page._category_bar)]))
+
+
+def _assert_first_layout(root, tmp_db):
+    """首帧排版：不允许「先进去竖排、0.x 秒后才跳正常」，滚动区也不许滞后。
+
+    真实症状（用户截图）：进系统工具箱那一下先排出 2 列竖排（内容比一屏还高、
+    还能滚），约 0.1~0.15 秒后才跳成 11 列；期间滚动条还能滚进一大片空白。
+    成因是页面未映射时 Tk 把尺寸报成 1x1，按它算列数必然错；再加上重排要走
+    140ms 防抖、scrollregion 又只靠 <Configure> 被动更新（慢一帧）。
+
+    这里复刻真实主窗口的构建顺序：页面建好时容器还没 pack（未映射），
+    切过去之后必须一次成型。
+    """
+    print("\n[B8] 首帧排版：不先竖排再跳 / 滚动区不滞后 / 分类横滚条")
+
+    conn2 = sqlite3.connect(str(tmp_db))
+    conn2.row_factory = sqlite3.Row
+    tools_db.init_all_tool_tables(conn2)
+    # 用户那台是「文件夹」排列 —— 列数跟窗口宽度走的正是它
+    tools_db.set_setting(conn2, "view_mode", "folder")
+
+    # 单独开一个窗口：和主页面共用一个 root 会平分高度，量出来的画布尺寸是假的
+    win = tk.Toplevel(root)
+    win.geometry("1180x820+120+120")
+    holder = tk.Frame(win)                        # 故意不 pack：模拟「还没切过去」
+    second = ToolsPage(holder, conn2, project_root=str(ROOT))
+    second.pack(fill="both", expand=True)
+    root.update()
+
+    check("「文件夹」排列生效", second.view_mode == "folder", second.view_mode)
+    check("未映射时先一个格子都不排（不按兜底列数画一遍）",
+          len(second.grid_frame.winfo_children()) == 0,
+          f"{len(second.grid_frame.winfo_children())} 个")
+    check("标记了「等首帧」而不是硬排", second._pending_layout is True)
+
+    # 记录每一轮排版最终定下的列数，用来确认中间没有竖排态
+    seen = []
+    original = second._refresh_grid
+
+    def spy():
+        original()
+        seen.append(second._grid_cols_now)
+
+    second._refresh_grid = spy
+
+    holder.pack(fill="both", expand=True)         # 用户点了「系统工具箱」
+    for _ in range(60):
+        root.update()
+        if second._grid_cols_now and not second._pending_layout:
+            break
+        time.sleep(0.01)
+    # 再跑一会儿让整页几何收敛（画布高度也是一点点长起来的）
+    for _ in range(30):
+        root.update()
+        time.sleep(0.01)
+
+    check("切过去后首帧就排满全部工具",
+          len(second.icon_widgets) == len(second._all_tools) > 0,
+          f"{len(second.icon_widgets)} / {len(second._all_tools)}")
+    cols = second._grid_cols_now
+    check("列数跟窗口宽度走（不是兜底值 6）", cols > 6, f"列数 {cols}")
+    check("中间没出现过竖排态（列数没掉到 ≤6）",
+          all(c > 6 for c in seen), f"各轮列数 {seen}")
+    rows = {int(c.grid_info()["row"]) for c in second.grid_frame.winfo_children()
+            if c.grid_info()}
+    check("排成了两行而不是一长条", rows and max(rows) <= 2, f"行 {sorted(rows)}")
+
+    # ---- 滚动区必须和内容一样高 ----
+    region = [int(v) for v in second.canvas.cget("scrollregion").split()]
+    content_h = second.grid_frame.winfo_height()
+    view_h = second.canvas.winfo_height()
+    check("scrollregion 高 == 内容高（不滞后一帧）",
+          len(region) == 4 and region[3] - region[1] == content_h,
+          f"region {region} / 内容 {content_h}")
+    check("前提成立：内容确实没铺满视口", content_h < view_h,
+          f"内容 {content_h} / 视口 {view_h}")
+    second.canvas.yview_scroll(20, "units")
+    root.update()
+    check("内容没铺满时滚不动（不会滚进空白）",
+          tuple(second.canvas.yview()) == (0.0, 1.0), str(tuple(second.canvas.yview())))
+
+    # ---- 分类横滚条只在真放不下时出现 ----
+    check("分类装得下时不挂横滚条",
+          not second._cat_scroll.winfo_ismapped(),
+          f"胶囊宽 {second._cat_canvas.bbox('all')[2]} / "
+          f"画布宽 {second._cat_canvas.winfo_width()}")
+
+    # ---- 窗口变窄仍要重排（防抖那条路不能被首帧逻辑吃掉） ----
+    before = second._grid_cols_now
+    win.geometry("640x780")
+    for _ in range(80):
+        root.update()
+        if second._grid_cols_now != before:
+            break
+        time.sleep(0.01)
+    for _ in range(20):
+        root.update()
+        time.sleep(0.01)
+    check("窗口变窄后重新分列", second._grid_cols_now < before,
+          f"{before} -> {second._grid_cols_now}")
+    region = [int(v) for v in second.canvas.cget("scrollregion").split()]
+    check("重排后滚动区仍然收敛",
+          region[3] - region[1] == second.grid_frame.winfo_height(),
+          f"region {region} / 内容 {second.grid_frame.winfo_height()}")
+
+    win.destroy()
+    conn2.close()
 
 
 # ---------------------------------------------------------------------------
