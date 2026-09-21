@@ -18,14 +18,19 @@
 
     python scripts/run_all_tests.py            # 全部
     python scripts/run_all_tests.py todo       # 只跑名字里含 todo 的
+    python scripts/run_all_tests.py --json build/manual/test_baseline.json
+                                               # 顺带把结果写成 JSON，供
+                                               # make_python_manual 引用
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,7 +65,17 @@ def summarise(name: str, interpreter: str) -> tuple[int, int, str]:
 
 
 def main(argv: list[str]) -> int:
-    if not argv:
+    args = list(argv)
+    json_out = None
+    if "--json" in args:
+        index = args.index("--json")
+        if index + 1 >= len(args):
+            print("--json 后面要跟一个输出路径，例如 --json build/manual/test_baseline.json")
+            return 2
+        json_out = args[index + 1]
+        del args[index:index + 2]
+
+    if not args:
         # 用 find_spec 探测而不是 import：pyflakes 不认 noqa（那是 flake8 的），
         # 真 import 进来又不用，会被报一条「imported but unused」
         if importlib.util.find_spec("tkinter") is None:
@@ -70,22 +85,39 @@ def main(argv: list[str]) -> int:
             return 2
 
     wanted = [s for s in SUITES
-              if not argv or any(a in s for a in argv)]
+              if not args or any(a in s for a in args)]
     total_pass = total_fail = 0
+    rows = []
 
-    for name in wanted + ([SMOKE] if not argv else []):
+    for name in wanted + ([SMOKE] if not args else []):
         if not (ROOT / "scripts" / f"{name}.py").exists():
             print(f"{name:<24} 找不到脚本，跳过")
             continue
         passed, failed, tail = summarise(name, sys.executable)
         total_pass += passed
         total_fail += failed
+        rows.append({"name": name, "passed": passed, "failed": failed})
         print(f"{name:<24} 通过 {passed:>4} 项   失败 {failed}")
         if tail:
             print(tail)
 
     print("-" * 46)
     print(f"{'合计':<24} 通过 {total_pass:>4} 项   失败 {total_fail}")
+
+    if json_out:
+        target = Path(json_out)
+        if not target.is_absolute():
+            target = ROOT / target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(json.dumps({
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "interpreter": sys.executable,
+            "suites": rows,
+            "total_passed": total_pass,
+            "total_failed": total_fail,
+        }, ensure_ascii=False, indent=2).encode("utf-8"))
+        print(f"结果已写入 {target}")
+
     return 1 if total_fail else 0
 
 
