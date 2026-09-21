@@ -186,7 +186,7 @@ def _assert_no_placeholders(blocks, tokens):
         raise SystemExit(f"有占位符没被替换：{detail}")
 
 
-def _token_map(stats):
+def _token_map(stats, n_tables):
     """现算出来的数字 -> 正文里的 ``{token}``。"""
     by_label = {label: (len(files), lines) for label, files, lines in stats}
     n_root, l_root = by_label["根目录"]
@@ -198,13 +198,12 @@ def _token_map(stats):
         "{n_scr}": f"{n_scr} 个",
         "{n_all}": str(n_root + n_emb + n_scr),
         "{n_lines}": f"{l_root + l_emb + l_scr:,}",
+        "{n_tables}": str(n_tables),
     }
 
 
-def expand(blocks, stats, base_data):
+def expand(blocks, tokens):
     """把占位块与 `{token}` 换成现算的内容。"""
-    tokens = _token_map(stats)
-
     out = []
     for block in blocks:
         kind = block[0]
@@ -218,10 +217,114 @@ def expand(blocks, stats, base_data):
     return out
 
 
+# =============================================================================
+# 分册
+# =============================================================================
+# 96 页的合订本打出来是一整摞纸，翻着也不方便，所以按主题拆成三册，
+# 每册各带封面 / 目录 / 页码，页码从 1 重新开始。
+#
+#   上册  语言基础    词法 -> 类型 -> 容器 -> 控制流
+#   中册  抽象与组织  函数 -> 类 -> 异常 -> 模块 -> 注解
+#   下册  工程实战    标准库 -> GUI -> 工程约定，外加四份附录（当资料查）
+#
+# **边界按一级标题划，不按页码** —— 页码一改就错位，标题是稳的。
+# 划分写在这里而不是内容文件里：内容只管写，册次是排版决策。
+VOLUMES = [
+    {
+        "key": "up",
+        "volume": "上册",
+        "sub": "语言基础",
+        "covers": "第一章 ~ 第五章",
+        "file": "Python语法手册_上册_语言基础.pdf",
+        "heads": ("第一章", "第二章", "第三章", "第四章", "第五章"),
+    },
+    {
+        "key": "mid",
+        "volume": "中册",
+        "sub": "抽象与组织",
+        "covers": "第六章 ~ 第十章",
+        "file": "Python语法手册_中册_抽象与组织.pdf",
+        "heads": ("第六章", "第七章", "第八章", "第九章", "第十章"),
+    },
+    {
+        "key": "down",
+        "volume": "下册",
+        "sub": "工程实战与附录",
+        "covers": "第十一章 ~ 第十三章 + 附录 A ~ D",
+        "file": "Python语法手册_下册_工程实战与附录.pdf",
+        "heads": ("第十一章", "第十二章", "第十三章",
+                  "附录 A", "附录 B", "附录 C", "附录 D"),
+    },
+]
+
+
+def split_volumes(blocks):
+    """按一级标题把块列表切成三册。
+
+    返回 ``[(卷定义, 该册的块), ...]``，顺序与 ``VOLUMES`` 一致。
+    只认 ``h1`` 边界：每个 h1 归属到「heads 前缀命中」的那一册，
+    命中不了或命中多册都直接报错 —— 内容重排后错位要当场炸，不能静默串册。
+    """
+    groups = []                       # [(h1 标题, [块, ...]), ...]
+    for block in blocks:
+        if block[0] == "h1":
+            groups.append((block[1], [block]))
+        elif groups:
+            groups[-1][1].append(block)
+        else:
+            raise SystemExit(f"正文在第一个一级标题之前就有块：{block[0]}")
+
+    buckets = {v["key"]: [] for v in VOLUMES}
+    for title, group in groups:
+        hit = [v for v in VOLUMES if title.startswith(v["heads"])]
+        if len(hit) != 1:
+            names = "、".join(v["volume"] for v in hit) or "（没有匹配）"
+            raise SystemExit(f"一级标题「{title}」归属异常：{names}")
+        buckets[hit[0]["key"]].append((title, group))
+
+    out = []
+    for vol in VOLUMES:
+        chapters = buckets[vol["key"]]
+        titles = tuple(t for t, _ in chapters)
+        ok = (len(titles) == len(vol["heads"])
+              and all(t.startswith(h) for t, h in zip(titles, vol["heads"])))
+        if not ok:
+            raise SystemExit(
+                f"{vol['volume']}的章节与 VOLUMES 声明不符："
+                f"实际 {titles}，声明以 {vol['heads']} 开头")
+        body = [b for _, group in chapters for b in group]
+        # 每章末尾都有分页符；它是给「下一章另起一页」用的，
+        # 留在册尾只会多出一张空白页，剥掉。
+        while body and body[-1][0] == "pagebreak":
+            body.pop()
+        out.append((vol, body))
+    return out
+
+
+def volume_meta(vol, meta):
+    """在一册的元数据里补上册名、收录范围与页眉。"""
+    sub = f"{vol['sub']} · {vol['covers']}"
+    return {
+        **meta,
+        "title": f"{meta['title']}（{vol['volume']}）",
+        "subject": f"{meta['subject']} · {vol['volume']} {sub}",
+        "volume": vol["volume"],
+        "volume_sub": sub,
+        "volume_set": f"《Python 语法手册》全三册 · 本册为{vol['volume']}",
+        "volume_note": f"本册是三册中的**{vol['volume']}**，收录 {vol['covers']}。"
+                       f"（{vol['sub']}）",
+        "header_right": f"{vol['volume']} · {meta['header_right']}",
+    }
+
+
 def main(argv) -> int:
     parser = argparse.ArgumentParser(description="生成 Python 语法手册 PDF")
     parser.add_argument("--out", default=str(DEFAULT_OUT),
-                        help=f"输出 PDF 路径（默认 {DEFAULT_OUT}）")
+                        help=f"合订本输出路径，配合 --single（默认 {DEFAULT_OUT}）")
+    parser.add_argument("--outdir", default=str(DEFAULT_OUT.parent),
+                        help="分册输出目录（默认 docs/）")
+    parser.add_argument("--single", action="store_true",
+                        help="只出一本合订本；默认按主题拆成上中下三册")
     parser.add_argument("--app-version", default=None,
                         help="封面显示的应用程序版本号（默认读 app_version.py）")
     parser.add_argument("--manual-version", default="1.0", help="手册自身版本号")
@@ -239,7 +342,6 @@ def main(argv) -> int:
     stats = collect_stats()
     total_files = sum(len(f) for _, f, _ in stats)
     total_lines = sum(l for _, _, l in stats)
-    _, base_data = build_test_table()
 
     # 数据库表数：直接数一次（数据库不存在时写「—」）
     n_tables = "—"
@@ -269,23 +371,45 @@ def main(argv) -> int:
         "stat_tables": n_tables,
     }
 
+    tokens = _token_map(stats, n_tables)
     blocks = expand(
-        list(manual_content_a.BLOCKS) + list(manual_content_b.BLOCKS),
-        stats, base_data)
-    _assert_no_placeholders(blocks, _token_map(stats))
+        list(manual_content_a.BLOCKS) + list(manual_content_b.BLOCKS), tokens)
+    _assert_no_placeholders(blocks, tokens)
 
-    out_path = manual_engine.build(blocks, Path(args.out), meta)
+    def _count(bs, kind):
+        return sum(1 for b in bs if b[0] == kind)
 
-    print("手册已生成")
-    print(f"  输出      {out_path}")
-    print(f"  体量      {out_path.stat().st_size / 1024:.0f} KB")
-    print(f"  统计      {total_files} 个文件 / {total_lines:,} 行 / {n_tables} 张表")
-    print(f"  代码块    {sum(1 for b in blocks if b[0] == 'code')} 个")
-    print(f"  表格      {sum(1 for b in blocks if b[0] == 'table')} 张")
-    print(f"  插图      {sum(1 for b in blocks if b[0] == 'image')} 张")
+    print(f"统计      {total_files} 个文件 / {total_lines:,} 行 / {n_tables} 张表")
+    print()
+
+    if args.single:
+        out_path, pages = manual_engine.build(blocks, Path(args.out), meta)
+        print(f"合订本已生成   {pages} 页 · "
+              f"{out_path.stat().st_size / 1024:.0f} KB")
+        print(f"  代码块    {_count(blocks, 'code')} 个")
+        print(f"  表格      {_count(blocks, 'table')} 张")
+        print(f"  插图      {_count(blocks, 'image')} 张")
+        print(f"  输出      {out_path}")
+    else:
+        outdir = Path(args.outdir)
+        print("分册已生成（各册独立封面 / 目录 / 页码）")
+        total_pages = 0
+        for i, (vol, vol_blocks) in enumerate(split_volumes(blocks), 1):
+            path, pages = manual_engine.build(
+                vol_blocks, outdir / vol["file"], volume_meta(vol, meta))
+            total_pages += pages
+            print(f"  {i}. {vol['volume']}《{vol['sub']}》")
+            print(f"     {pages:>3} 页 · {path.stat().st_size / 1024:>5.0f} KB · "
+                  f"{_count(vol_blocks, 'code'):>3} 个代码块 · "
+                  f"{_count(vol_blocks, 'table'):>3} 张表")
+            print(f"     收录 {vol['covers']}")
+            print(f"     {path}")
+        print(f"  合计 {total_pages} 页")
+
     if not BASELINE_JSON.exists():
-        print("  注意      没有测试基线，附录 B 是空的。先跑：")
-        print("            python scripts/run_all_tests.py "
+        print()
+        print("注意：没有测试基线，附录 B 是空的。先跑：")
+        print("      python scripts/run_all_tests.py "
               "--json build/manual/test_baseline.json")
     return 0
 

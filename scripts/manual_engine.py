@@ -246,6 +246,10 @@ def build_styles():
         "cover_meta", fontName="BODY", fontSize=9.2, leading=17,
         textColor=Ink.muted, alignment=TA_CENTER, wordWrap="CJK",
     )
+    s["volume_note"] = ParagraphStyle(
+        "volume_note", fontName="BODY", fontSize=9.4, leading=16,
+        textColor=Ink.secondary, wordWrap="CJK", spaceAfter=0,
+    )
     return s
 
 
@@ -475,6 +479,19 @@ def _table_flowable(rows):
     return Table(data, colWidths=widths, repeatRows=1, style=TableStyle(style))
 
 
+# 一个「不可折断的片段」：连续的半角可打印字符。中文按字断行，
+# 断点天然存在，所以不计入保底；文件名 / 函数名 / 命令行这种半角串
+# 一旦被折断就成了两行，必须给足宽度。
+_UNBREAKABLE = re.compile(r"[!-~]+")
+
+# 但不是所有片段都值得为它撑宽一列：连着三十几个半角字符的长路径
+# （``embedded_admin_tools/login_memory_service.py``）需要 220pt 才放得下，
+# 那是半张版心 —— 给它就等于把整张表挤干。超过这个长度的片段一律
+# 不参与保底，让它自己折行去。短期标识符（``todo_db.py`` 这种）才是
+# 真正需要保护的，它们远在这个长度以内。
+_MAX_FLOOR_PIECE = 32
+
+
 def _column_widths(rows, ncols):
     """按列内最长内容分配栏宽，并保证短内容不被折断。
 
@@ -483,50 +500,61 @@ def _column_widths(rows, ncols):
     一起按比例摊，就只剩十几个磅 —— 净可用宽度比一个数字还窄，
     于是 ``5404`` 被逐位竖排成一个数字一行。
 
-    所以分两步：先给每列算一个「整体不折行所需的宽度」当保底，
-    再把富余列的空间挪给不足列（守恒，总宽不变）。
-    另外权重还要封顶：职责那种整句话的列若按全句长度争宽，会把
-    模块路径挤到折行 —— 而长句本来就是要折行的。
+    所以分两步：先给每列算一个保底宽度，再把富余列的空间挪给不足列
+    （守恒，总宽不变）。
+
+    **保底按「最长的不可折断片段」算，不按整格内容算。** 这是后来修的：
+    按整格最长内容算时，「职责」这种整句话的中文列会拿到一个虚高的保底，
+    平白挤掉旁边那列的空间；而它本来就是要折行的。改成只看半角串之后，
+    中文长句不再虚占，``prune_unused_imports.py`` 这类长标识符才有位置。
+    权重另有一道封顶：长句子不该按全句长度争宽。
     """
     FSIZE = 8.8
     PAD = 12.0 + CELL_RIGHT_SLACK   # 左右内边距 + 单元格右侧余量
     MIN_COL = 20.0      # 任何列的绝对下限
-    FLOOR_CAP = 64.0    # 保底最多吃这么多，防止长文本列把整张表挤干
+    # 保底最多吃半张版心：再长就该让它折行，不能一列把整张表挤干。
+    # 附录 B 的最长模块名（46 字符 ≈ 210pt）正好卡在这条线以内，能整行放下。
+    FLOOR_CAP = CONTENT_W * 0.5
     WT_CAP = 200.0      # 权重上限：长句子本来就要折行，不该按全句长度争宽
 
     weights, floors = [], []
     for c in range(ncols):
         longest = 0.0
+        widest = 0.0                 # 该列最长的「不可折断片段」
         for row in rows:
             if c < len(row):
                 # 去掉行内标记再量：`` ` `` / ``*`` 不占版面
                 clean = re.sub(r"[`*]", "", str(row[c]))
                 longest = max(longest,
                               pdfmetrics.stringWidth(clean, "BODY", FSIZE))
+                for piece in _UNBREAKABLE.findall(clean):
+                    if len(piece) > _MAX_FLOOR_PIECE:
+                        continue
+                    widest = max(widest,
+                                 pdfmetrics.stringWidth(piece, "BODY", FSIZE))
+        # 表头整串也参与保底：表头通常是两三个字，不会虚占宽度，
+        # 但它若掉到下限，「函数」就会被折成「函」「数」两行。
+        head = re.sub(r"[`*]", "", str(rows[0][c])) if c < len(rows[0]) else ""
+        widest = max(widest, pdfmetrics.stringWidth(head, "BODY_B", FSIZE))
         weights.append(min(max(18.0, longest), WT_CAP))
-        floors.append(min(max(MIN_COL, longest + PAD), FLOOR_CAP))
+        floors.append(min(max(MIN_COL, widest + PAD), FLOOR_CAP))
 
-    total = sum(weights)
-    widths = [CONTENT_W * w / total for w in weights]
+    # 分配：**先发保底，富余再按权重摊**。
+    #
+    # 早先写的是反过来的「先按权重摊，再把不足的补到保底」，那个写法有个死角：
+    # 一旦某列的保底本身就超过它的权重份额，它自己也在「等待补偿」的行列里，
+    # 「仍有富余可供让出」的列集合就被算空，整个补偿被跳过 —— 数字列于是
+    # 被压成竖排（5444 印成 5/4/4/4）。先发保底不存在这个死角。
+    used = sum(floors)
+    if used > CONTENT_W:
+        # 保底总和就超了版心（列多 + 有超长串），只能等比压缩，
+        # 让长列去折行 —— 没有更好的办法了。
+        k = CONTENT_W / used
+        return [f * k for f in floors]
 
-    # 再平衡：不足保底的列补到保底，缺口由「仍在保底之上」的列按富余量分摊。
-    for _ in range(4):
-        short = [i for i in range(ncols) if widths[i] < floors[i] - 0.5]
-        if not short:
-            break
-        rich = [i for i in range(ncols) if widths[i] > floors[i] + 0.5]
-        spare = sum(widths[i] - floors[i] for i in rich)
-        if spare <= 1.0:
-            break                     # 实在腾不出空间了，只能让长列去折行
-        deficit = sum(floors[i] - widths[i] for i in short)
-        for i in short:
-            widths[i] = floors[i]
-        for i in rich:
-            widths[i] -= deficit * (widths[i] - floors[i]) / spare
-
-    # 守恒式再平衡理论上不改变总和，这里只是兜底，防浮点漂移撑出版心。
-    scale = CONTENT_W / sum(widths)
-    return [w * scale for w in widths]
+    rest = CONTENT_W - used
+    wsum = sum(weights) or 1.0
+    return [f + rest * w / wsum for f, w in zip(floors, weights)]
 
 
 class ChapterRule(Flowable):
@@ -679,14 +707,28 @@ class ManualDoc(BaseDocTemplate):
 
         c.setFillColor(colors.HexColor(Ink.headline))
         c.setFont("BODY_B", 31)
-        c.drawCentredString(PAGE_W / 2, PAGE_H - 300, "Python 语法手册")
+        c.drawCentredString(PAGE_W / 2, PAGE_H - 296, "Python 语法手册")
         c.setFont("BODY", 14)
         c.setFillColor(colors.HexColor(Ink.secondary))
-        c.drawCentredString(PAGE_W / 2, PAGE_H - 334, "—— 配 ServerTimeDemo 项目实例")
+        c.drawCentredString(PAGE_W / 2, PAGE_H - 330, "—— 配 ServerTimeDemo 项目实例")
+
+        # 分册时多出「册名 + 收录范围」两行，其下的分隔线与说明顺势下移；
+        # 合订本（meta 里没有 volume）保持原来的一整套位置不动。
+        volume = self.meta.get("volume")
+        rule_y = PAGE_H - 372
+        if volume:
+            c.setFont("BODY_B", 21)
+            c.setFillColor(colors.HexColor(Ink.accent))
+            c.drawCentredString(PAGE_W / 2, PAGE_H - 368, volume)
+            c.setFont("BODY", 10.5)
+            c.setFillColor(colors.HexColor(Ink.secondary))
+            c.drawCentredString(PAGE_W / 2, PAGE_H - 390,
+                                self.meta.get("volume_sub", ""))
+            rule_y = PAGE_H - 414
 
         c.setStrokeColor(colors.HexColor(Ink.rule))
         c.setLineWidth(0.7)
-        c.line(PAGE_W / 2 - 90, PAGE_H - 372, PAGE_W / 2 + 90, PAGE_H - 372)
+        c.line(PAGE_W / 2 - 90, rule_y, PAGE_W / 2 + 90, rule_y)
 
         c.setFillColor(colors.HexColor(Ink.text))
         c.setFont("BODY", 10.5)
@@ -695,21 +737,24 @@ class ManualDoc(BaseDocTemplate):
             f"{self.meta['stat_files']} 个 Python 文件 · {self.meta['stat_lines']} 行 · "
             f"{self.meta['stat_tables']} 张数据表",
         ]
-        y = PAGE_H - 404
+        y = rule_y - 30
         for line in lines:
             c.drawCentredString(PAGE_W / 2, y, line)
             y -= 22
 
         c.setFont("BODY", 9)
         c.setFillColor(colors.HexColor(Ink.muted))
-        y = 176
+        y = 196
         for line in [f"项目版本 {self.meta['app_version']}",
                      f"手册版本 {self.meta['manual_version']}",
                      f"生成日期 {self.meta['date']}"]:
             c.drawCentredString(PAGE_W / 2, y, line)
             y -= 18
         c.setFont("BODY", 8.4)
-        c.drawCentredString(PAGE_W / 2, 122,
+        # 「全三册 · 本册为上册」这类归属说明，只有分册时才画
+        if self.meta.get("volume_set"):
+            c.drawCentredString(PAGE_W / 2, 138, self.meta["volume_set"])
+        c.drawCentredString(PAGE_W / 2, 118,
                             "本手册的每一段示例代码都摘自本项目源码，未作伪写")
         c.restoreState()
 
@@ -747,7 +792,11 @@ class ManualDoc(BaseDocTemplate):
 # =============================================================================
 
 def build(blocks, out_path: Path, meta: dict):
-    """把块列表渲染成 PDF。"""
+    """把块列表渲染成 PDF，返回 ``(输出路径, 页数)``。
+
+    ``meta`` 里带上 ``volume`` / ``volume_sub`` / ``volume_set`` / ``volume_note``
+    就是分册封面（多两行册名），不带就是合订本封面 —— 两者用同一套模板。
+    """
     global STYLES
     register_fonts()
     STYLES = build_styles()
@@ -763,6 +812,9 @@ def build(blocks, out_path: Path, meta: dict):
     story.append(PageBreak())
     story.append(Paragraph("目录", STYLES["h1_plain"]))
     story.append(ChapterRule(CONTENT_W))
+    if meta.get("volume_note"):
+        story.append(Spacer(1, 8))
+        story.append(Paragraph(md(meta["volume_note"]), STYLES["volume_note"]))
     story.append(Spacer(1, 8))
     story.append(toc)
     story.append(PageBreak())
@@ -774,7 +826,7 @@ def build(blocks, out_path: Path, meta: dict):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc = ManualDoc(str(out_path), meta)
     doc.multiBuild(story)
-    return out_path
+    return out_path, doc.page
 
 
 def _render(block):
