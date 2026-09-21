@@ -10,7 +10,7 @@ a = Analysis(
          'tkinterdnd2'),
         ('app.ico', '.'),  # 窗口图标
     ],
-    hiddenimports=['log_setup', 'tools_db', 'console_page', 'system_toolbox_page', 'adb_page', 'tools_page', 'tkinterdnd2', 'tkcalendar'],
+    hiddenimports=['log_setup', 'tools_db', 'console_page', 'system_toolbox_page', 'adb_page', 'tools_page', 'app_version', 'markdown_view', 'tkinterdnd2', 'tkcalendar'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
