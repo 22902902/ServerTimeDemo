@@ -972,14 +972,16 @@ class TodoDB:
     # --------------------------------------------------------------------------
 
     def _items_order_by(self, scope: str) -> str:
-        """不同视图的排序：今天视图按时间点，其余按日期。"""
+        """不同视图的排序：今天视图按时间点，其余按日期，已完成一律沉底。"""
         head = (
+            # 已完成先分档沉底：开了「显示已完成」后它们是一整段，不会夹在
+            # 未完成项中间。同一档内再按日期 / 时间点排。
+            "CASE WHEN completed = 1 THEN 1 ELSE 0 END ASC, "
             "CASE WHEN due_date = '' THEN 1 ELSE 0 END ASC, due_date ASC, "
             "CASE WHEN due_time = '' THEN 1 ELSE 0 END ASC, due_time ASC, "
         )
         tail = (
-            "priority DESC, sort_order ASC, "
-            "CASE WHEN completed = 1 THEN 1 ELSE 0 END ASC, updated_at DESC, id DESC"
+            "priority DESC, sort_order ASC, updated_at DESC, id DESC"
         )
         return head + tail
 
@@ -995,7 +997,8 @@ class TodoDB:
             flagged   —— 旗标：打了旗标的未完成项
             completed —— 已完成
             list      —— 指定清单（由 list_id 决定）
-        include_completed 为 None 时按 scope 自动决定。
+        include_completed=True 时，除「已完成」视图外都连带显示已完成项
+        （界面上的「显示已完成」开关传的就是它）；缺省只看未完成。
         """
         today = today or day_str(date.today())
         sql = "SELECT * FROM todo_items WHERE 1=1"
@@ -1006,19 +1009,21 @@ class TodoDB:
             params.append(int(list_id))
 
         if scope == "today":
-            sql += " AND completed = 0 AND due_date <> '' AND due_date <= ?"
+            sql += " AND due_date <> '' AND due_date <= ?"
             params.append(today)
         elif scope == "scheduled":
-            sql += " AND completed = 0 AND due_date <> ''"
+            sql += " AND due_date <> ''"
         elif scope == "flagged":
-            sql += " AND completed = 0 AND flagged = 1"
+            sql += " AND flagged = 1"
         elif scope == "completed":
             sql += " AND completed = 1"
-        else:  # all / list
-            if include_completed:
-                pass
-            else:
-                sql += " AND completed = 0"
+        # else: all / list —— 这里不加条件，要不要连带由下面统一决定
+
+        # 「已完成」视图本身就是只看已完成；其余视图一律由 include_completed
+        # 决定连带与否。原先把 completed = 0 写死在各分支里，于是「今天 /
+        # 计划 / 旗标」这几个智能分组根本没法显示已完成项。
+        if scope != "completed" and not include_completed:
+            sql += " AND completed = 0"
 
         if keyword:
             like = f"%{keyword}%"

@@ -217,6 +217,10 @@ class TodoPage(ttk.Frame):
         self.current_list_id: Optional[int] = None  # 选中的真实清单
         self.selected_item_id: Optional[int] = None
         self.keyword = ""
+        # 「显示已完成」是持久偏好（落在 todo_state 里），不是一次性动作 ——
+        # 苹果那个 Show Completed 也是记着的。开着时已完成项沉在列表末尾、
+        # 带删除线，点圆圈可以恢复。
+        self.show_completed = self.db.get_state("show_completed", "0") == "1"
         self._groups: dict[str, tk.Frame] = {}      # 侧栏行缓存
         self._row_widgets: dict[int, tk.Frame] = {}
         self._loading = False                        # 载入编辑器时抑制写库
@@ -471,7 +475,10 @@ class TodoPage(ttk.Frame):
         self.list_area.pack(side="top", fill="both", expand=True)
 
     def _view_menu(self):
-        actions = [("按日期排序", lambda: self._noop("已按日期排序")),
+        mark = "✓ " if self.show_completed else ""
+        actions = [(f"{mark}显示已完成", self.toggle_show_completed),
+                   "---",
+                   ("按日期排序", lambda: self._noop("已按日期排序")),
                    ("按优先级排序", lambda: self._noop("已按优先级排序")),
                    "---"]
         if self.current_list_id is not None:
@@ -549,10 +556,14 @@ class TodoPage(ttk.Frame):
 
     def _fetch_current_items(self) -> list[TodoItem]:
         scope = self.current_scope
+        # 开着「显示已完成」就把已完成项一并取回来；「已完成」视图由数据层
+        # 自己认这个 scope，这个参数传什么都不影响它
         if self.current_list_id is not None:
             return self.db.fetch_items(scope="list", list_id=self.current_list_id,
-                                       keyword=self.keyword)
-        return self.db.fetch_items(scope=scope, keyword=self.keyword)
+                                       keyword=self.keyword,
+                                       include_completed=self.show_completed)
+        return self.db.fetch_items(scope=scope, keyword=self.keyword,
+                                   include_completed=self.show_completed)
 
     def _render_item_list(self):
         palette = self.palette
@@ -572,7 +583,15 @@ class TodoPage(ttk.Frame):
 
         items = self._fetch_current_items()
         self._subtask_summary_cache(items)
-        self.mid_count.configure(text=f"{len(items)}" if items else "")
+        open_items = [it for it in items if not it.completed]
+        done_items = [it for it in items if it.completed]
+        # 标题旁的数字跟左栏保持一致（都数未完成的）—— 「今天 4」和左栏的
+        # 「今天 4」对不上会让人怀疑哪边算错了。已完成那一档有自己的数字
+        # （见下面的小标题），不用并到标题上。「已完成」视图里全是已完成项，
+        # 那里就照旧数全部。
+        counter = len(items) if self.current_scope == "completed" else len(open_items)
+        self.mid_count.configure(text=f"{counter}" if counter else "")
+        list_map = {l.id: l for l in self.db.fetch_lists()}
 
         if not items:
             self._render_empty_list(area, title)
@@ -582,18 +601,24 @@ class TodoPage(ttk.Frame):
         grouped = self.current_list_id is None and self.current_scope != "completed"
         if grouped:
             buckets: dict[int, list[TodoItem]] = {}
-            for item in items:
+            for item in open_items:
                 buckets.setdefault(item.list_id, []).append(item)
-            list_map = {l.id: l for l in self.db.fetch_lists()}
             for list_id, bucket in buckets.items():
                 info = list_map.get(list_id)
                 self._make_group_header(area.inner, info, len(bucket))
                 for item in bucket:
                     self._make_item_row(area.inner, item, info)
         else:
-            info = todo_list
-            for item in items:
-                self._make_item_row(area.inner, item, info)
+            for item in open_items:
+                self._make_item_row(area.inner, item, todo_list)
+
+        # 已完成的单独收在末尾（苹果也是这么分段的）：划掉的条目夹在没做的
+        # 中间只会碍事。在「已完成」视图里这一整段就是全部内容，不必再挂标题。
+        if done_items:
+            if self.current_scope != "completed":
+                self._make_done_header(area.inner, len(done_items))
+            for item in done_items:
+                self._make_item_row(area.inner, item, list_map.get(item.list_id))
 
         area._on_inner_configure()
 
@@ -607,6 +632,25 @@ class TodoPage(ttk.Frame):
         tk.Label(box, text="在下方输入框里写一条，回车即可", bg=palette.surface,
                  fg=palette.text_muted,
                  font=self.typography.caption).pack(pady=(6, 0))
+
+    def _make_done_header(self, parent, count: int):
+        """「已完成」小节的标题：灰勾 + 文字 + 条数。
+
+        放在未完成项之后单独一段（苹果也是这么分的）。图标复用清单图标里
+        的 check，颜色取中性灰 —— 这一段不该比上头的待办还抢眼。
+        """
+        palette = self.palette
+        head = tk.Frame(parent, bg=palette.surface)
+        head.pack(fill="x", padx=16, pady=(18, 2))
+        tk.Label(head, image=todo_icons.tile_image(
+            self._tile_px, FALLBACK_COLOR, "check"),
+            bg=palette.surface).pack(side="left")
+        tk.Label(head, text="已完成", bg=palette.surface,
+                 fg=palette.text_secondary, font=self.typography.caption,
+                 anchor="w").pack(side="left", padx=(6, 0))
+        tk.Label(head, text=str(count), bg=palette.surface,
+                 fg=palette.text_muted,
+                 font=self.typography.caption).pack(side="right")
 
     def _make_group_header(self, parent, info: Optional[TodoList], count: int):
         palette = self.palette
@@ -689,8 +733,8 @@ class TodoPage(ttk.Frame):
         for widget in (row, check_holder, check, text_col, title, right):
             widget.bind("<Enter>", lambda _e, r=row, i=item: self._hover_row(r, i, True))
             widget.bind("<Leave>", lambda _e, r=row, i=item: self._hover_row(r, i, False))
-        check.bind("<Button-1>", lambda _e, i=item.id: self.toggle_complete(i))
-        check_holder.bind("<Button-1>", lambda _e, i=item.id: self.toggle_complete(i))
+        check.bind("<Button-1>", lambda _e, i=item.id: self._on_check_click(i))
+        check_holder.bind("<Button-1>", lambda _e, i=item.id: self._on_check_click(i))
         for widget in (row, text_col, title):
             widget.bind("<Button-1>", lambda _e, i=item.id: self.select_item(i))
         row.bind("<Button-3>", lambda _e, i=item: self._item_context_menu(i))
@@ -710,6 +754,12 @@ class TodoPage(ttk.Frame):
         due = parse_day(item.due_date)
         if due is None:
             return "", palette.text_muted
+        if item.completed:
+            # 已完成的不再喊「逾期」—— 事都做完了，红色只会干扰
+            text = due.strftime("%m月%d日")
+            if item.due_time:
+                text += f" {item.due_time}"
+            return text, palette.text_muted
         today = date.today()
         delta = (due - today).days
         if delta < 0:
@@ -1047,6 +1097,46 @@ class TodoPage(ttk.Frame):
     def _subtask_summary_cache(self, items: list[TodoItem]):
         self._subtask_cache = self.db.subtask_summary([i.id for i in items])
 
+    def toggle_show_completed(self):
+        """切换「显示已完成」（苹果列表右上角的 Show Completed）。
+
+        状态写进 todo_state 记着 —— 它是「我想怎么看列表」的偏好，
+        不是一次性的视图动作。
+        """
+        self._flush_editor()
+        self.show_completed = not self.show_completed
+        self.db.set_state("show_completed", "1" if self.show_completed else "0")
+        self.refresh_all()
+        # 回执写在重画之后：_render_item_list() 会先把 helper 清空
+        if not self.show_completed:
+            self.mid_helper.configure(text="已隐藏已完成")
+            return
+        done_count = self.db.count_by_scope().get("completed", 0)
+        if done_count:
+            self.mid_helper.configure(
+                text=f"已显示 {done_count} 条已完成（沉在列表末尾，点圆圈可恢复）")
+        else:
+            self.mid_helper.configure(text="已显示已完成 · 目前还没有已完成的待办")
+
+    def _on_check_click(self, item_id: int):
+        """点勾选框：未完成 → 完成；已完成 → 恢复。
+
+        状态从库里现读，不用建行时捕获的 item —— 行控件在切选中态时会被
+        重新着色而不重建，捕获下来的 completed 有可能是旧值。
+        """
+        fresh = self.db.get_item(item_id)
+        if fresh is not None and fresh.completed:
+            self.uncomplete(item_id)
+        else:
+            self.toggle_complete(item_id)
+
+    def uncomplete(self, item_id: int):
+        """取消勾选，恢复成未完成（苹果点一下已完成项的圆圈就是这个效果）。"""
+        self._flush_editor()
+        self.db.set_completed(item_id, False)
+        self.refresh_all()
+        self.mid_helper.configure(text="已恢复为未完成 · 它回到了原来的日期位置")
+
     def toggle_complete(self, item_id: int):
         self._flush_editor()
         result = self.db.set_completed(item_id, True)
@@ -1055,10 +1145,17 @@ class TodoPage(ttk.Frame):
         # 写在前面等于白写（原先的「重复项已完成」就是这么被吞掉的）。
         # 单次项勾完就从当前视图消失、只剩左栏计数 +1，这句是唯一的回执。
         if result.get("action") == "spawn" and result.get("next_due"):
-            self.mid_helper.configure(
-                text=f"重复项已完成，下一次：{result['next_due']}")
+            text = f"重复项已完成，下一次：{result['next_due']}"
+            if self.show_completed:
+                text += "（这一次的已收在下方「已完成」）"
+            self.mid_helper.configure(text=text)
         elif result.get("action") == "done":
-            self.mid_helper.configure(text="已完成 · 可在左侧「已完成」里找到")
+            # 开着「显示已完成」时它不会消失，就别说「去左侧找」
+            if self.show_completed:
+                self.mid_helper.configure(
+                    text="已完成 · 已划掉，再点一次圆圈可以恢复")
+            else:
+                self.mid_helper.configure(text="已完成 · 可在左侧「已完成」里找到")
 
     def toggle_flag(self, item_id: int):
         self._flush_editor()

@@ -33,6 +33,7 @@ J. 视图切换   智能分组 ↔ 真实清单
 K. 菜单       8 个入口全部可走通，结构合法
 L. 资产       图标字典一一对应、图标盘按当前颜色渲染
 M. 完成态     勾上 + 标题划一道横线（含详情标题）；勾选后的回执不被重画吞掉
+N. 显示已完成 开关持久化 / 已完成沉底带划线 / 点圆圈恢复 / 逾期不再标红
 
 用法：
     python scripts/test_todo_ui.py
@@ -712,6 +713,172 @@ def test_assets() -> None:
           != todo_icons.checkbox(18, "#007AFF", True).tobytes())
 
 
+# ===========================================================================
+# N. 显示已完成
+# ===========================================================================
+def test_show_completed(page: TodoPage, db: TodoDB, data: dict) -> None:
+    section("[N] 显示已完成：开关 / 沉底 / 划掉 / 点圆圈恢复")
+    check("缺省是关的", page.show_completed is False, f"实际 {page.show_completed}")
+
+    # ⋯ 菜单里挂着这个开关，开着的时候带勾
+    recorded: list = []
+    original = page._show_menu
+    page._show_menu = lambda actions: recorded.append(actions)
+    try:
+        page._view_menu()
+        settle(page, 2)
+        page.toggle_show_completed()
+        settle(page)
+        page._view_menu()
+        settle(page, 2)
+    finally:
+        page._show_menu = original
+
+    def done_entry(actions):
+        return next((it for it in actions
+                     if isinstance(it, tuple) and it[0].endswith("显示已完成")), None)
+
+    check("⋯ 菜单里有「显示已完成」", done_entry(recorded[0]) is not None,
+          f"{recorded[0]}")
+    check("关着的时候不带勾", done_entry(recorded[0])[0] == "显示已完成",
+          repr(done_entry(recorded[0])[0]))
+    check("开着的时候带勾", done_entry(recorded[1])[0].startswith("✓"),
+          repr(done_entry(recorded[1])[0]))
+    check("开关的回调指向 toggle_show_completed",
+          done_entry(recorded[0])[1] == page.toggle_show_completed)
+    check("切换后内存状态为开", page.show_completed is True)
+    check("切换后写进了 todo_state", db.get_state("show_completed") == "1",
+          repr(db.get_state("show_completed")))
+    check("切换后有回执（没被重画吞掉）", page.mid_helper.cget("text") != "",
+          repr(page.mid_helper.cget("text")))
+
+    # 标题旁的数字要跟左栏一致：开着开关也不该把已完成的算进「今天 4」里
+    page._select_side("smart", "today")
+    settle(page)
+    check("标题旁的计数 = 同一分组未完成数（与左栏一致）",
+          page.mid_count.cget("text") == str(len(db.fetch_items(scope="today"))),
+          f"中栏 {page.mid_count.cget('text')!r} "
+          f"vs 未完成 {len(db.fetch_items(scope='today'))}")
+    page._select_side("smart", "completed")
+    settle(page)
+    check("「已完成」视图的计数数全部",
+          page.mid_count.cget("text")
+          == str(len(db.fetch_items(scope="completed"))),
+          f"{page.mid_count.cget('text')!r}")
+
+    # —— 中栏：已完成要出现、要沉底、要划线 ——
+    page._select_side("smart", "today")
+    settle(page)
+    expected = [it.id for it in db.fetch_items(
+        scope="today", include_completed=True)]
+    ids = list(page._row_widgets)
+    # 注意：智能分组视图是**按清单分组**渲染的，行顺序不等于数据层的平铺顺序，
+    # 所以这里只比集合；顺序另用「已完成沉底」与「已完成段内顺序」两条来钉。
+    check("中栏展示的条目与数据层一致", set(ids) == set(expected),
+          f"{sorted(ids)} != {sorted(expected)}")
+
+    done_ids = {it.id for it in db.fetch_items(scope="completed")}
+    shown_done = [i for i in ids if i in done_ids]
+    open_rows = [i for i in ids if i not in done_ids]
+    check("「今天」里出现了已完成项", bool(shown_done), f"行={ids}")
+    if shown_done and open_rows:
+        check("已完成的全部排在未完成之后",
+              ids.index(shown_done[0]) > ids.index(open_rows[-1]),
+              f"行={ids}")
+        # 已完成那一段是平铺渲染的，段内顺序应与数据层一致（也按日期升序）
+        expect_done = [it.id for it in
+                       db.fetch_items(scope="today", include_completed=True)
+                       if it.completed]
+        check("已完成段内顺序与数据层一致", shown_done == expect_done,
+              f"{shown_done} != {expect_done}")
+
+        # 「已完成」小标题要夹在两段之间
+        kids = list(page.list_area.inner.winfo_children())
+        row_of = {w: iid for iid, w in page._row_widgets.items()}
+        head_idx = next((i for i, w in enumerate(kids)
+                         if find_label(w, "已完成") is not None), None)
+        open_idx = [i for i, w in enumerate(kids)
+                    if w in row_of and row_of[w] in open_rows]
+        done_idx = [i for i, w in enumerate(kids)
+                    if w in row_of and row_of[w] in done_ids]
+        check("中栏里有「已完成」小标题", head_idx is not None)
+        check("小标题夹在未完成段与已完成段之间",
+              head_idx is not None and open_idx and done_idx
+              and max(open_idx) < head_idx < min(done_idx),
+              f"标题={head_idx} 未完成={open_idx} 已完成={done_idx}")
+
+    first_done = db.get_item(shown_done[0]) if shown_done else None
+    check("取到一条已完成项用于断言样式", first_done is not None)
+    if first_done is not None:
+        lbl = find_label(page._row_widgets.get(first_done.id), first_done.title)
+        check("已完成项标题带删除线", lbl is not None
+              and font_attr(lbl, "overstrike") == 1,
+              f"overstrike={font_attr(lbl, 'overstrike') if lbl else '-'}")
+        check("已完成项标题是灰字", lbl is not None
+              and lbl.cget("fg") == MAIN_PALETTE.text_muted,
+              lbl.cget("fg") if lbl else "-")
+
+    # —— 逾期的活做完了就不该再喊「逾期」 ——
+    od = data["overdue"]
+    od_row = page._row_widgets.get(od)
+    check("逾期未完成项标着「逾期」",
+          od_row is not None and "逾期" in text_of(od_row),
+          text_of(od_row) if od_row is not None else "没找到行")
+    db.set_completed(od, True)
+    page.refresh_all()
+    settle(page)
+    od_row = page._row_widgets.get(od)
+    check("做完了还在列表里（开关开着）", od_row is not None)
+    if od_row is not None:
+        check("做完了就不再喊「逾期」", "逾期" not in text_of(od_row),
+              text_of(od_row))
+
+    # —— 点圆圈恢复：已完成项再点一下要能撤回 ——
+    check("点之前是已完成", db.get_item(first_done.id).completed == 1)
+    page._on_check_click(first_done.id)
+    settle(page)
+    check("点圆圈后恢复成未完成", db.get_item(first_done.id).completed == 0,
+          f"completed={db.get_item(first_done.id).completed}")
+    check("恢复后有回执", "恢复" in page.mid_helper.cget("text"),
+          repr(page.mid_helper.cget("text")))
+    restored = page._row_widgets.get(first_done.id)
+    check("恢复后仍留在列表里", restored is not None, f"行={list(page._row_widgets)}")
+    if restored is not None:
+        lbl = find_label(restored, first_done.title)
+        check("恢复后标题不再带删除线", lbl is not None
+              and font_attr(lbl, "overstrike") == 0,
+              f"overstrike={font_attr(lbl, 'overstrike') if lbl else '-'}")
+
+    # —— 偏好要能被下个页面读回去 ——
+    other = TodoPage(page.master, db)
+    settle(page)
+    content = text_of(other)
+    check("新开的页面读回同一个偏好（开关仍是开）", other.show_completed is True,
+          f"实际 {other.show_completed}")
+    check("新开的页面内容没炸", "已完成" in content)
+    other.destroy()
+
+    # —— 关掉：已完成的要从列表里消失 ——
+    # done_ids 是在测试开头取的，中间「完成一条逾期项 / 恢复一条」已经改了它，
+    # 这里必须重新现算 —— 用陈旧的集合去断言只会得到假红
+    done_ids_now = {it.id for it in db.fetch_items(scope="completed")}
+    page.toggle_show_completed()
+    settle(page)
+    check("关掉后开关状态为关", page.show_completed is False)
+    check("关掉后写回 todo_state", db.get_state("show_completed") == "0",
+          repr(db.get_state("show_completed")))
+    check("关掉后有回执", "隐藏" in page.mid_helper.cget("text"),
+          repr(page.mid_helper.cget("text")))
+    left = list(page._row_widgets)
+    check("关掉后已完成的从列表消失",
+          all(i not in done_ids_now for i in left), f"行={left}")
+    check("关掉后行数 = 未完成数",
+          len(left) == len(db.fetch_items(scope="today")),
+          f"{len(left)} vs {len(db.fetch_items(scope='today'))}")
+    check("关掉后没有「已完成」小标题",
+          find_label(page.list_area.inner, "已完成") is None)
+
+
 def settle(root, n: int = 12) -> None:
     for _ in range(n):
         root.update_idletasks()
@@ -750,6 +917,7 @@ def main_test() -> None:
         test_scope_switch(page, db, data)
         test_menus(page, db, data)
         test_assets()
+        test_show_completed(page, db, data)
     finally:
         try:
             page._flush_editor()

@@ -22,6 +22,7 @@ C. 每日顺延      rollover（非重复移到今天 / 重复推进 / 幂等 / 
 D. 工作日弹窗    workday_notice（长假后第一个工作日弹、连续工作日不弹、同一天只弹一次）
 E. 勾选语义      set_completed（done·undone / 重复留快照并推进 / 子任务快照 / 到期收尾）
 F. 智能分组      count_by_scope / fetch_items 各视图 / open_count_by_list
+I. 显示已完成    include_completed 在四个视图都生效 / 已完成沉底 / 偏好持久化
 G. 增删改查      清单 / 待办 / 子任务 / 标签 / 手工维护日历
 H. 辅助函数      parse_day / day_str / add_months / add_years
 
@@ -463,6 +464,113 @@ def test_scopes() -> None:
 
 
 # ===========================================================================
+# I. 显示已完成
+# ===========================================================================
+def test_show_completed() -> None:
+    section("[I] 显示已完成（include_completed / 沉底排序 / 偏好持久化）")
+    db = fresh_db("showdone")
+    L = lists_by_name(db)
+    W, LI = L["工作"].id, L["生活"].id
+    TODAY = "2026-09-18"
+
+    db.add_item({"list_id": W, "title": "今天要交", "due_date": TODAY,
+                 "skip_holidays": 0})
+    done_today = db.add_item({"list_id": W, "title": "早上已经交掉的",
+                              "due_date": TODAY, "skip_holidays": 0})
+    db.add_item({"list_id": W, "title": "下周的", "due_date": "2026-09-25",
+                 "skip_holidays": 0})
+    db.add_item({"list_id": LI, "title": "打旗标的", "due_date": "2026-09-30",
+                 "skip_holidays": 0, "flagged": True})
+    # 已完成的也打了旗标：用来验证不靠「未完成」之外的第二个条件去过滤
+    done_old = db.add_item({"list_id": LI, "title": "上周就做完了",
+                            "due_date": "2026-09-09", "flagged": True,
+                            "skip_holidays": 0})
+    db.set_completed(done_today, True)
+    db.set_completed(done_old, True)
+
+    def titles(**kw):
+        return [it.title for it in db.fetch_items(today=TODAY, **kw)]
+
+    # —— 缺省：开关关着，四个视图都不该漏出已完成项 ——
+    check("缺省「今天」不含已完成",
+          titles(scope="today") == ["今天要交"], f"实际 {titles(scope='today')}")
+    check("缺省「计划」不含已完成",
+          titles(scope="scheduled") == ["今天要交", "下周的", "打旗标的"],
+          f"实际 {titles(scope='scheduled')}")
+    check("缺省「全部」不含已完成",
+          set(titles(scope="all")) == {"今天要交", "下周的", "打旗标的"},
+          f"实际 {titles(scope='all')}")
+    check("缺省「清单」不含已完成",
+          titles(scope="list", list_id=W) == ["今天要交", "下周的"],
+          f"实际 {titles(scope='list', list_id=W)}")
+
+    # —— 打开开关：智能分组也要能带上已完成项 ——
+    # （原先把 completed = 0 写死在 today/scheduled/flagged 三个分支里，
+    #   于是开关只在「全部 / 清单」两个视图生效，这是修掉的那个 bug。）
+    check("「今天」连带已完成",
+          titles(scope="today", include_completed=True)
+          == ["今天要交", "上周就做完了", "早上已经交掉的"],
+          f"实际 {titles(scope='today', include_completed=True)}")
+    check("「计划」连带已完成",
+          titles(scope="scheduled", include_completed=True)
+          == ["今天要交", "下周的", "打旗标的", "上周就做完了", "早上已经交掉的"],
+          f"实际 {titles(scope='scheduled', include_completed=True)}")
+    check("「旗标」连带已完成",
+          [t for t in titles(scope="flagged", include_completed=True)]
+          == ["打旗标的", "上周就做完了"],
+          f"实际 {titles(scope='flagged', include_completed=True)}")
+    check("「清单」连带已完成",
+          set(titles(scope="list", list_id=W, include_completed=True))
+          == {"今天要交", "早上已经交掉的", "下周的"},
+          f"实际 {titles(scope='list', list_id=W, include_completed=True)}")
+
+    # —— 排序：已完成一律沉底，同一档内仍按日期 ——
+    check("已完成的沉在最后（未完成在前、已完成垫底）",
+          titles(scope="all", include_completed=True)
+          == ["今天要交", "下周的", "打旗标的", "上周就做完了", "早上已经交掉的"],
+          f"实际 {titles(scope='all', include_completed=True)}")
+    check("沉底后未完成之间仍按日期升序",
+          titles(scope="all", include_completed=True)[:3]
+          == ["今天要交", "下周的", "打旗标的"],
+          f"实际 {titles(scope='all', include_completed=True)}")
+    check("已完成那一档内部也按日期升序",
+          titles(scope="all", include_completed=True)[-2:]
+          == ["上周就做完了", "早上已经交掉的"],
+          f"实际 {titles(scope='all', include_completed=True)}")
+
+    # —— 「已完成」视图本来就是只看已完成，开关不该影响它 ——
+    check("「已完成」视图不受开关影响（开着）",
+          set(titles(scope="completed", include_completed=True))
+          == {"早上已经交掉的", "上周就做完了"},
+          f"实际 {titles(scope='completed', include_completed=True)}")
+    check("「已完成」视图不受开关影响（关着）",
+          set(titles(scope="completed", include_completed=False))
+          == {"早上已经交掉的", "上周就做完了"},
+          f"实际 {titles(scope='completed', include_completed=False)}")
+
+    # —— 搜索与完成的组合：关键词要能搜到已完成项 ——
+    check("开着开关时关键词能搜到已完成项",
+          titles(scope="all", keyword="早上", include_completed=True)
+          == ["早上已经交掉的"],
+          f"实际 {titles(scope='all', keyword='早上', include_completed=True)}")
+
+    # —— 开关状态本身：存得进、读得出、缺省是关 ——
+    check("开关缺省是关", db.get_state("show_completed", "0") == "0",
+          repr(db.get_state("show_completed", "0")))
+    db.set_state("show_completed", "1")
+    check("开关写得进 todo_state", db.get_state("show_completed") == "1",
+          repr(db.get_state("show_completed")))
+    path = db.db_path
+    db.close()
+
+    # 重开一个连接读同一份库：偏好要还在（界面就是靠这个记住的）
+    again = TodoDB(path)
+    check("重开库后开关仍是开", again.get_state("show_completed") == "1",
+          repr(again.get_state("show_completed")))
+    again.close()
+
+
+# ===========================================================================
 # G. 增删改查
 # ===========================================================================
 def test_crud() -> None:
@@ -600,6 +708,7 @@ def main_test() -> None:
     test_workday_notice()
     test_complete()
     test_scopes()
+    test_show_completed()
     test_crud()
 
 
