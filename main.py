@@ -161,7 +161,7 @@ from dialog_form_style import apply_dialog_form_style, create_form_entry, create
 import app_version
 import markdown_view
 from todo_db import TodoDB  # 待办事项数据库（含法定节假日日历）
-from todo_page import TodoPage  # 待办 / 提醒事项页面
+from todo_page import TodoAlertDialog, TodoPage  # 待办 / 提醒事项页面
 
 
 # =============================================================================
@@ -359,6 +359,9 @@ ACCOUNT_IMAGE_DIR = BASE_DIR / "account_images"
 PROCESS_FLOW_IMAGE_DIR = BASE_DIR / "process_flow_images"  # 流程截图独立目录
 ACCOUNT_IMAGE_FILE_TYPES = [("图片文件", "*.png *.jpg *.jpeg *.webp *.bmp *.gif")]
 CHECK_INTERVAL_MS = 60 * 60 * 1000
+# 待办到点提醒的巡检间隔：30 秒。比主提醒的 1 小时密得多 —— 提醒是按分钟
+# 定时的，一小时才看一眼等于没有。一次巡检只是一条 SQL，开销可以忽略。
+TODO_TICK_MS = 30 * 1000
 BACKEND_FEATURE_ITEMS = [
     {
         "key": "api_demo",
@@ -3140,6 +3143,8 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         self.last_external_show_token = self.db.get_state("external_show_window_token", "")
         self.current_module = ""
         self.backend_windows: dict[str, tk.Toplevel] = {}
+        # 到点提醒窗：同时只留一个（新的一批会顶掉旧的）
+        self._todo_alert_win = None
         self.module_items = {
             "module_system_toolbox": {
                 "title": "系统工具箱",
@@ -4151,6 +4156,8 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         self.trigger_daily_tray_reminder(force=False)
         # 推迟到 2.5s：登录提示在 100ms 弹出，别让两个模态框打架
         self.after(2500, self.todo_daily_maintenance)
+        # 到点提醒的巡检：起一次就自己续期，程序开着就一直有效
+        self.after(3000, self.todo_alert_check)
 
     def poll_external_commands(self):
         token = self.db.get_state("external_show_window_token", "")
@@ -5330,6 +5337,88 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             self.todo_view.refresh()
         except Exception:
             logger.exception("待办页面刷新失败")
+
+    # ------------------------------------------------------------------
+    # 待办：到点提醒
+    # ------------------------------------------------------------------
+    def todo_alert_check(self):
+        """巡检一次「有没有提醒该响了」。
+
+        自己续期，所以只要程序在跑就一直有效 —— 窗口缩到托盘也一样
+        （mainloop 还活着），人不在电脑前也不会漏掉。任何一步炸掉都只记
+        日志、不打断循环：这类定时器一旦断了，就再也没有提醒了。
+        """
+        if getattr(self, "_exiting", False):
+            return
+        try:
+            self._run_todo_alerts()
+        except Exception:
+            logger.exception("待办到点提醒巡检失败")
+        finally:
+            self.after(TODO_TICK_MS, self.todo_alert_check)
+
+    def _run_todo_alerts(self):
+        result = self.todo_db.pending_alerts()
+        due = result["due"]
+        missed = result["missed"]
+        if not due and not missed:
+            return
+        # 先记账再弹窗：万一建窗途中出异常，也不至于 30 秒后又来一遍
+        self.todo_db.mark_alerted(result["moments"])
+
+        if missed:
+            # 早就过点的不弹窗，只在托盘汇总一句 —— 程序关了一整天再打开，
+            # 不该被二十个窗口糊一脸
+            names = "、".join(it.title for it in missed[:3])
+            tail = f" 等 {len(missed)} 条" if len(missed) > 3 else ""
+            self.tray.notify(APP_TITLE, f"有 {len(missed)} 条提醒已过时间：{names}{tail}")
+            self.log_status(f"待办：{len(missed)} 条提醒已过时间。")
+
+        if due:
+            self.show_todo_alert(due)
+
+    def show_todo_alert(self, items):
+        """弹出到点提醒窗；同时只留一个，新的一批顶掉旧的。"""
+        self._close_todo_alert()
+        try:
+            dialog = TodoAlertDialog(
+                self, items, db=self.todo_db,
+                on_changed=self._after_todo_alert,
+                on_open=self._open_todo_item,
+            )
+        except Exception:
+            logger.exception("待办提醒窗创建失败")
+            return
+        self._todo_alert_win = dialog
+        self.log_status(f"待办到点提醒：{len(items)} 条。")
+
+    def _close_todo_alert(self):
+        """关掉还挂着的提醒窗（开会错过的那一批不应一直压在最上层）。"""
+        dialog = getattr(self, "_todo_alert_win", None)
+        self._todo_alert_win = None
+        if dialog is None:
+            return
+        try:
+            if dialog.winfo_exists():
+                dialog.destroy()
+        except Exception:
+            pass
+
+    def _after_todo_alert(self):
+        """提醒窗里点过「完成」/「稍后提醒」之后刷新待办页。"""
+        try:
+            self.todo_view.refresh()
+        except Exception:
+            logger.exception("提醒处理后刷新待办页失败")
+
+    def _open_todo_item(self, item_id: int):
+        """点提醒窗里的某一条 → 抬起窗口、切到待办页、选中它。"""
+        self.show_window()
+        self.switch_module("module_life_todo")
+        try:
+            self.todo_view.select_item(item_id)
+        except Exception:
+            logger.exception("从提醒窗跳转待办失败")
 
     def exit_app(self):
         self.shutdown_manager.shutdown()

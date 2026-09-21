@@ -23,6 +23,8 @@ D. 工作日弹窗    workday_notice（长假后第一个工作日弹、连续�
 E. 勾选语义      set_completed（done·undone / 重复留快照并推进 / 子任务快照 / 到期收尾）
 F. 智能分组      count_by_scope / fetch_items 各视图 / open_count_by_list
 I. 显示已完成    include_completed 在四个视图都生效 / 已完成沉底 / 偏好持久化
+J. 到点提醒      alert_moment / pending_alerts（刚过点 vs 早已过点）/ 同一条不重复响 /
+                 改时间·顺延·勾选都会让提醒记录作废 / 稍后提醒 / 老库自动补列
 G. 增删改查      清单 / 待办 / 子任务 / 标签 / 手工维护日历
 H. 辅助函数      parse_day / day_str / add_months / add_years
 
@@ -31,9 +33,10 @@ H. 辅助函数      parse_day / day_str / add_months / add_years
 """
 
 import shutil
+import sqlite3
 import sys
 import tempfile
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,15 +48,20 @@ except Exception:
     pass
 
 from todo_db import (  # noqa: E402
+    ALERT_GRACE_MINUTES,
     HOLIDAY_SEED,
     LIST_COLORS,
     LIST_ICONS,
     SMART_LISTS,
+    SNOOZE_MINUTES,
     TodoDB,
     add_months,
     add_years,
+    alert_moment,
     day_str,
+    moment_str,
     parse_day,
+    parse_moment,
 )
 
 PASSED = 0
@@ -697,6 +705,179 @@ def test_helpers() -> None:
           len(LIST_ICONS) == 20 and len(set(LIST_ICONS)) == 20)
 
 
+def test_alerts() -> None:
+    section("[J] 到点提醒（时刻推算 / 该响不该响 / 稍后提醒 / 记录作废）")
+    TODAY = "2026-09-18"
+
+    # —— 纯函数 ——
+    check("parse_moment 常规", parse_moment("2026-09-18 14:30")
+          == datetime(2026, 9, 18, 14, 30))
+    # 不走 strptime 就是为了这个：'9:05' 这种非零填充小时在有些平台解析不出来
+    check("parse_moment 认单数字小时", parse_moment("2026-09-18 9:05")
+          == datetime(2026, 9, 18, 9, 5))
+    check("parse_moment 吃掉秒", parse_moment("2026-09-18 14:30:59")
+          == datetime(2026, 9, 18, 14, 30))
+    check("parse_moment 认 ISO 的 T", parse_moment("2026-09-18T14:30")
+          == datetime(2026, 9, 18, 14, 30))
+    check("parse_moment 只有日期 → None", parse_moment("2026-09-18") is None)
+    check("parse_moment 空 → None", parse_moment("") is None)
+    check("parse_moment 小时越界 → None", parse_moment("2026-09-18 25:00") is None)
+    check("parse_moment 分钟越界 → None", parse_moment("2026-09-18 10:99") is None)
+    check("moment_str 往返", parse_moment(moment_str(datetime(2026, 9, 18, 8, 5)))
+          == datetime(2026, 9, 18, 8, 5))
+    check("moment_str 补零", moment_str(datetime(2026, 9, 18, 8, 5))
+          == "2026-09-18 08:05")
+
+    db = fresh_db("alerts")
+    L = lists_by_name(db)
+    W, LI = L["工作"].id, L["生活"].id
+    at = datetime(2026, 9, 18, 14, 0)
+
+    def add(**kw):
+        payload = {"list_id": W, "title": "T", "due_date": TODAY,
+                   "due_time": "14:00", "skip_holidays": 0}
+        payload.update(kw)
+        return db.add_item(payload)
+
+    a = add(title="到点的")
+    check("alert_moment 拼出时刻", alert_moment(db.get_item(a)) == at)
+    check("只设日期不参与提醒",
+          alert_moment(db.get_item(add(title="没时间", due_time=""))) is None)
+    check("只设时间不参与提醒",
+          alert_moment(db.get_item(add(title="没日期", due_date=""))) is None)
+
+    # —— 该响 / 不该响 ——
+    r = db.pending_alerts(at)
+    check("刚过点进 due", [i.id for i in r["due"]] == [a],
+          f"实际 {[i.id for i in r['due']]}")
+    check("刚过点不带 missed", not r["missed"])
+    check("moments 记下时刻原文", r["moments"] == {a: "2026-09-18 14:00"})
+    check("差一分钟还不到点",
+          not db.pending_alerts(at - timedelta(minutes=1))["due"])
+    tomorrow = add(title="明天的", due_date="2026-09-19")
+    check("未来日期不参与提醒",
+          tomorrow not in db.pending_alerts(at)["moments"])
+
+    # —— 响过就不再响 ——
+    db.mark_alerted(r["moments"])
+    check("记账落库", db.get_item(a).alerted_for == "2026-09-18 14:00")
+    check("同一轮不再挑出来", not db.pending_alerts(at)["due"])
+    check("过一会儿也不重复", not db.pending_alerts(at + timedelta(minutes=5))["due"])
+
+    # —— 刚过点 vs 早已过点 ——
+    db.update_item(a, {"due_time": "09:00"})
+    check("改时间让提醒记录作废", db.get_item(a).alerted_for == "")
+    late = datetime(2026, 9, 18, 12, 0)          # 晚了 3 小时
+    check("超出宽限归 missed",
+          [i.id for i in db.pending_alerts(late)["missed"]] == [a])
+    check("超出宽限不进 due", not db.pending_alerts(late)["due"])
+    near = datetime(2026, 9, 18, 9, 30)          # 晚了 30 分钟，在宽限内
+    check("宽限之内仍弹窗",
+          [i.id for i in db.pending_alerts(near)["due"]] == [a]
+          and not db.pending_alerts(near)["missed"])
+    check("宽限是 60 分钟", ALERT_GRACE_MINUTES == 60)
+    check("正好卡在宽限边上仍算 due",
+          bool(db.pending_alerts(datetime(2026, 9, 18, 10, 0))["due"]))
+
+    # —— 稍后提醒 ——
+    nxt = db.snooze(a, SNOOZE_MINUTES, now=near)
+    check("snooze 返回时刻", nxt == "2026-09-18 09:40", nxt)
+    check("snooze 落库", db.get_item(a).snooze_until == "2026-09-18 09:40")
+    check("打盹时刻覆盖原定时点",
+          alert_moment(db.get_item(a)) == datetime(2026, 9, 18, 9, 40))
+    check("打盹未到不响",
+          not db.pending_alerts(datetime(2026, 9, 18, 9, 35))["due"])
+    woke = db.pending_alerts(datetime(2026, 9, 18, 9, 40))
+    check("打盹到点重新响", [i.id for i in woke["due"]] == [a],
+          f"实际 {[i.id for i in woke['due']]}")
+    db.mark_alerted(woke["moments"])
+    check("打盹响过再不响",
+          not db.pending_alerts(datetime(2026, 9, 18, 9, 41))["due"])
+    check("默认打盹 10 分钟", SNOOZE_MINUTES == 10)
+
+    # 逾期很久才按「稍后提醒」：必须从当刻起算，否则推后 10 分钟仍在过去，
+    # 下次巡检判成 missed，这条就再也弹不出来了
+    db.update_item(a, {"due_time": "09:00"})
+    evening = datetime(2026, 9, 18, 18, 0)
+    check("逾期后从当刻起算",
+          db.snooze(a, 10, now=evening) == "2026-09-18 18:10")
+    check("逾期后打盹到点能再响",
+          [i.id for i in db.pending_alerts(evening + timedelta(minutes=10))["due"]]
+          == [a])
+
+    # —— 勾选与提醒记录的联动 ——
+    db.set_completed(a, True)
+    check("已完成的提醒不再响",
+          not db.pending_alerts(datetime(2026, 9, 18, 18, 20))["due"])
+    db.set_completed(a, False)
+    check("取消完成清掉打盹", db.get_item(a).snooze_until == "")
+    check("取消完成后重新参与判定",
+          [i.id for i in db.pending_alerts(
+              datetime(2026, 9, 18, 18, 20))["missed"]] == [a])
+
+    # —— 顺延与重复推进都要清掉提醒记录 ——
+    moved = add(title="逾期两天", due_date="2026-09-16", skip_holidays=0)
+    db.mark_alerted({moved: "2026-09-16 14:00"})
+    db.rollover(today=TODAY)
+    # 不写死「等于 TODAY」：顺延的目标是「今天或今天之后的第一个工作日」，
+    # 恰好落在假期就会再往后挪一格 —— 那是正确行为，写死只会假红
+    check("顺延后日期确实变了", db.get_item(moved).due_date != "2026-09-16")
+    check("顺延让提醒记录作废", db.get_item(moved).alerted_for == "")
+
+    daily = add(title="每天的", due_time="09:00", repeat_rule="daily")
+    db.mark_alerted({daily: "2026-09-18 09:00"})
+    db.set_completed(daily, True, today=TODAY)
+    check("重复项勾完推进到下一周期", db.get_item(daily).due_date != TODAY)
+    check("重复项推进让提醒记录作废", db.get_item(daily).alerted_for == "")
+
+    # —— 快照与其它清单 ——
+    snap = add(title="快照", list_id=LI)
+    db.conn.execute("UPDATE todo_items SET completed = 1, is_repeat_copy = 1 "
+                    "WHERE id = ?", (snap,))
+    db.conn.commit()
+    check("已完成快照不参与提醒",
+          snap not in db.pending_alerts(at + timedelta(minutes=1))["moments"])
+
+    # —— 老库自动补列（SQLite 没有 ADD COLUMN IF NOT EXISTS）——
+    legacy_dir = Path(tempfile.mkdtemp(prefix="todo_legacy_"))
+    _TMP.append(legacy_dir)
+    legacy = legacy_dir / "old.db"
+    conn = sqlite3.connect(str(legacy))
+    conn.execute(
+        """CREATE TABLE todo_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, list_id INTEGER NOT NULL,
+            title TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
+            due_date TEXT NOT NULL DEFAULT '', due_time TEXT NOT NULL DEFAULT '',
+            repeat_rule TEXT NOT NULL DEFAULT 'none',
+            repeat_interval INTEGER NOT NULL DEFAULT 1,
+            repeat_unit TEXT NOT NULL DEFAULT 'week',
+            repeat_until TEXT NOT NULL DEFAULT '',
+            skip_holidays INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 0,
+            flagged INTEGER NOT NULL DEFAULT 0, tags TEXT NOT NULL DEFAULT '[]',
+            completed INTEGER NOT NULL DEFAULT 0, completed_at TEXT NOT NULL DEFAULT '',
+            is_repeat_copy INTEGER NOT NULL DEFAULT 0,
+            rollover_count INTEGER NOT NULL DEFAULT 0,
+            original_due_date TEXT NOT NULL DEFAULT '',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    conn.execute("INSERT INTO todo_items (list_id, title, created_at, updated_at) "
+                 "VALUES (1, '老条目', '2020-01-01', '2020-01-01')")
+    conn.commit()
+    conn.close()
+
+    old_db = TodoDB(legacy)
+    columns = {r["name"] for r in old_db.conn.execute("PRAGMA table_info(todo_items)")}
+    check("老库补上了 alerted_for", "alerted_for" in columns)
+    check("老库补上了 snooze_until", "snooze_until" in columns)
+    check("老库的数据还在", old_db.conn.execute(
+        "SELECT COUNT(1) FROM todo_items").fetchone()[0] == 1)
+    check("老条目能读出来且提醒字段为空",
+          old_db.get_item(1).alerted_for == "" and old_db.get_item(1).snooze_until == "")
+    TodoDB(legacy)   # 列已存在，二次打开不该报错
+    check("二次打开老库不报错", True)
+
+
 def main_test() -> None:
     print("=" * 78)
     print("待办模块回归测试：数据层 + 节假日引擎")
@@ -709,6 +890,7 @@ def main_test() -> None:
     test_complete()
     test_scopes()
     test_show_completed()
+    test_alerts()
     test_crud()
 
 

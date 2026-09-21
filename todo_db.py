@@ -47,7 +47,7 @@ import calendar
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -80,6 +80,12 @@ LIST_ICONS: list[str] = [
     "music", "person", "phone", "sun",
 ]
 DEFAULT_LIST_ICON = "list"
+
+# 到点提醒：过了多久还算「刚过点」。超出这个宽限就只在托盘汇总一句，
+# 不逐个弹窗 —— 程序关了一整天再打开时不该蹦出二十个窗口。
+ALERT_GRACE_MINUTES = 60
+# 按一次「稍后提醒」推后的分钟数
+SNOOZE_MINUTES = 10
 
 # 重复规则 → (步长, 单位)。custom 走 repeat_interval / repeat_unit 两列。
 REPEAT_RULES: list[tuple[str, str]] = [
@@ -168,7 +174,6 @@ def _norm(value) -> str:
 
 def _now() -> str:
     """当前时间的 ISO 字符串（精确到秒）。"""
-    from datetime import datetime
     return datetime.now().isoformat(timespec="seconds")
 
 
@@ -186,6 +191,49 @@ def parse_day(value) -> Optional[date]:
 def day_str(value: date) -> str:
     """date → ``YYYY-MM-DD``。"""
     return value.isoformat()
+
+
+def parse_moment(value) -> Optional[datetime]:
+    """把 ``YYYY-MM-DD HH:MM`` 解析为 datetime；非法或空值返回 None。
+
+    容忍 ISO 的 ``T`` 分隔与秒。**不走 ``strptime``**：``%H`` 对
+    ``9:00`` 这种非零填充小时在不同平台表现不一致，手工拆更稳。
+    """
+    parts = _norm(value).replace("T", " ").split(" ")
+    if len(parts) < 2:
+        return None
+    day = parse_day(parts[0])
+    clock = parts[1].split(":")
+    if day is None or len(clock) < 2:
+        return None
+    try:
+        hour, minute = int(clock[0]), int(clock[1][:2])
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return datetime(day.year, day.month, day.day, hour, minute)
+
+
+def moment_str(value: datetime) -> str:
+    """datetime → ``YYYY-MM-DD HH:MM``（提醒精确到分钟，秒没有意义）。"""
+    return value.strftime("%Y-%m-%d %H:%M")
+
+
+def alert_moment(item: "TodoItem") -> Optional[datetime]:
+    """一条待办「下一次该响」的时刻。
+
+    * 没设日期或时间 → ``None``：这种根本不参与到点提醒
+    * 按过「稍后提醒」→ 用 ``snooze_until`` 覆盖原定时点
+    * 否则 → due_date 与 due_time 拼成的时刻
+    """
+    if not _norm(item.due_date) or not _norm(item.due_time):
+        return None
+    if _norm(item.snooze_until):
+        snoozed = parse_moment(item.snooze_until)
+        if snoozed is not None:
+            return snoozed
+    return parse_moment(f"{item.due_date} {item.due_time}")
 
 
 def add_months(base: date, months: int) -> date:
@@ -277,6 +325,9 @@ class TodoItem:
         rollover_count   - 被顺延过多少次
         original_due_date- 首次顺延前的原始日期（用于展示「已顺延 N 次」）
         sort_order       - 手动排序号
+        alerted_for      - 已经响过的那一个提醒时刻（``YYYY-MM-DD HH:MM``），
+                           保证同一条在同一时刻只响一次
+        snooze_until     - 「稍后提醒」推后的时刻；非空时覆盖原定时点
         created_at / updated_at
     """
     id: int = 0
@@ -299,6 +350,8 @@ class TodoItem:
     rollover_count: int = 0
     original_due_date: str = ""
     sort_order: int = 0
+    alerted_for: str = ""
+    snooze_until: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -353,6 +406,8 @@ class TodoItem:
             rollover_count=int(row["rollover_count"] or 0),
             original_due_date=_norm(row["original_due_date"]),
             sort_order=int(row["sort_order"] or 0),
+            alerted_for=_norm(row["alerted_for"]),
+            snooze_until=_norm(row["snooze_until"]),
             created_at=_norm(row["created_at"]),
             updated_at=_norm(row["updated_at"]),
         )
@@ -470,7 +525,12 @@ class TodoDB:
                 original_due_date TEXT    NOT NULL DEFAULT '',
                 sort_order        INTEGER NOT NULL DEFAULT 0,
                 created_at        TEXT    NOT NULL,
-                updated_at        TEXT    NOT NULL
+                updated_at        TEXT    NOT NULL,
+                /* 到点提醒：alerted_for 记「已经响过的那一个时刻」，
+                   与当前算出的提醒时刻一致就跳过，于是同一条不会反复响；
+                   而改了时间或按过「稍后提醒」后时刻变了，又能重新响。 */
+                alerted_for       TEXT    NOT NULL DEFAULT '',
+                snooze_until      TEXT    NOT NULL DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_todo_items_list
@@ -502,6 +562,29 @@ class TodoDB:
                 value TEXT NOT NULL DEFAULT ''
             );
         """)
+        self.conn.commit()
+        self._migrate_alert_columns()
+
+    def _migrate_alert_columns(self):
+        """给老库补上「到点提醒」的两列。
+
+        新装的程序建表时就带上它们，但**已经装过老版本**的库里
+        ``todo_items`` 没有这两列 —— SQLite 又没有
+        ``ADD COLUMN IF NOT EXISTS``，只能先查 ``PRAGMA table_info``
+        再按需补，否则用户得删库重来。
+        """
+        existing = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(todo_items)").fetchall()
+        }
+        for column, ddl in (
+            ("alerted_for", "ALTER TABLE todo_items ADD COLUMN "
+                            "alerted_for TEXT NOT NULL DEFAULT ''"),
+            ("snooze_until", "ALTER TABLE todo_items ADD COLUMN "
+                             "snooze_until TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in existing:
+                self.conn.execute(ddl)
         self.conn.commit()
 
     # --------------------------------------------------------------------------
@@ -795,7 +878,10 @@ class TodoDB:
                 if new_day and new_day != item.due_date:
                     advanced_items.append(item)
                     self.conn.execute(
-                        "UPDATE todo_items SET due_date = ?, updated_at = ? WHERE id = ?",
+                        "UPDATE todo_items "
+                        "SET due_date = ?, alerted_for = '', snooze_until = '', "
+                        "    updated_at = ? "
+                        "WHERE id = ?",
                         (new_day, now, item.id),
                     )
                 continue
@@ -808,6 +894,7 @@ class TodoDB:
                 "SET due_date = ?, rollover_count = rollover_count + 1, "
                 "    original_due_date = CASE WHEN original_due_date = '' "
                 "                             THEN ? ELSE original_due_date END, "
+                "    alerted_for = '', snooze_until = '', "
                 "    updated_at = ? "
                 "WHERE id = ?",
                 (target, item.due_date, now, item.id),
@@ -1120,6 +1207,11 @@ class TodoDB:
 
         if not sets:
             return
+        # 时间被改动 → 旧的提醒记录作废。否则「把 14:00 改成 16:00」会被
+        # alerted_for 里留着的 14:00 挡住，到点反而不会响。
+        if "due_date" in payload or "due_time" in payload:
+            sets.append("alerted_for = ''")
+            sets.append("snooze_until = ''")
         sets.append("updated_at = ?")
         params.extend([_now(), item_id])
         self.conn.execute(
@@ -1156,7 +1248,9 @@ class TodoDB:
 
         if not completed:
             self.conn.execute(
-                "UPDATE todo_items SET completed = 0, completed_at = '', updated_at = ? "
+                "UPDATE todo_items "
+                "SET completed = 0, completed_at = '', "
+                "    alerted_for = '', snooze_until = '', updated_at = ? "
                 "WHERE id = ?",
                 (now, item_id),
             )
@@ -1219,7 +1313,10 @@ class TodoDB:
             next_due = ""
         else:
             self.conn.execute(
-                "UPDATE todo_items SET due_date = ?, updated_at = ? WHERE id = ?",
+                "UPDATE todo_items "
+                "SET due_date = ?, alerted_for = '', snooze_until = '', "
+                "    updated_at = ? "
+                "WHERE id = ?",
                 (next_due, now, item_id),
             )
         self.conn.commit()
@@ -1237,6 +1334,84 @@ class TodoDB:
         )
         self.conn.commit()
         return value
+
+    # --------------------------------------------------------------------------
+    # 到点提醒
+    # --------------------------------------------------------------------------
+
+    def pending_alerts(self, now: Optional[datetime] = None,
+                       *, grace_minutes: int = ALERT_GRACE_MINUTES) -> dict:
+        """挑出「此刻该响」的条目。
+
+        只看三件事：有没有设日期与时间、这个时刻过没过、以及**这一轮
+        响过没有** —— ``alerted_for`` 里留着上一次响的时刻原文，跟当前
+        算出来的一致就跳过。于是同一条不会被反复打扰，而改了时间或按了
+        「稍后提醒」之后时刻变了，又立刻能重新响。
+
+        返回::
+
+            {"due": [...], "missed": [...], "moments": {item_id: "YYYY-MM-DD HH:MM"}}
+
+        ``due`` 是刚过点（在 ``grace_minutes`` 以内）的，应当立刻弹窗；
+        ``missed`` 是今天早就过点的，只在托盘汇总一句，不逐个弹窗轰炸。
+        """
+        now = now or datetime.now()
+        rows = self.conn.execute(
+            "SELECT * FROM todo_items "
+            "WHERE completed = 0 AND is_repeat_copy = 0 "
+            "  AND due_date <> '' AND due_time <> '' AND due_date <= ?",
+            (day_str(now.date()),),
+        ).fetchall()
+
+        due: list[TodoItem] = []
+        missed: list[TodoItem] = []
+        moments: dict[int, str] = {}
+        for row in rows:
+            item = TodoItem.from_row(row)
+            moment = alert_moment(item)
+            if moment is None or moment > now:
+                continue
+            text = moment_str(moment)
+            if item.alerted_for == text:
+                continue
+            moments[item.id] = text
+            if (now - moment) <= timedelta(minutes=max(0, grace_minutes)):
+                due.append(item)
+            else:
+                missed.append(item)
+        return {"due": due, "missed": missed, "moments": moments}
+
+    def mark_alerted(self, moments: dict[int, str]):
+        """把「这一轮已经响过」记回条目（键为条目 id，值为提醒时刻原文）。"""
+        if not moments:
+            return
+        now = _now()
+        self.conn.executemany(
+            "UPDATE todo_items SET alerted_for = ?, updated_at = ? WHERE id = ?",
+            [(text, now, item_id) for item_id, text in moments.items()],
+        )
+        self.conn.commit()
+
+    def snooze(self, item_id: int, minutes: int = SNOOZE_MINUTES,
+               now: Optional[datetime] = None) -> str:
+        """「稍后提醒」：把下一次该响的时刻推后，返回该时刻。
+
+        基准取 ``max(原定时点, 现在)`` —— 一条已经逾期两小时的提醒
+        若从原定时点起算，推后 10 分钟仍然在过去，下次巡检会被判成
+        「错过」而再也弹不出来。
+        """
+        item = self.get_item(item_id)
+        if item is None:
+            return ""
+        now = now or datetime.now()
+        base = alert_moment(item) or now
+        nxt = max(base, now) + timedelta(minutes=max(1, minutes))
+        self.conn.execute(
+            "UPDATE todo_items SET snooze_until = ?, updated_at = ? WHERE id = ?",
+            (moment_str(nxt), _now(), item_id),
+        )
+        self.conn.commit()
+        return moment_str(nxt)
 
     # --------------------------------------------------------------------------
     # 子任务 CRUD

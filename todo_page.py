@@ -41,9 +41,11 @@ from todo_db import (
     REPEAT_RULES,
     REPEAT_UNITS,
     SMART_LISTS,
+    SNOOZE_MINUTES,
     TodoDB,
     TodoItem,
     TodoList,
+    alert_moment,
     day_str,
     parse_day,
 )
@@ -77,6 +79,12 @@ WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周�
 # 清单查不到时（数据异常、扩展名被手工改过）统一退回这个中灰，
 # 避免在页面里到处散落颜色字面量
 FALLBACK_COLOR = "#8E8E93"
+
+# 到点提醒窗（贴屏幕右下角，像系统通知）
+ALERT_WIDTH = 340          # 固定宽度：通知要一眼看完，不做自适应
+ALERT_MIN_HEIGHT = 116
+ALERT_MARGIN = 24          # 距屏幕右边 / 下边的留白
+ALERT_BOTTOM_GAP = 68      # 给任务栏留的位置
 
 
 # =============================================================================
@@ -195,6 +203,152 @@ class ScrollArea(tk.Frame):
 # =============================================================================
 # 主页面
 # =============================================================================
+
+class TodoAlertDialog(tk.Toplevel):
+    """到点提醒窗（苹果那一声「叮」的桌面版）。
+
+    刻意**不像一个对话框**：贴在屏幕右下角、不抢键盘焦点、不 modal ——
+    提醒不该把正在打字的人拽走。能做的三件事：点某条跳过去看它、推
+    十分钟再来、或者一次全部完成；窗口标题栏的叉等于「知道了」。
+
+    同时到点的多条排在同一个窗口里：蹦五个窗口比一个窗口里列五条烦得多。
+    """
+
+    def __init__(self, master, items, *, db, palette=MAIN_PALETTE,
+                 typography=TYPOGRAPHY, snooze_minutes: int = SNOOZE_MINUTES,
+                 on_changed=None, on_open=None):
+        super().__init__(master)
+        self.db = db
+        self.palette = palette
+        self.typography = typography
+        self.snooze_minutes = snooze_minutes
+        self.on_changed = on_changed
+        self.on_open = on_open
+        self.items = list(items)
+        self._rows: dict[int, tk.Frame] = {}
+        self._icon_px = scaled_px(self, ICON_PX)
+
+        self.title("提醒事项")
+        self.configure(bg=palette.surface)
+        self.resizable(False, False)
+        try:
+            self.transient(master.winfo_toplevel() if master is not None else None)
+        except Exception:
+            pass
+        # 浮在最上面（提醒本来就该压过别的窗口），但**不抢键盘焦点**
+        try:
+            self.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        self._build()
+        self._place_bottom_right()
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+    # -- 构建 ----------------------------------------------------------
+    def _build(self):
+        palette = self.palette
+        head = tk.Frame(self, bg=palette.surface)
+        head.pack(fill="x", padx=16, pady=(14, 8))
+        # 头部就一行：**窗口标题栏已经写着「提醒事项」**，内容区再来一个
+        # 同名大标题等于同一句话说两遍（这条规矩在本项目里已经踩过一次）
+        tk.Label(head, image=todo_icons.glyph_image(
+            self._icon_px, "bell", palette.text_secondary),
+            bg=palette.surface).pack(side="left", padx=(0, 6))
+        tk.Label(head, text=self._subtitle_text(), bg=palette.surface,
+                 fg=palette.text_secondary,
+                 font=self.typography.caption).pack(side="left")
+
+        self._holder = tk.Frame(self, bg=palette.surface)
+        self._holder.pack(fill="x", padx=10)
+        for item in self.items:
+            self._add_row(item)
+
+        footer = tk.Frame(self, bg=palette.surface)
+        footer.pack(fill="x", padx=16, pady=(10, 14))
+        ttk.Button(footer, text=f"稍后提醒 {self.snooze_minutes} 分钟",
+                   style="Quiet.TButton",
+                   command=self.snooze_all).pack(side="left")
+        ttk.Button(footer, text="全部完成" if len(self.items) > 1 else "完成",
+                   style="Primary.TButton",
+                   command=self.complete_all).pack(side="right")
+
+    def _subtitle_text(self) -> str:
+        if len(self.items) > 1:
+            return f"提醒事项 · {len(self.items)} 条到时间了"
+        return "提醒事项 · 到时间了"
+
+    def _add_row(self, item: TodoItem):
+        palette = self.palette
+        row = tk.Frame(self._holder, bg=palette.surface)
+        row.pack(fill="x", pady=2)
+
+        info = self.db.get_list(item.list_id)
+        color = info.color if info else FALLBACK_COLOR
+        dot = tk.Canvas(row, width=10, height=10, bg=palette.surface,
+                        highlightthickness=0, bd=0)
+        # anchor="n"：点子要贴标题第一行。默认的垂直居中会让它在「标题 +
+        # 时刻」两行之间悬着，看着不知道该归属谁
+        dot.pack(side="left", anchor="n", padx=(6, 8), pady=(6, 0))
+        dot.create_oval(1, 1, 9, 9, fill=color, outline="")
+
+        body = tk.Frame(row, bg=palette.surface)
+        body.pack(side="left", fill="x", expand=True)
+        tk.Label(body, text=item.title or "(无标题)", bg=palette.surface,
+                 fg=palette.text_primary, font=FONT_ROW_TITLE,
+                 anchor="w", justify="left",
+                 wraplength=ALERT_WIDTH - 110).pack(anchor="w")
+        tk.Label(body, text=self._when_text(item), bg=palette.surface,
+                 fg=palette.text_muted, font=FONT_ROW_META,
+                 anchor="w").pack(anchor="w")
+
+        self._rows[item.id] = row
+        if callable(self.on_open):
+            for widget in (row, body, dot):
+                widget.configure(cursor="hand2")
+                widget.bind("<Button-1>", lambda _e, i=item: self._open(i))
+
+    def _when_text(self, item: TodoItem) -> str:
+        """提醒时刻只写到分钟 —— 条目的日期已经在它自己的列表里了。"""
+        moment = alert_moment(item)
+        return moment.strftime("%H:%M") if moment else ""
+
+    # -- 动作 ----------------------------------------------------------
+    def _open(self, item: TodoItem):
+        if callable(self.on_open):
+            self.on_open(item.id)
+        self.destroy()
+
+    def snooze_all(self):
+        for item in self.items:
+            self.db.snooze(item.id, self.snooze_minutes)
+        self._changed()
+
+    def complete_all(self):
+        for item in self.items:
+            self.db.set_completed(item.id, True)
+        self._changed()
+
+    def _changed(self):
+        if callable(self.on_changed):
+            self.on_changed()
+        self.destroy()
+
+    # -- 摆位 ----------------------------------------------------------
+    def _place_bottom_right(self):
+        """贴屏幕右下角（像系统通知），**不**居中到主窗口上。
+
+        主窗口可能已经缩进托盘了 —— 那种时候「居中」等于把提醒藏起来。
+        """
+        self.update_idletasks()
+        width = ALERT_WIDTH
+        height = max(ALERT_MIN_HEIGHT, self.winfo_reqheight())
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        x = max(0, screen_w - width - ALERT_MARGIN)
+        y = max(0, screen_h - height - ALERT_BOTTOM_GAP)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
 
 class TodoPage(ttk.Frame):
     """待办 / 提醒事项页面。

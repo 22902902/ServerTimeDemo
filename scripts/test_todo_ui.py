@@ -34,6 +34,8 @@ K. 菜单       8 个入口全部可走通，结构合法
 L. 资产       图标字典一一对应、图标盘按当前颜色渲染
 M. 完成态     勾上 + 标题划一道横线（含详情标题）；勾选后的回执不被重画吞掉
 N. 显示已完成 开关持久化 / 已完成沉底带划线 / 点圆圈恢复 / 逾期不再标红
+O. 到点提醒窗 贴屏幕右下角 / 头部不重复标题 / 「全部完成」「稍后提醒」真写库
+P. 主程序接线 到点弹窗 vs 早已过点只走托盘 / 30 秒巡检自续期 / 出错不断循环
 
 用法：
     python scripts/test_todo_ui.py
@@ -42,7 +44,8 @@ N. 显示已完成 开关持久化 / 已完成沉底带划线 / 点圆圈恢复 
 import sys
 import tempfile
 import traceback
-from datetime import date, timedelta
+import types
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,9 +63,12 @@ import todo_icons                                 # noqa: E402
 import todo_page                                  # noqa: E402
 from todo_db import LIST_ICONS, TodoDB, day_str    # noqa: E402
 from todo_page import (                           # noqa: E402
+    ALERT_MARGIN,
+    ALERT_WIDTH,
     MIDDLE_WIDTH,
     SIDEBAR_WIDTH,
     ScrollArea,
+    TodoAlertDialog,
     TodoPage,
 )
 from ui_theme import MAIN_PALETTE, THEME          # noqa: E402
@@ -879,6 +885,240 @@ def test_show_completed(page: TodoPage, db: TodoDB, data: dict) -> None:
           find_label(page.list_area.inner, "已完成") is None)
 
 
+def test_alert_dialog(page, db, data) -> None:
+    section('[O] 到点提醒窗（贴屏幕右下角 / 文案 / 完成与稍后真写库）')
+    today = data['today']
+    lists = {l.name: l for l in db.fetch_lists()}
+
+    def add(title, list_name='工作', hhmm='18:00'):
+        return db.add_item({'title': title, 'list_id': lists[list_name].id,
+                            'due_date': day_str(today), 'due_time': hhmm,
+                            'skip_holidays': 0})
+
+    first = add('到点提醒甲')
+    second = add('到点提醒乙', '生活')
+    fired: list = []
+
+    dlg = TodoAlertDialog(page, [db.get_item(first), db.get_item(second)], db=db,
+                          on_changed=lambda: fired.append(1))
+    settle(page)
+
+    check('提醒窗立起来了', dlg.winfo_exists() == 1 and dlg.winfo_ismapped() == 1)
+    check(f'宽度固定 {ALERT_WIDTH}px', dlg.winfo_width() == ALERT_WIDTH,
+          f'实际 {dlg.winfo_width()}')
+    check('贴屏幕右边',
+          dlg.winfo_x() + dlg.winfo_width() + ALERT_MARGIN == dlg.winfo_screenwidth(),
+          f'x={dlg.winfo_x()} w={dlg.winfo_width()} sw={dlg.winfo_screenwidth()}')
+    check('整窗落在屏幕内（不越过下边缘）',
+          dlg.winfo_y() + dlg.winfo_height() <= dlg.winfo_screenheight(),
+          f'y={dlg.winfo_y()} h={dlg.winfo_height()} sh={dlg.winfo_screenheight()}')
+    check('浮在最上层', bool(dlg.attributes('-topmost')))
+    # 提醒就该去打扰人，但**不能抢键盘焦点** —— 正在打字时被拽走最烦人
+    check('不抢占 grab（非模态）', dlg.grab_current() is None)
+
+    content = text_of(dlg)
+    check('窗口标题写着「提醒事项」', dlg.title() == '提醒事项', dlg.title())
+    check('内容区不再重复一遍同名大标题', content.count('提醒事项') == 1, content)
+    check('头部报条数', '2 条到时间了' in content, content)
+    check('两条都列出来了',
+          '到点提醒甲' in content and '到点提醒乙' in content, content)
+    check('带上提醒时刻', '18:00' in content, content)
+    check('两条时主按钮是「全部完成」', '全部完成' in content, content)
+    check('有「稍后提醒」且写明分钟数', '稍后提醒 10 分钟' in content, content)
+
+    dlg.complete_all()
+    settle(page)
+    check('「全部完成」真写库（甲）', db.get_item(first).completed == 1)
+    check('「全部完成」真写库（乙）', db.get_item(second).completed == 1)
+    check('处理完通知外面刷新', fired == [1], f'{fired}')
+    check('窗口自己关掉了', not dlg.winfo_exists())
+
+    third = add('只有一条', '提醒事项')
+    dlg2 = TodoAlertDialog(page, [db.get_item(third)], db=db)
+    settle(page)
+    content2 = text_of(dlg2)
+    check('单条时主按钮是「完成」而非「全部完成」',
+          '完成' in content2 and '全部完成' not in content2, content2)
+    check('单条时头部是「到时间了」', '到时间了' in content2, content2)
+
+    dlg2.snooze_all()
+    settle(page)
+    check('「稍后提醒」真写库', bool(db.get_item(third).snooze_until),
+          repr(db.get_item(third).snooze_until))
+    check('稍后提醒从原定时点起算（还没到点时不算当刻）',
+          db.get_item(third).snooze_until == f'{day_str(today)} 18:10',
+          db.get_item(third).snooze_until)
+    check('窗口自己关掉了', not dlg2.winfo_exists())
+
+    # 逾期很久才按「稍后提醒」：必须从当刻起算，否则推后 10 分钟仍在过去，
+    # 下一轮巡检会判成「错过」，这条就再也弹不出来了
+    overdue = add('早就过点的', hhmm='09:00')
+    db.snooze(overdue, 10)
+    later = db.get_item(overdue).snooze_until
+    check('逾期的从当刻起算（推后时刻落在未来）',
+          datetime.strptime(later, '%Y-%m-%d %H:%M') > datetime.now(), later)
+    check('逾期项打盹到点还能响',
+          overdue in [i.id for i in db.pending_alerts(
+              datetime.strptime(later, '%Y-%m-%d %H:%M'))['due']], later)
+
+
+class _FakeTray:
+    '''只记账、不真弹气泡：本机没有真实桌面，pystray 的 notify 弹不出来。'''
+
+    def __init__(self):
+        self.calls: list = []
+
+    def notify(self, title, message):
+        self.calls.append((title, message))
+
+
+def test_alert_wiring(page, db, data, root) -> None:
+    section('[P] 主程序接线（到点弹窗 / 早已过点只走托盘 / 巡检自续期）')
+    import main as app_module
+
+    App = app_module.ExpiryManagerApp
+    today = data['today']
+    lists = {l.name: l for l in db.fetch_lists()}
+    at = datetime.now()
+
+    def add(title, hhmm, list_name='工作'):
+        return db.add_item({'title': title, 'list_id': lists[list_name].id,
+                            'due_date': day_str(today), 'due_time': hhmm,
+                            'skip_holidays': 0})
+
+    def make_fake():
+        '''把待办那套方法绑到轻量对象上，绕开整棵主界面（它要登录框才起得来）。'''
+        fake = types.SimpleNamespace()
+        fake.todo_db = db
+        fake.tray = _FakeTray()
+        fake._exiting = False
+        fake.logs = []
+        fake.log_status = fake.logs.append
+        fake.shown = []
+        fake.show_todo_alert = lambda items: fake.shown.append([i.id for i in items])
+        fake.run = lambda: App._run_todo_alerts(fake)
+        return fake
+
+    # —— 未来的提醒：什么都不该发生 ——
+    fake = make_fake()
+    future = add('明年的会', '09:00')
+    db.update_item(future, {'due_date': '2027-12-31'})
+    fake.run()
+    check('未来的提醒不弹窗', not fake.shown)
+    check('未来的提醒不发托盘', not fake.tray.calls)
+    check('未来的提醒不写记账', db.get_item(future).alerted_for == '')
+
+    # —— 到点：交给弹窗，不另外叠加托盘 ——
+    due_now = add('刚过点的', at.strftime('%H:%M'))
+    fake = make_fake()
+    fake.run()
+    check('到点的那条交给弹窗', fake.shown == [[due_now]], f'{fake.shown}')
+    check('到点不再叠加托盘通知', not fake.tray.calls, f'{fake.tray.calls}')
+    check('已经记账（下一轮不会重复弹）', db.get_item(due_now).alerted_for != '')
+    fake.shown.clear()
+    fake.run()
+    check('下一轮真的不再挑出来', not fake.shown)
+
+    # —— 早已过点：只走托盘汇总 ——
+    missed = add('早上就过点了',
+                 (at - timedelta(hours=3)).strftime('%H:%M'), '生活')
+    fake = make_fake()
+    fake.run()
+    check('过点太久的不会弹窗', not fake.shown, f'{fake.shown}')
+    check('改走托盘汇总（一条）', len(fake.tray.calls) == 1, f'{fake.tray.calls}')
+    if fake.tray.calls:
+        _title, message = fake.tray.calls[0]
+        check('托盘文案带条数', '1 条' in message, message)
+        check('托盘文案带标题', '早上就过点了' in message, message)
+    check('过点的也记账了', db.get_item(missed).alerted_for != '')
+    fake.run()
+    check('过点的不每 30 秒重复报', len(fake.tray.calls) == 1, f'{fake.tray.calls}')
+
+    # —— 混合：一边弹窗一边汇总，互不串台 ——
+    db.update_item(due_now, {'due_time': at.strftime('%H:%M')})
+    add('另一条过点的', (at - timedelta(hours=2)).strftime('%H:%M'), '提醒事项')
+    fake = make_fake()
+    fake.run()
+    check('弹窗只拿到到点那条', fake.shown == [[due_now]], f'{fake.shown}')
+    check('托盘只拿到过点那条', len(fake.tray.calls) == 1, f'{fake.tray.calls}')
+    if fake.tray.calls:
+        check('托盘里不含到点那条', '刚过点的' not in fake.tray.calls[0][1],
+              fake.tray.calls[0][1])
+
+    # —— 巡检定时器：30 秒一次，自己续期 ——
+    ticks: list = []
+    ticker = types.SimpleNamespace()
+    ticker._exiting = False
+    ticker.ran = []
+    ticker._run_todo_alerts = lambda: ticker.ran.append(1)
+    ticker.after = lambda ms, fn: ticks.append((ms, fn))
+    ticker.todo_alert_check = App.todo_alert_check
+    App.todo_alert_check(ticker)
+    check('巡检真的跑了一轮', ticker.ran == [1])
+    check('巡检间隔是 30 秒',
+          bool(ticks) and ticks[0][0] == app_module.TODO_TICK_MS, f'{ticks[:1]}')
+    check('巡检回调指向自己（自续期）',
+          bool(ticks) and getattr(ticks[0][1], '__func__', ticks[0][1])
+          is App.todo_alert_check, f'{ticks[:1]}')
+    check('常量就是 30 秒', app_module.TODO_TICK_MS == 30 * 1000)
+    check('常量是 main 模块级（打包后读得到）',
+          hasattr(app_module, 'TODO_TICK_MS'))
+
+    # —— 出错不能把循环掐断：断了就再也没有提醒了 ——
+    ticks.clear()
+    broken = types.SimpleNamespace()
+    broken._exiting = False
+
+    def boom():
+        raise RuntimeError('模拟数据库炸了')
+
+    broken._run_todo_alerts = boom
+    broken.after = lambda ms, fn: ticks.append((ms, fn))
+    broken.todo_alert_check = App.todo_alert_check
+    print('        （下面那段 Traceback 是故意触发的：验证巡检出错后仍会续期）')
+    App.todo_alert_check(broken)
+    check('巡检出错后仍然续期', bool(ticks) and ticks[0][0] == app_module.TODO_TICK_MS,
+          f'{ticks}')
+
+    ticks.clear()
+    quitting = types.SimpleNamespace()
+    quitting._exiting = True
+    quitting._run_todo_alerts = lambda: ticks.append('不该跑')
+    quitting.after = lambda ms, fn: ticks.append(('after', ms))
+    App.todo_alert_check(quitting)
+    check('退出中不再巡检、也不再续期', not ticks, f'{ticks}')
+
+    # —— 真弹窗：show_todo_alert 同时只留一个 ——
+    root.todo_db = db
+    root.log_status = lambda _m: None
+    root._todo_alert_win = None
+    # tk.Tk 重写了 __getattr__（转发给底层解释器对象），没挂在实例上的方法取不到。
+    # 必须用 MethodType 绑定 —— 直接赋未绑定函数的话，实例 __dict__ 里的函数
+    # **不会**被描述符协议绑定（那只对类属性生效），调用时会少掉 self
+    root._close_todo_alert = types.MethodType(App._close_todo_alert, root)
+    root._after_todo_alert = types.MethodType(App._after_todo_alert, root)
+    root._open_todo_item = types.MethodType(App._open_todo_item, root)
+
+    shown = add('真窗验证', at.strftime('%H:%M'), '生活')
+    App.show_todo_alert(root, [db.get_item(shown)])
+    settle(root)
+    win = root._todo_alert_win
+    check('主程序把提醒窗挂上了', isinstance(win, TodoAlertDialog), f'{type(win)}')
+    check('提醒窗确实映射出来了', win is not None and win.winfo_ismapped() == 1)
+
+    App.show_todo_alert(root, [db.get_item(due_now)])
+    settle(root)
+    second_win = root._todo_alert_win
+    check('新一批顶掉旧的（同时只留一个）', second_win is not win)
+    check('旧的那个已经销毁', not win.winfo_exists())
+
+    App._close_todo_alert(root)
+    check('_close_todo_alert 关掉了它', not second_win.winfo_exists())
+    check('关掉后引用被清空', root._todo_alert_win is None)
+    App._close_todo_alert(root)
+    check('重复关不报错（幂等）', root._todo_alert_win is None)
+
+
 def settle(root, n: int = 12) -> None:
     for _ in range(n):
         root.update_idletasks()
@@ -918,6 +1158,8 @@ def main_test() -> None:
         test_menus(page, db, data)
         test_assets()
         test_show_completed(page, db, data)
+        test_alert_dialog(page, db, data)
+        test_alert_wiring(page, db, data, root)
     finally:
         try:
             page._flush_editor()
