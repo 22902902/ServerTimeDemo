@@ -397,6 +397,19 @@ def test_real_page():
     tmp_db = Path(tempfile.gettempdir()) / f"wb_tools_launcher_{os.getpid()}.db"
     shutil.copy2(ROOT / "expiry_manager.db", tmp_db)
 
+    # ★ 夹具是开发库，而「排列 / 图标大小」是用户随手改、会被存进库的设置：
+    #   不钉住它，下面的卡片几何 / 星标文案断言就跟着库漂移 —— 库里存着 folder
+    #   时文件夹格子只有 84px（断言比的是 CARD_MIN_WIDTH=104），星标在 folder
+    #   下也默认不带 ★/☆ 文案，一次假红三条。构造页面前先钉成默认值。
+    seed = sqlite3.connect(str(tmp_db))
+    seed.row_factory = sqlite3.Row      # init_all_tool_tables 内部按列名取值
+    try:
+        tools_db.init_all_tool_tables(seed)
+        tools_db.set_setting(seed, "view_mode", tp.DEFAULT_VIEW_MODE)
+        tools_db.set_setting(seed, "icon_size", "48")
+    finally:
+        seed.close()
+
     root = tk.Tk()
     root.geometry("1180x820")
     # 不 withdraw：几何断言要跑在真实映射的窗口上，否则 winfo_width() 全是 1，
@@ -1294,6 +1307,39 @@ def _assert_first_layout(root, tmp_db):
     root.update()
     check("内容没铺满时滚不动（不会滚进空白）",
           tuple(second.canvas.yview()) == (0.0, 1.0), str(tuple(second.canvas.yview())))
+
+    # ---- ★ 滚轮：装得下时不许把网格顶下去 ----
+    # 上面那条 yview 断言在这条 bug 上是**假绿**：scrollregion 比视口矮时，Tk 照样改
+    # 内部的 yOrigin 却不给夹回来，yview 一直报 (0,1)。要比的是**几何偏移**
+    # （首格相对画布的 y）—— 原 bug 下偏移会 12 -> 150 -> 374 一路窜下去，
+    # 用户看到的就是「滚轮往上转，内容整体往下窜」。
+    def _first_cell_offset():
+        kids = [w for w in second.grid_frame.winfo_children() if w.winfo_manager()]
+        return None if not kids else kids[0].winfo_rooty() - second.canvas.winfo_rooty()
+
+    check("前提成立：内容装得进画布", second._grid_fits_canvas())
+    second.canvas.yview_moveto(0)
+    root.update()
+    base_off = _first_cell_offset()
+    for _ in range(13):
+        second._on_mousewheel(types.SimpleNamespace(delta=120))
+        root.update()
+    after_off = _first_cell_offset()
+    check("装得下时滚轮上滚不把网格顶下去（偏移不变）",
+          base_off is not None and after_off == base_off,
+          f"偏移 {base_off} -> {after_off}")
+
+    # ---- ★ 重排（等价于切分类那一下）后不许继承漏出去的偏移 ----
+    second.canvas.yview_scroll(-10, "units")
+    root.update()
+    leaked = _first_cell_offset()
+    check("前提成立：裸 yview_scroll 确实会顶走网格（原 bug 复现）",
+          leaked != base_off, f"偏移 {base_off} -> {leaked}")
+    second._refresh_grid()            # 切分类走的就是这条路
+    root.update()
+    back = _first_cell_offset()
+    check("重排后视口自动归顶（不继承漏出的偏移）",
+          back == base_off, f"归顶 {back}（基准 {base_off}）")
 
     # ---- 分类横滚条只在真放不下时出现 ----
     check("分类装得下时不挂横滚条",

@@ -2069,6 +2069,18 @@ class ToolsPage(ttk.Frame):
         except tk.TclError:
             return False
 
+    def _grid_fits_canvas(self) -> bool:
+        """网格（含 padding）装得进画布高度吗。
+
+        ★ 装得下时**不能**调 yview_scroll：scrollregion 比视口矮的时候，Tk 照样
+        改画布内部的 yOrigin、却不给夹回来（yview 仍报 (0,1)，滚动条看不出异常），
+        表现就是「滚轮往上滚，内容反而整体往下窜」。见 _on_mousewheel。
+        """
+        try:
+            return self.grid_frame.winfo_reqheight() <= self.canvas.winfo_height()
+        except tk.TclError:
+            return True
+
     def _schedule_initial_layout(self):
         """首帧排版：尺寸一到就排，不走 140ms 防抖。
 
@@ -2096,7 +2108,12 @@ class ToolsPage(ttk.Frame):
         """
         try:
             self.canvas.update_idletasks()
-            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+            bbox = self.canvas.bbox("all")
+            self.canvas.configure(scrollregion=bbox)
+            # ★ 重排后内容可能已经装得下了：把上一轮滚出去 / 被顶下去的视口拉回顶部，
+            #   否则切到内容更少的分类时会继承旧偏移，一进页面内容就凭空下沉。
+            if bbox and (bbox[3] - bbox[1]) <= self.canvas.winfo_height():
+                self.canvas.yview_moveto(0)
         except tk.TclError:
             pass
 
@@ -2382,7 +2399,14 @@ class ToolsPage(ttk.Frame):
         return f"选中 {tool['name']}" if tool else ""
 
     def _set_cursor(self, tool_id, *, quiet: bool = False):
-        if tool_id is None or tool_id == self._cursor_tool_id:
+        if tool_id is None:
+            return
+        if tool_id == self._cursor_tool_id:
+            # ★ 光标没变，但格子可能刚被重建过（换分类 / 改关键词都会重建整片
+            #   网格）—— 这里补涂一次，否则强调边框会丢，表现为「搜出来的
+            #   第一条没有高亮」。_paint_card 自己会判控件还在不在。
+            self._paint_card(tool_id)
+            self._scroll_card_into_view(tool_id)
             return
         previous, self._cursor_tool_id = self._cursor_tool_id, tool_id
         for tid in (previous, tool_id):
@@ -3684,6 +3708,11 @@ class ToolsPage(ttk.Frame):
                 pass
 
     def _on_mousewheel(self, event):
+        # ★ 装得下就没得滚。硬滚会把内容顶出视野且夹不回来（见 _grid_fits_canvas），
+        #   所以这里直接归零，把视口钉在顶部。
+        if self._grid_fits_canvas():
+            self.canvas.yview_moveto(0)
+            return
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
 
