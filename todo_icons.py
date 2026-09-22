@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import math
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from app_icons import Pen, _photo
+from app_icons import Pen, _photo, _rgb
 
 UNITS = 16                 # 逻辑坐标空间边长（与 app_icons 一致）
 SS = 8                     # 超采样倍数
@@ -367,8 +367,38 @@ def _glyph(px: int, name: str, color: str):
                   lambda: row_glyph(px, name, color))
 
 
+# ======================================================================
+# 4. 角标（侧栏计数的那种圆角胶囊）
+# ======================================================================
+BADGE_SS = 8               # 超采样倍数（与 Pen 同规格，圆角才不起毛边）
+
+
+def badge_pill(width: int, height: int, fill: str) -> Image.Image:
+    """一枚圆角胶囊（侧栏计数角标的**底**，不上字）。
+
+    只画底、不画字，是因为数字得留在 ``tk.Label`` 的 ``text`` 里 ——
+    那样脚本与无障碍读到的还是「7」这个值。字用 ``compound="center"``
+    压在图上居中，圆角与抗锯齿交给 Pillow（tk.Canvas 画圆角会起毛边）。
+
+    宽 == 高时正是一个圆，所以单个数字的角标是圆的，两位数才拉成胶囊。
+    """
+    w = max(1, int(width))
+    h = max(1, int(height))
+    im = Image.new("RGBA", (w * BADGE_SS, h * BADGE_SS), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle([0, 0, w * BADGE_SS - 1, h * BADGE_SS - 1],
+                        radius=h * BADGE_SS / 2, fill=_rgb(fill))
+    return im.resize((w, h), Image.LANCZOS)
+
+
+def _badge(width: int, height: int, fill: str):
+    return _photo(f"todo:badge:{width}:{height}:{fill}",
+                  lambda: badge_pill(width, height, fill))
+
+
 # 便于调用方 import 后直接使用
 checkbox_image = _cb
 tile_image = _tile
 dot_image = _dot
 glyph_image = _glyph
+badge_image = _badge

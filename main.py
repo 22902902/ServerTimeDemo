@@ -5375,14 +5375,18 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             self.log_status(f"待办：{len(missed)} 条提醒已过时间。")
 
         if due:
-            self.show_todo_alert(due)
+            self.show_todo_alert(due, result.get("stages"))
 
-    def show_todo_alert(self, items):
-        """弹出到点提醒窗；同时只留一个，新的一批顶掉旧的。"""
+    def show_todo_alert(self, items, stages=None):
+        """弹出到点提醒窗；同时只留一个，新的一批顶掉旧的。
+
+        ``stages`` 是每一条响的是哪一档（提前 / 到点），窗口据此换头部
+        说法与每行说明；不传就一律当「到点」。
+        """
         self._close_todo_alert()
         try:
             dialog = TodoAlertDialog(
-                self, items, db=self.todo_db,
+                self, items, db=self.todo_db, stages=stages,
                 on_changed=self._after_todo_alert,
                 on_open=self._open_todo_item,
             )
@@ -5390,7 +5394,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             logger.exception("待办提醒窗创建失败")
             return
         self._todo_alert_win = dialog
-        self.log_status(f"待办到点提醒：{len(items)} 条。")
+        self.log_status(f"待办提醒：{len(items)} 条。")
 
     def _close_todo_alert(self):
         """关掉还挂着的提醒窗（开会错过的那一批不应一直压在最上层）。"""

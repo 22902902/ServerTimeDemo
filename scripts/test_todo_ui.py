@@ -37,6 +37,8 @@ N. 显示已完成 开关持久化 / 已完成沉底带划线 / 点圆圈恢复 
 O. 到点提醒窗 贴屏幕右下角 / 头部不重复标题 / 「全部完成」「稍后提醒」真写库
 P. 主程序接线 到点弹窗 vs 早已过点只走托盘 / 30 秒巡检自续期 / 出错不断循环
 Q. 拖动排序   清单行按住可重排：阈值 / 插入线 / 落库 / 拖出边界 / 不改选中
+R. v2 四件套  详情「提前」行与菜单 / 提醒窗两档说法 / iCloud 角标（0 收掉·逾期标红）
+              / 已完成段按清单二级分组 / 清单超屏时拖动自动滚动（贴边起滚·到头停手）
 
 用法：
     python scripts/test_todo_ui.py
@@ -62,7 +64,14 @@ from tkinter import ttk                           # noqa: E402
 
 import todo_icons                                 # noqa: E402
 import todo_page                                  # noqa: E402
-from todo_db import LIST_ICONS, TodoDB, day_str    # noqa: E402
+from todo_db import (                           # noqa: E402
+    ADVANCE_CHOICES,
+    ALERT_STAGE_EARLY,
+    LIST_ICONS,
+    TodoDB,
+    advance_label,
+    day_str,
+)
 from todo_page import (                           # noqa: E402
     ALERT_MARGIN,
     ALERT_WIDTH,
@@ -793,11 +802,19 @@ def test_show_completed(page: TodoPage, db: TodoDB, data: dict) -> None:
         check("已完成的全部排在未完成之后",
               ids.index(shown_done[0]) > ids.index(open_rows[-1]),
               f"行={ids}")
-        # 已完成那一段是平铺渲染的，段内顺序应与数据层一致（也按日期升序）
-        expect_done = [it.id for it in
-                       db.fetch_items(scope="today", include_completed=True)
-                       if it.completed]
-        check("已完成段内顺序与数据层一致", shown_done == expect_done,
+        # 已完成那一段**按清单分组**渲染（v2.0.0 起）：先按左栏清单顺序，
+        # 同一清单内再按数据层的顺序。所以不能直接跟数据层平铺顺序比，
+        # 要按「清单顺序 -> 段内顺序」摊开之后比。
+        flat_done = [it for it in
+                     db.fetch_items(scope="today", include_completed=True)
+                     if it.completed]
+        list_order = [l.id for l in db.fetch_lists()]
+        expect_done = [it.id for lid in list_order for it in flat_done
+                       if it.list_id == lid]
+        expect_done += [it.id for it in flat_done
+                        if it.list_id not in list_order]
+        check("已完成段按清单顺序、段内再按数据层顺序",
+              shown_done == expect_done,
               f"{shown_done} != {expect_done}")
 
         # 「已完成」小标题要夹在两段之间
@@ -997,7 +1014,13 @@ def test_alert_wiring(page, db, data, root) -> None:
         fake.logs = []
         fake.log_status = fake.logs.append
         fake.shown = []
-        fake.show_todo_alert = lambda items: fake.shown.append([i.id for i in items])
+        fake.shown_stages = []
+        # 真实签名是 show_todo_alert(items, stages=None)。档位（提前 / 到点）
+        # 必须一路带到弹窗，否则弹窗会把「快到时间了」说成「到时间了」
+        fake.show_todo_alert = lambda items, stages=None: (
+            fake.shown.append([i.id for i in items]),
+            fake.shown_stages.append(dict(stages or {})),
+        )
         fake.run = lambda: App._run_todo_alerts(fake)
         return fake
 
@@ -1015,11 +1038,25 @@ def test_alert_wiring(page, db, data, root) -> None:
     fake = make_fake()
     fake.run()
     check('到点的那条交给弹窗', fake.shown == [[due_now]], f'{fake.shown}')
+    check('档位也一起带进弹窗（这条是「到点」）',
+          fake.shown_stages == [{due_now: 'due'}], f'{fake.shown_stages}')
     check('到点不再叠加托盘通知', not fake.tray.calls, f'{fake.tray.calls}')
     check('已经记账（下一轮不会重复弹）', db.get_item(due_now).alerted_for != '')
     fake.shown.clear()
+    fake.shown_stages.clear()
     fake.run()
     check('下一轮真的不再挑出来', not fake.shown)
+
+    # —— 提前档：到点之前就该弹，而且弹窗拿到的是「提前」那一档 ——
+    soon_at = at + timedelta(minutes=20)
+    if soon_at.date() == at.date():      # 跨零点的日子跳过（due_date 会对不上）
+        soon = add('还有半小时', soon_at.strftime('%H:%M'))
+        db.update_item(soon, {'advance_minutes': 30})
+        fake = make_fake()
+        fake.run()
+        check('提前档在到点之前就弹窗', fake.shown == [[soon]], f'{fake.shown}')
+        check('弹窗拿到的是「提前」档',
+              fake.shown_stages == [{soon: 'early'}], f'{fake.shown_stages}')
 
     # —— 早已过点：只走托盘汇总 ——
     missed = add('早上就过点了',
@@ -1291,6 +1328,278 @@ def test_reorder_ui(page: TodoPage, db: TodoDB, root) -> None:
 
 
 # ===========================================================================
+# R. 提前提醒 / iCloud 角标 / 已完成分组 / 拖动自动滚动
+# ===========================================================================
+def test_page_v2_features(page: TodoPage, db: TodoDB, data: dict, root) -> None:
+    section('[R] 提前提醒 / iCloud 角标 / 已完成分组 / 拖动自动滚动')
+
+    # ---- 角标资产：胶囊底会跟着底色变 ----
+    flat = todo_icons.badge_pill(26, 17, '#FFFFFF').tobytes()
+    check('角标底图会跟着底色变（灰 vs 红）',
+          flat != todo_icons.badge_pill(26, 17, '#FF3B30').tobytes())
+    check('数字是单数时角标是正圆（宽 == 高）',
+          todo_icons.badge_pill(17, 17, '#FFFFFF').size == (17, 17),
+          f"{todo_icons.badge_pill(17, 17, '#FFFFFF').size}")
+    check('数字多一位时角标变长（有左右内边距）',
+          todo_icons.badge_pill(40, 17, '#FFFFFF').size == (40, 17))
+
+    # ---- 提醒窗：提前档与到点档说法不同 ----
+    early_id = data['long']
+    db.update_item(early_id, {'advance_minutes': 60})
+    early_item = db.get_item(early_id)
+    dlg = TodoAlertDialog(page, [early_item], db=db,
+                          stages={early_id: ALERT_STAGE_EARLY})
+    settle(root, 4)
+    try:
+        check('提前档的头部说「快到时间了」',
+              '快到时间了' in dlg._subtitle_text(), dlg._subtitle_text())
+        check('提前档那行多写一句「还有多久」',
+              '还有' in dlg._when_text(early_item), dlg._when_text(early_item))
+    finally:
+        dlg.destroy()
+
+    due_item = db.get_item(data['with_sub'])
+    dlg2 = TodoAlertDialog(page, [due_item], db=db)
+    settle(root, 4)
+    try:
+        check('缺省（到点档）说「到时间了」',
+              dlg2._subtitle_text().endswith('到时间了'), dlg2._subtitle_text())
+        check('到点档只写时刻、不写余量',
+              '还有' not in dlg2._when_text(due_item), dlg2._when_text(due_item))
+    finally:
+        dlg2.destroy()
+
+    # 两档混在一个窗口里：说清各有几条，不硬凑一句话
+    mixed = TodoAlertDialog(page, [early_item, due_item], db=db,
+                            stages={early_id: ALERT_STAGE_EARLY})
+    settle(root, 4)
+    try:
+        check('两档混着来时报条数',
+              '2 条提醒' in mixed._subtitle_text(), mixed._subtitle_text())
+    finally:
+        mixed.destroy()
+    db.update_item(early_id, {'advance_minutes': 0})
+    page.refresh_all()
+    settle(root)
+
+    # ---- 详情面板的「提前」一行 + 菜单 ----
+    page._select_side('smart', 'today')
+    settle(root)
+    page.select_item(data['long'])
+    settle(root)
+    check('详情面板列出了「提前」一行', '提前' in text_of(page.detail),
+          text_of(page.detail)[:300])
+
+    recorded: list = []
+    original_menu = page._show_menu
+    page._show_menu = lambda actions: recorded.append(actions)
+    try:
+        page._advance_menu()
+        settle(root, 2)
+    finally:
+        page._show_menu = original_menu
+
+    check('提前菜单可走通', len(recorded) == 1, f'n={len(recorded)}')
+    entry = recorded[0] if recorded else []
+    labels = [it[0] for it in entry if isinstance(it, tuple)]
+    check('提前菜单项数 = 可选档位数', len(labels) == len(ADVANCE_CHOICES),
+          f'{labels}')
+    # 当前那一档前面挂着「✓ 」，比之前先把勾去掉
+    bare = [l[2:] if l.startswith('✓ ') else l for l in labels]
+    check('菜单里有「无」也有「提前 1 天」',
+          '无' in bare and '提前 1 天' in bare, f'{labels}')
+    check('当前档位（无）带勾',
+          any(l.startswith('✓') and l.endswith('无') for l in labels), f'{labels}')
+    pick = next((it for it in entry if isinstance(it, tuple)
+                 and it[0].endswith('提前 30 分钟')), None)
+    check('菜单里有「提前 30 分钟」', pick is not None, f'{labels}')
+    if pick is not None:
+        pick[1]()
+        settle(root)
+        check('点了就真写库', db.get_item(early_id).advance_minutes == 30,
+              f"{db.get_item(early_id).advance_minutes}")
+        check('详情面板跟着改口',
+              advance_label(30) in text_of(page.detail),
+              text_of(page.detail)[:300])
+        db.update_item(early_id, {'advance_minutes': 0})
+        page.refresh_all()
+        settle(root)
+
+    # ---- 侧栏角标：0 收掉 / 有活才出 / 逾期才红 ----
+    probe = db.add_list('角标实验')
+    page.refresh_all()
+    settle(root)
+    row = page._list_rows.get(probe)
+    check('空清单的角标整个收掉',
+          row is not None and row['count'].cget('text') == ''
+          and not row['count'].cget('image'),
+          f"{row['count'].cget('text')!r} / img={row['count'].cget('image')!r}"
+          if row else '没找到这一行')
+    check('收掉时也记着「不红」', row is not None and row['badge_urgent'] is False)
+
+    db.add_item({'title': '下周再说', 'list_id': probe,
+                 'due_date': day_str(data['today'] + timedelta(days=6)),
+                 'skip_holidays': 0})
+    page.refresh_all()
+    settle(root)
+    row = page._list_rows.get(probe)
+    check('有未完成 -> 角标出现且写着 1', row['count'].cget('text') == '1',
+          f"{row['count'].cget('text')!r}")
+    check('数字压在圆角底上（compound=center）',
+          row['count'].cget('compound') == 'center',
+          str(row['count'].cget('compound')))
+    name = row['count'].cget('image')
+    width = int(row['count'].tk.call('image', 'width', name))
+    height = int(row['count'].tk.call('image', 'height', name))
+    check('角标高度就是设计高度', height == page._badge_h,
+          f'{height} vs {page._badge_h}')
+    check('角标是胶囊（宽 >= 高）', width >= height, f'{width}x{height}')
+    check('没逾期 -> 不标红', row['badge_urgent'] is False)
+    calm_img = name
+
+    db.add_item({'title': '早就该做了', 'list_id': probe,
+                 'due_date': day_str(data['today'] - timedelta(days=3)),
+                 'skip_holidays': 0})
+    page.refresh_all()
+    settle(root)
+    row = page._list_rows.get(probe)
+    check('角标数字跟着涨到 2', row['count'].cget('text') == '2',
+          f"{row['count'].cget('text')!r}")
+    check('清单里有逾期 -> 标红', row['badge_urgent'] is True)
+    check('标红换的是另一张底图', row['count'].cget('image') != calm_img,
+          f"{calm_img} -> {row['count'].cget('image')}")
+
+    page._select_side('smart', 'today')
+    settle(root)
+    expect_today = db.count_by_scope()['today']
+    got_today = page._smart_rows['today']['count'].cget('text')
+    check('「今天」的角标与数据层一致（0 收掉）',
+          got_today == (str(expect_today) if expect_today else ''),
+          f'{got_today!r} vs {expect_today}')
+
+    # ---- 已完成那一段也要按清单再分一级 ----
+    if not page.show_completed:
+        page.toggle_show_completed()
+        settle(root)
+    d1 = db.add_item({'title': '工作里做完的', 'list_id': data['work'].id,
+                      'due_date': day_str(data['today']), 'skip_holidays': 0})
+    d2 = db.add_item({'title': '生活里做完的', 'list_id': data['life'].id,
+                      'due_date': day_str(data['today']), 'skip_holidays': 0})
+    db.set_completed(d1, True)
+    db.set_completed(d2, True)
+    page._select_side('smart', 'today')
+    settle(root)
+
+    seen: list = []
+    original_group = page._make_done_group_header
+    original_head = page._make_done_header
+
+    def spy_group(parent, info, count):
+        seen.append((info.name if info else None, count))
+        return original_group(parent, info, count)
+
+    def spy_head(parent, count):
+        seen.append(('__已完成标题__', count))
+        return original_head(parent, count)
+
+    page._make_done_group_header = spy_group
+    page._make_done_header = spy_head
+    try:
+        page.refresh_all()
+        settle(root)
+    finally:
+        page._make_done_group_header = original_group
+        page._make_done_header = original_head
+
+    done_items = [it for it in db.fetch_items(scope='today', include_completed=True)
+                  if it.completed]
+    expect_groups = []
+    for todo_list in db.fetch_lists():
+        n = len([it for it in done_items if it.list_id == todo_list.id])
+        if n:
+            expect_groups.append((todo_list.name, n))
+    got_groups = [x for x in seen if x[0] != '__已完成标题__']
+    check('已完成段真的分了二级组', bool(got_groups), f'{seen}')
+    check('分组顺序与条数跟清单一致',
+          got_groups == expect_groups, f'{got_groups} != {expect_groups}')
+    check('至少两组（看得出确实分了组）', len(got_groups) >= 2,
+          f'{got_groups}')
+    check('二级组数 = 有已完成项的清单数',
+          [c for k, c in seen if k == '__已完成标题__'] == [len(done_items)],
+          f'{seen} / 总数 {len(done_items)}')
+
+    kids = list(page.list_area.inner.winfo_children())
+    head_idx = next((i for i, w in enumerate(kids)
+                     if find_label(w, '已完成') is not None), None)
+    check('中栏里真有「已完成」小标题', head_idx is not None)
+    dots: list = []
+    if head_idx is not None:
+        for w in kids[head_idx + 1:]:
+            dots.extend(descend(w, tk.Canvas))
+    check('二级组头各带一枚清单色小圆点', len(dots) >= len(got_groups),
+          f'圆点 {len(dots)} / 组 {len(got_groups)}')
+
+    # ---- 拖动自动滚动 ----
+    area = page._list_area
+    canvas = area.canvas
+    check('清单不多时滚动条收着', area.vsb.winfo_ismapped() == 0,
+          f"mapped={area.vsb.winfo_ismapped()}")
+
+    for i in range(34):
+        db.add_list(f'临时清单 {i:02d}')
+    page.refresh_all()
+    settle(root)
+    check('清单超出侧栏后滚动条出现', area.vsb.winfo_ismapped() == 1,
+          f"req={area.inner.winfo_reqheight()} canvas={canvas.winfo_height()}")
+
+    first_id = db.fetch_lists()[0].id
+    page._drag = {'list_id': first_id, 'moved': True, 'start_y': 0,
+                  'offset': 0, 'index': None, 'pointer_y': 0}
+
+    start = canvas.yview()[0]
+    page._drag['pointer_y'] = canvas.winfo_rooty() + canvas.winfo_height() + 8
+    page._sync_auto_scroll()
+    check('指针压住下边缘 -> 朝下滚', page._auto_scroll_dir == 1,
+          f"dir={page._auto_scroll_dir}")
+    check('自动滚的定时器排上了', page._auto_scroll_job is not None)
+    page._stop_auto_scroll_job()          # 摘掉真定时器，改成手动拍
+    for _ in range(8):
+        page._auto_scroll_tick()
+    check('自动滚真的把内容滚下去了', canvas.yview()[0] > start,
+          f'{start:.3f} -> {canvas.yview()[0]:.3f}')
+    check('拖动时插入线还挂在清单区里', page._drop_line is not None)
+
+    page._drag['pointer_y'] = canvas.winfo_rooty() + canvas.winfo_height() // 2
+    page._sync_auto_scroll()
+    check('指针回到中间 -> 停手',
+          page._auto_scroll_dir == 0 and page._auto_scroll_job is None,
+          f"dir={page._auto_scroll_dir} job={page._auto_scroll_job}")
+
+    canvas.yview_moveto(1.0)
+    page._drag['pointer_y'] = canvas.winfo_rooty() + canvas.winfo_height() + 8
+    page._sync_auto_scroll()
+    check('贴回下边缘重新起滚', page._auto_scroll_dir == 1,
+          f"dir={page._auto_scroll_dir}")
+    page._stop_auto_scroll_job()
+    page._auto_scroll_tick()
+    check('已经滚到头就停手（不再排下一拍）',
+          page._auto_scroll_dir == 0 and page._auto_scroll_job is None,
+          f"dir={page._auto_scroll_dir} job={page._auto_scroll_job}")
+
+    page._drag = None
+    page._stop_auto_scroll()
+    page.refresh_all()
+    settle(root)
+
+    for todo_list in [l for l in db.fetch_lists() if l.name.startswith('临时清单')]:
+        db.delete_list(todo_list.id)
+    page.refresh_all()
+    settle(root)
+    check('清单收回去之后滚动条又自动收掉', area.vsb.winfo_ismapped() == 0,
+          f"mapped={area.vsb.winfo_ismapped()}")
+
+
+# ===========================================================================
 def main_test() -> None:
     tmpdir = Path(tempfile.mkdtemp(prefix="todo_ui_"))
     db = TodoDB(tmpdir / "ui.db")
@@ -1326,6 +1635,7 @@ def main_test() -> None:
         test_alert_dialog(page, db, data)
         test_alert_wiring(page, db, data, root)
         test_reorder_ui(page, db, root)
+        test_page_v2_features(page, db, data, root)
     finally:
         try:
             page._flush_editor()

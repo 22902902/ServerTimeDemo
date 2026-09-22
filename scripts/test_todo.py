@@ -25,6 +25,8 @@ F. 智能分组      count_by_scope / fetch_items 各视图 / open_count_by_list
 I. 显示已完成    include_completed 在四个视图都生效 / 已完成沉底 / 偏好持久化
 J. 到点提醒      alert_moment / pending_alerts（刚过点 vs 早已过点）/ 同一条不重复响 /
                  改时间·顺延·勾选都会让提醒记录作废 / 稍后提醒 / 老库自动补列
+L. 提前提醒      alert_instants 两档排程（提前 / 到点）/ 只响最靠后那一档 / 两档各记各的账 /
+                 提前档打盹不吃到点 / 关机一天只响到点档 / 跨日提前 / 老库裸时刻按到点认
 K. 清单排序      reorder_lists（保序去重 / 缺漏接末尾 / 未知 id 忽略 / sort_order 连续）
 G. 增删改查      清单 / 待办 / 子任务 / 标签 / 手工维护日历
 H. 辅助函数      parse_day / day_str / add_months / add_years
@@ -49,18 +51,27 @@ except Exception:
     pass
 
 from todo_db import (  # noqa: E402
+    ADVANCE_CHOICES,
     ALERT_GRACE_MINUTES,
+    ALERT_STAGE_DUE,
+    ALERT_STAGE_EARLY,
     HOLIDAY_SEED,
     LIST_COLORS,
     LIST_ICONS,
+    MAX_ADVANCE_MINUTES,
     SMART_LISTS,
     SNOOZE_MINUTES,
     TodoDB,
     add_months,
     add_years,
+    advance_label,
+    alert_instants,
     alert_moment,
+    alert_stage_key,
     day_str,
+    due_moment,
     moment_str,
+    parse_alert_key,
     parse_day,
     parse_moment,
 )
@@ -469,6 +480,12 @@ def test_scopes() -> None:
     check("生活清单未完成 = 2", per.get(LI) == 2, f"实际 {per}")
     check("提醒事项未完成 = 1", per.get(R) == 1, f"实际 {per}")
     check("各清单之和 = 全部未完成", sum(per.values()) == 5, f"实际 {per}")
+    # 逾期数（侧栏角标上色用）：数据里有「已经逾期」这一条
+    overdue = db.count_by_scope(today=TODAY)["overdue"]
+    check("逾期计数 = 1（只有「已经逾期」那条）", overdue == 1, f"实际 {overdue}")
+    check("按清单的逾期数之和 = 总逾期",
+          sum(db.overdue_count_by_list(today=TODAY).values()) == overdue,
+          f"实际 {db.overdue_count_by_list(today=TODAY)}")
     db.close()
 
 
@@ -752,7 +769,12 @@ def test_alerts() -> None:
     check("刚过点进 due", [i.id for i in r["due"]] == [a],
           f"实际 {[i.id for i in r['due']]}")
     check("刚过点不带 missed", not r["missed"])
-    check("moments 记下时刻原文", r["moments"] == {a: "2026-09-18 14:00"})
+    # 记账串带上档位：只存裸时刻的话，提前那一档记完账，到点那一档
+    # 会被当成「已经响过」而永远不响
+    check("moments 是带档位的记账串", r["moments"] == {a: "due|2026-09-18 14:00"},
+          f"实际 {r['moments']}")
+    check("stages 标出这一档是「到点」", r["stages"] == {a: ALERT_STAGE_DUE},
+          f"实际 {r['stages']}")
     check("差一分钟还不到点",
           not db.pending_alerts(at - timedelta(minutes=1))["due"])
     tomorrow = add(title="明天的", due_date="2026-09-19")
@@ -761,7 +783,7 @@ def test_alerts() -> None:
 
     # —— 响过就不再响 ——
     db.mark_alerted(r["moments"])
-    check("记账落库", db.get_item(a).alerted_for == "2026-09-18 14:00")
+    check("记账落库（带档位）", db.get_item(a).alerted_for == "due|2026-09-18 14:00")
     check("同一轮不再挑出来", not db.pending_alerts(at)["due"])
     check("过一会儿也不重复", not db.pending_alerts(at + timedelta(minutes=5))["due"])
 
@@ -818,7 +840,7 @@ def test_alerts() -> None:
 
     # —— 顺延与重复推进都要清掉提醒记录 ——
     moved = add(title="逾期两天", due_date="2026-09-16", skip_holidays=0)
-    db.mark_alerted({moved: "2026-09-16 14:00"})
+    db.mark_alerted({moved: "due|2026-09-16 14:00"})
     db.rollover(today=TODAY)
     # 不写死「等于 TODAY」：顺延的目标是「今天或今天之后的第一个工作日」，
     # 恰好落在假期就会再往后挪一格 —— 那是正确行为，写死只会假红
@@ -826,7 +848,7 @@ def test_alerts() -> None:
     check("顺延让提醒记录作废", db.get_item(moved).alerted_for == "")
 
     daily = add(title="每天的", due_time="09:00", repeat_rule="daily")
-    db.mark_alerted({daily: "2026-09-18 09:00"})
+    db.mark_alerted({daily: "due|2026-09-18 09:00"})
     db.set_completed(daily, True, today=TODAY)
     check("重复项勾完推进到下一周期", db.get_item(daily).due_date != TODAY)
     check("重复项推进让提醒记录作废", db.get_item(daily).alerted_for == "")
@@ -871,12 +893,225 @@ def test_alerts() -> None:
     columns = {r["name"] for r in old_db.conn.execute("PRAGMA table_info(todo_items)")}
     check("老库补上了 alerted_for", "alerted_for" in columns)
     check("老库补上了 snooze_until", "snooze_until" in columns)
+    check("老库补上了 advance_minutes", "advance_minutes" in columns)
     check("老库的数据还在", old_db.conn.execute(
         "SELECT COUNT(1) FROM todo_items").fetchone()[0] == 1)
     check("老条目能读出来且提醒字段为空",
           old_db.get_item(1).alerted_for == "" and old_db.get_item(1).snooze_until == "")
+    check("老条目的提前量缺省为 0", old_db.get_item(1).advance_minutes == 0,
+          old_db.get_item(1).advance_minutes)
     TodoDB(legacy)   # 列已存在，二次打开不该报错
     check("二次打开老库不报错", True)
+
+
+# ===========================================================================
+# L. 提前提醒（提前 N 分钟 / 两档各记各的账）
+# ===========================================================================
+def test_advance_alerts() -> None:
+    section("[L] 提前提醒（两档排程 / 只响最靠后档 / 提前档打盹）")
+    TODAY = "2026-09-18"
+    at = datetime(2026, 9, 18, 14, 0)
+
+    # —— 纯函数：提前量的说法 ——
+    check("提前 0 分钟就是「无」", advance_label(0) == "无", advance_label(0))
+    check("提前 30 分钟的说法", advance_label(30) == "提前 30 分钟", advance_label(30))
+    check("提前 1440 分钟说成 1 天", advance_label(1440) == "提前 1 天",
+          advance_label(1440))
+    check("认不出的提前量退回「无」", advance_label(7) == "无", advance_label(7))
+    check("空值也算「无」", advance_label(None) == "无", advance_label(None))
+    check("选项第一项是不提前", ADVANCE_CHOICES[0] == (0, "无"),
+          f"实际 {ADVANCE_CHOICES[0]}")
+    check("最大提前量 = 1 天", MAX_ADVANCE_MINUTES == 1440, MAX_ADVANCE_MINUTES)
+    check("每个选项都是 (分钟, 说法) 且分钟数互不相同",
+          len({m for m, _ in ADVANCE_CHOICES}) == len(ADVANCE_CHOICES)
+          and all(isinstance(m, int) and isinstance(s, str)
+                  for m, s in ADVANCE_CHOICES),
+          f"实际 {ADVANCE_CHOICES}")
+
+    # —— 记账串 ——
+    check("记账串带档位", alert_stage_key(ALERT_STAGE_EARLY, at)
+          == "early|2026-09-18 14:00", alert_stage_key(ALERT_STAGE_EARLY, at))
+    check("拆开提前档", parse_alert_key("early|2026-09-18 14:00")
+          == (ALERT_STAGE_EARLY, "2026-09-18 14:00"))
+    check("拆开到点档", parse_alert_key("due|2026-09-18 14:00")
+          == (ALERT_STAGE_DUE, "2026-09-18 14:00"))
+    # 老库里存的是上一版的裸时刻（那时只有到点提醒这一档）。升级之后必须按
+    # 「到点档」认 —— 否则格式一变，每条历史记录都对不上，全库重响一遍
+    check("老库裸时刻按到点档认", parse_alert_key("2026-09-18 14:00")
+          == (ALERT_STAGE_DUE, "2026-09-18 14:00"))
+    check("空串拆不出档位", parse_alert_key("") is None)
+    check("None 拆不出档位", parse_alert_key(None) is None)
+
+    db = fresh_db("advance")
+    L = lists_by_name(db)
+    W = L["工作"].id
+
+    def add(**kw):
+        payload = {"list_id": W, "title": "T", "due_date": TODAY,
+                   "due_time": "14:00", "skip_holidays": 0}
+        payload.update(kw)
+        return db.add_item(payload)
+
+    # —— 排程 ——
+    plain = add(title="不提前")
+    soon = add(title="提前30分", advance_minutes=30)
+    check("不设提前量就只有到点一档",
+          alert_instants(db.get_item(plain)) == [(ALERT_STAGE_DUE, at)],
+          alert_instants(db.get_item(plain)))
+    check("设了提前量就是两档、按时间升序",
+          alert_instants(db.get_item(soon))
+          == [(ALERT_STAGE_EARLY, datetime(2026, 9, 18, 13, 30)),
+              (ALERT_STAGE_DUE, at)],
+          alert_instants(db.get_item(soon)))
+    check("提前量读回来还在", db.get_item(soon).advance_minutes == 30)
+    check("没设过的默认 0", db.get_item(plain).advance_minutes == 0)
+    check("没日期或时间就不排程",
+          alert_instants(db.get_item(add(title="没时间", due_time=""))) == [])
+    neg = add(title="负提前量", advance_minutes=-30)
+    check("提前量是负数按 0 算（不排提前档）",
+          alert_instants(db.get_item(neg)) == [(ALERT_STAGE_DUE, at)],
+          alert_instants(db.get_item(neg)))
+
+    # —— 该响哪一档 ——
+    r = db.pending_alerts(datetime(2026, 9, 18, 13, 30))
+    check("13:30 响的是提前档", [i.id for i in r["due"]] == [soon],
+          f"实际 {[i.id for i in r['due']]}")
+    check("提前档的记账串", r["moments"].get(soon) == "early|2026-09-18 13:30",
+          r["moments"].get(soon))
+    check("提前档标 stage", r["stages"].get(soon) == ALERT_STAGE_EARLY,
+          r["stages"].get(soon))
+    check("没提前量的那条还不到点", plain not in r["moments"])
+    db.mark_alerted(r["moments"])
+    check("提前档记账落库",
+          db.get_item(soon).alerted_for == "early|2026-09-18 13:30")
+
+    # 提前档响过之后，到点那一刻还要再响一次 —— 这正是「两档各记各的账」的
+    # 意义。只存一个时刻的话，14:00 一到就会被判成「已经响过」而永远不响
+    r2 = db.pending_alerts(at)
+    check("14:00 到点档照样响",
+          {i.id for i in r2["due"]} == {plain, soon, neg},
+          f"实际 {[i.id for i in r2['due']]}")
+    check("到点档 stage 是 due", r2["stages"].get(soon) == ALERT_STAGE_DUE)
+    check("到点档的记账串", r2["moments"].get(soon) == "due|2026-09-18 14:00",
+          r2["moments"].get(soon))
+    db.mark_alerted(r2["moments"])
+    check("两档都响过就安静了", not db.pending_alerts(at)["due"])
+    check("过一会儿也不重复",
+          not db.pending_alerts(at + timedelta(minutes=5))["due"])
+
+    # —— 关机一整天：只响最靠后那一档 ——
+    # 人已经错过「还有 30 分钟」了，这时候再说「快到时间了」没有意义，
+    # 直接说「到时间了」才对；而且也不该两档各弹一次
+    shut = add(title="关机一天", advance_minutes=30)
+    r3 = db.pending_alerts(datetime(2026, 9, 19, 9, 0))
+    check("关机一天只挑到点那一档",
+          r3["moments"].get(shut) == "due|2026-09-18 14:00",
+          r3["moments"].get(shut))
+    check("关机一天算 missed 不算 due",
+          shut in [i.id for i in r3["missed"]]
+          and shut not in [i.id for i in r3["due"]])
+
+    # —— 跨日提前：提前 1 天意味着「今天就得看上明天的条目」——
+    tomorrow = add(title="明天的", due_date="2026-09-19", due_time="09:00",
+                   advance_minutes=1440)
+    r4 = db.pending_alerts(datetime(2026, 9, 18, 9, 5))
+    check("提前一天在今天早上就命中",
+          r4["moments"].get(tomorrow) == "early|2026-09-18 09:00",
+          r4["moments"].get(tomorrow))
+    check("提前一天这条也进了 due",
+          [i.id for i in r4["due"]] == [tomorrow],
+          f"实际 {[i.id for i in r4['due']]}")
+    db.mark_alerted(r4["moments"])
+
+    # —— 提前档打盹：只推后提前档，不能把到点那一档吃掉 ——
+    nap = add(title="提前档打盹", advance_minutes=60)      # 提前 1 小时 → 13:00
+    r5 = db.pending_alerts(datetime(2026, 9, 18, 13, 0))
+    check("13:00 响提前档", r5["stages"].get(nap) == ALERT_STAGE_EARLY,
+          r5["stages"].get(nap))
+    db.mark_alerted(r5["moments"])
+    nxt = db.snooze(nap, 10, now=datetime(2026, 9, 18, 13, 0), early=True)
+    check("提前档打盹推后到 13:10", nxt == "2026-09-18 13:10", nxt)
+    check("打盹后重新排程：提前档变 13:10、到点档仍在",
+          alert_instants(db.get_item(nap))
+          == [(ALERT_STAGE_EARLY, datetime(2026, 9, 18, 13, 10)),
+              (ALERT_STAGE_DUE, at)],
+          alert_instants(db.get_item(nap)))
+    check("打盹未到不响",
+          db.pending_alerts(datetime(2026, 9, 18, 13, 5))["stages"].get(nap) is None)
+    r6 = db.pending_alerts(datetime(2026, 9, 18, 13, 10))
+    check("打盹到点仍是提前档",
+          r6["moments"].get(nap) == "early|2026-09-18 13:10",
+          r6["moments"].get(nap))
+    db.mark_alerted(r6["moments"])
+    r7 = db.pending_alerts(at)
+    check("提前档打盹没有吃掉到点档",
+          r7["moments"].get(nap) == "due|2026-09-18 14:00",
+          r7["moments"].get(nap))
+    db.mark_alerted(r7["moments"])
+
+    # —— 提前档打盹越过到点时刻：不记（让到点照常响）——
+    over = add(title="打盹越过到点", due_time="09:00", advance_minutes=5)
+    db.mark_alerted({over: "early|2026-09-18 08:55"})
+    check("提前档打盹会拖过到点就不记",
+          db.snooze(over, 10, now=datetime(2026, 9, 18, 8, 53), early=True) == "")
+    check("不记就还是没打盹的样子", db.get_item(over).snooze_until == "")
+    check("到点那一档照常排着",
+          alert_instants(db.get_item(over))[-1]
+          == (ALERT_STAGE_DUE, datetime(2026, 9, 18, 9, 0)),
+          alert_instants(db.get_item(over)))
+    check("到点时刻仍会响",
+          db.pending_alerts(datetime(2026, 9, 18, 9, 0))["moments"].get(over)
+          == "due|2026-09-18 09:00")
+
+    # —— 改提前量 ——
+    swap = add(title="改提前量", advance_minutes=30)
+    db.mark_alerted({swap: "early|2026-09-18 13:30"})
+    db.update_item(swap, {"advance_minutes": 60})
+    check("改提前量后排程换成新的提前时刻",
+          alert_instants(db.get_item(swap))
+          == [(ALERT_STAGE_EARLY, datetime(2026, 9, 18, 13, 0)),
+              (ALERT_STAGE_DUE, at)],
+          alert_instants(db.get_item(swap)))
+    # 旧那档的记账串里带着旧时刻，与新时刻天然不相等 —— 所以新时刻照样能响，
+    # 不必特意去清 alerted_for（清反而会把「同一时刻」也放出来，重复打扰）
+    check("改成提前 1 小时之后 13:00 这一档仍会响",
+          db.pending_alerts(datetime(2026, 9, 18, 13, 0))["moments"].get(swap)
+          == "early|2026-09-18 13:00")
+    # 反过来：把提前量收掉，就只剩到点一档
+    db.update_item(swap, {"advance_minutes": 0})
+    check("提前量收掉后只剩到点一档",
+          alert_instants(db.get_item(swap)) == [(ALERT_STAGE_DUE, at)],
+          alert_instants(db.get_item(swap)))
+    db.close()
+
+    # —— 侧栏角标：数字数未完成，「红不红」看逾期 ——
+    bdb = fresh_db("advance_badge")
+    BL = lists_by_name(bdb)
+    X, Y = BL["工作"].id, BL["生活"].id
+    done = bdb.add_item({"list_id": X, "title": "已经逾期", "due_date": "2026-09-10",
+                         "skip_holidays": 0})
+    bdb.add_item({"list_id": X, "title": "今天到期", "due_date": TODAY,
+                  "skip_holidays": 0})
+    bdb.add_item({"list_id": X, "title": "没日期的"})
+    bdb.add_item({"list_id": Y, "title": "别人的活", "due_date": "2026-09-30",
+                  "skip_holidays": 0})
+
+    open_cnt = bdb.open_count_by_list()
+    late_cnt = bdb.overdue_count_by_list(today=TODAY)
+    check("角标数字 = 未完成数", open_cnt.get(X) == 3, f"实际 {open_cnt}")
+    check("没有逾期的清单不出现在红名单里", Y not in late_cnt, f"实际 {late_cnt}")
+    check("有逾期的清单才标红", late_cnt.get(X) == 1, f"实际 {late_cnt}")
+    check("红名单只数未完成的逾期项",
+          sum(late_cnt.values()) == bdb.count_by_scope(today=TODAY)["overdue"],
+          f"实际 {late_cnt} / {bdb.count_by_scope(today=TODAY)}")
+    # 逾期那条勾完，红标记就该消失
+    bdb.set_completed(done, True)
+    check("逾期项做完就不再标红",
+          bdb.overdue_count_by_list(today=TODAY).get(X) is None,
+          f"实际 {bdb.overdue_count_by_list(today=TODAY)}")
+    check("角标数字跟着减一", bdb.open_count_by_list().get(X) == 2,
+          f"实际 {bdb.open_count_by_list()}")
+    bdb.close()
 
 
 # ===========================================================================
@@ -953,6 +1188,7 @@ def main_test() -> None:
     test_scopes()
     test_show_completed()
     test_alerts()
+    test_advance_alerts()
     test_crud()
     test_reorder()
 

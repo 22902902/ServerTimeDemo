@@ -28,13 +28,15 @@
 from __future__ import annotations
 
 import tkinter as tk
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from tkinter import font as tkfont, messagebox, simpledialog, ttk
 from typing import Optional
 
 import todo_icons
 from app_icons import scaled_px
 from todo_db import (
+    ADVANCE_CHOICES,
+    ALERT_STAGE_EARLY,
     LIST_COLORS,
     LIST_ICONS,
     PRIORITY_LABELS,
@@ -45,6 +47,7 @@ from todo_db import (
     TodoDB,
     TodoItem,
     TodoList,
+    advance_label,
     alert_moment,
     day_str,
     parse_day,
@@ -87,6 +90,11 @@ ALERT_MARGIN = 24          # 距屏幕右边 / 下边的留白
 DRAG_THRESHOLD = 5         # 按住后纵向挪这么多像素才算「拖」，否则当点击
 DROP_LINE_H = 2            # 拖动时插入指示线的高度
 DROP_LINE_PAD = 8          # 插入线在侧栏里的左右留白
+DRAG_EDGE = 22             # 拖到清单区上下边缘这么多像素内就开始自动滚
+DRAG_SCROLL_MS = 40        # 自动滚的节拍（毫秒）
+DRAG_SCROLL_STEP = 4       # 每拍滚多少像素
+BADGE_H = 17               # 侧栏计数角标的高度（逻辑像素）
+BADGE_PAD_X = 6            # 角标左右内边距，数字不贴边
 ALERT_BOTTOM_GAP = 68      # 给任务栏留的位置
 
 
@@ -161,16 +169,22 @@ def strike_font(base, widget):
 class ScrollArea(tk.Frame):
     """竖直滚动容器（Canvas + 内嵌 Frame）。
 
-    两条约束来自本项目踩过的坑：
+    三条约束来自本项目踩过的坑：
     1. **先 pack 滚动条、后 pack 画布** —— 反过来的话画布请求宽度会把滚动条
-       挤出可视区（实测两个都只剩 1px）。
+       挤出可视区（实测两个都只剩 1px）。要重新显出来时用
+       ``pack(..., before=canvas)`` 插回原位，不能直接 pack 到末尾。
     2. ``scrollregion`` 必须在内嵌帧尺寸变化时**立刻**更新，否则内容变矮之后
        滚动区还停在旧高度，会出现「明明没铺满却能往下滑一大片」。
+    3. ``autohide_scrollbar=True`` 时滚动条**按需**出现 —— 内容装得下就收掉，
+       省出那十几个像素给正文（侧栏只有 226px 宽，一根常驻的灰条很占地方）。
     """
 
-    def __init__(self, master, *, bg: str, inner_bg: Optional[str] = None):
+    def __init__(self, master, *, bg: str, inner_bg: Optional[str] = None,
+                 autohide_scrollbar: bool = False):
         super().__init__(master, bg=bg)
         self._bg = bg
+        self.autohide_scrollbar = autohide_scrollbar
+        self._sb_visible = True
 
         self.vsb = ttk.Scrollbar(self, orient="vertical")
         self.vsb.pack(side="right", fill="y")
@@ -193,6 +207,25 @@ class ScrollArea(tk.Frame):
     def _on_inner_configure(self, _event=None):
         self.canvas.update_idletasks()
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._sync_scrollbar()
+
+    def _sync_scrollbar(self):
+        """按需显隐滚动条（幂等）。
+
+        只在状态真的翻转时才动 pack —— 在 ``<Configure>`` 里反复
+        forget/pack 会来回触发布局，把尺寸自己抖起来。比较时留 4px
+        余量当滞回，避免卡在临界高度上反复横跳。
+        """
+        if not self.autohide_scrollbar:
+            return
+        need = self.inner.winfo_reqheight() > self.canvas.winfo_height() + 4
+        if need == self._sb_visible:
+            return
+        self._sb_visible = need
+        if need:
+            self.vsb.pack(side="right", fill="y", before=self.canvas)
+        else:
+            self.vsb.pack_forget()
 
     def _on_canvas_configure(self, event):
         self.canvas.itemconfigure(self._window, width=event.width)
@@ -212,6 +245,28 @@ class ScrollArea(tk.Frame):
         self.canvas.yview_scroll(delta, "units")
 
     # -- 对外 ---------------------------------------------------------------
+    def scroll_by(self, pixels: float) -> bool:
+        """按**像素**滚动，返回「是否真的动了」。
+
+        不用 ``yview_scroll(1, "units")``：canvas 的「一个单位」按
+        ``yscrollincrement`` 算，默认为 0 时是窗口高度的十分之一 ——
+        自动滚时一跳半行，快得抓不住。按像素走既能定速，也能据返回值
+        判断「已经滚到头」，从而停掉定时器。
+        """
+        region = self.canvas.bbox("all")
+        if not region:
+            return False
+        total = region[3] - region[1]
+        view = self.canvas.winfo_height()
+        if total <= view or view <= 1:
+            return False
+        first = self.canvas.yview()[0] * total
+        target = min(max(0.0, first + float(pixels)), float(total - view))
+        if abs(target - first) < 0.5:
+            return False
+        self.canvas.yview_moveto(target / total)
+        return True
+
     def clear(self):
         for child in self.inner.winfo_children():
             child.destroy()
@@ -232,10 +287,14 @@ class TodoAlertDialog(tk.Toplevel):
     十分钟再来、或者一次全部完成；窗口标题栏的叉等于「知道了」。
 
     同时到点的多条排在同一个窗口里：蹦五个窗口比一个窗口里列五条烦得多。
+
+    窗口本身不区分「提前」与「到点」两档 —— 区别体现在头部那句话和每条
+    下面那行说明上（``stages`` 由调用方从 ``pending_alerts`` 带进来）。
     """
 
     def __init__(self, master, items, *, db, palette=MAIN_PALETTE,
                  typography=TYPOGRAPHY, snooze_minutes: int = SNOOZE_MINUTES,
+                 stages: Optional[dict] = None,
                  on_changed=None, on_open=None):
         super().__init__(master)
         self.db = db
@@ -245,6 +304,9 @@ class TodoAlertDialog(tk.Toplevel):
         self.on_changed = on_changed
         self.on_open = on_open
         self.items = list(items)
+        # item_id -> "early" / "due"；缺省全当「到点」（也能被单独构造，
+        # 比如测试或将来别处复用这个窗口）
+        self.stages = dict(stages or {})
         self._rows: dict[int, tk.Frame] = {}
         self._icon_px = scaled_px(self, ICON_PX)
 
@@ -294,9 +356,21 @@ class TodoAlertDialog(tk.Toplevel):
                    command=self.complete_all).pack(side="right")
 
     def _subtitle_text(self) -> str:
-        if len(self.items) > 1:
-            return f"提醒事项 · {len(self.items)} 条到时间了"
-        return "提醒事项 · 到时间了"
+        """头部那句话：提前档说「快到了」，到点档说「到时间了」。
+
+        两档混在一个窗口里时（一条提前、另一条正好到点）说明张数，
+        不硬凑一句话 —— 一句话里塞两种语义只会让人先读完再理解。
+        """
+        total = len(self.items)
+        early = sum(1 for it in self.items
+                    if self.stages.get(it.id) == ALERT_STAGE_EARLY)
+        if early and early == total:
+            tail = "快到时间了" if total == 1 else f"{total} 条快到时间了"
+        elif early:
+            tail = f"{total} 条提醒（{early} 条提前，{total - early} 条到点）"
+        else:
+            tail = "到时间了" if total == 1 else f"{total} 条到时间了"
+        return f"提醒事项 · {tail}"
 
     def _add_row(self, item: TodoItem):
         palette = self.palette
@@ -329,9 +403,24 @@ class TodoAlertDialog(tk.Toplevel):
                 widget.bind("<Button-1>", lambda _e, i=item: self._open(i))
 
     def _when_text(self, item: TodoItem) -> str:
-        """提醒时刻只写到分钟 —— 条目的日期已经在它自己的列表里了。"""
+        """每行下面那行小字。
+
+        到点档只写时刻（条目的日期已经在它自己的列表里了）；提前档多写
+        一句「还有多久」—— 提前提醒的全部意义就是那个余量。
+        """
         moment = alert_moment(item)
-        return moment.strftime("%H:%M") if moment else ""
+        if moment is None:
+            return ""
+        clock = moment.strftime("%H:%M")
+        if self.stages.get(item.id) != ALERT_STAGE_EARLY:
+            return clock
+        minutes = max(0, int((moment - datetime.now()).total_seconds() // 60))
+        if minutes >= 60:
+            hours, rest = divmod(minutes, 60)
+            span = f"{hours} 小时" + (f" {rest} 分" if rest else "")
+        else:
+            span = f"{minutes} 分钟"
+        return f"{clock} · 还有 {span}"
 
     # -- 动作 ----------------------------------------------------------
     def _open(self, item: TodoItem):
@@ -341,7 +430,9 @@ class TodoAlertDialog(tk.Toplevel):
 
     def snooze_all(self):
         for item in self.items:
-            self.db.snooze(item.id, self.snooze_minutes)
+            # 提前档打盹只把提前那一档往后挪，当天的到点还得照响
+            early = self.stages.get(item.id) == ALERT_STAGE_EARLY
+            self.db.snooze(item.id, self.snooze_minutes, early=early)
         self._changed()
 
     def complete_all(self):
@@ -402,10 +493,17 @@ class TodoPage(ttk.Frame):
         self._drag: Optional[dict] = None             # 清单拖动排序的进行态
         self._drop_line: Optional[tk.Frame] = None    # 插入位置那条横线
         self._empty_state: Optional[tk.Frame] = None
+        self._auto_scroll_dir = 0                     # 拖动自动滚的方向 -1/0/1
+        self._auto_scroll_job = None                  # 自动滚的 after 句柄
 
         self._icon_px = scaled_px(self, ICON_PX)
         self._tile_px = scaled_px(self, TILE_PX)
         self._check_px = scaled_px(self, CHECK_PX)
+        self._badge_h = scaled_px(self, BADGE_H)
+        self._badge_pad = scaled_px(self, BADGE_PAD_X)
+        # 量角标宽度得用**真字体对象**：点数换算成像素随系统缩放而变，
+        # 自己按「一个数字几像素」估会在高分屏上撑破胶囊
+        self._badge_font = tkfont.Font(font=self.typography.badge, root=self)
 
         self._build()
         self.refresh_all()
@@ -481,8 +579,14 @@ class TodoPage(ttk.Frame):
         add_btn.bind("<Button-1>", lambda _e: self.new_list_dialog())
         self._add_list_btn = add_btn
 
-        self._list_holder = tk.Frame(wrap, bg=palette.sidebar_bg)
-        self._list_holder.pack(fill="x")
+        # 清单多了要能滚：这一段独占剩余高度，滚动条**按需**出现
+        # （只有三五条清单时不该在侧栏里杵一根灰条）。
+        # 拖着重排时贴到上下边缘会自动滚，见 _sync_auto_scroll。
+        area = ScrollArea(wrap, bg=palette.sidebar_bg, autohide_scrollbar=True)
+        area.pack(fill="both", expand=True, pady=(4, 0))
+        self._list_area = area
+        self._list_canvas = area.canvas
+        self._list_holder = area.inner
 
     def _make_side_row(self, parent, *, kind: str, key, label: str):
         """侧栏一行：图标 + 名称 + 右侧计数。kind 为 smart / list。"""
@@ -506,8 +610,10 @@ class TodoPage(ttk.Frame):
                         anchor="w")
         text.pack(side="left", fill="x", expand=True, pady=ROW_PAD_Y)
 
+        # 计数是个角标（圆角胶囊）：字重取 badge（比 caption 粗一档），
+        # 底图与深浅由 _set_badge 按「有没有逾期」决定
         count = tk.Label(row, text="", bg=palette.sidebar_bg,
-                         fg=palette.text_muted, font=self.typography.caption)
+                         fg=palette.text_muted, font=self.typography.badge)
         count.pack(side="right", padx=(4, 10))
 
         for widget in (row, accent, icon_holder, icon, text, count):
@@ -582,8 +688,13 @@ class TodoPage(ttk.Frame):
             widgets[name].configure(bg=bg)
         widgets["accent"].configure(bg=accent)
         widgets["text"].configure(fg=fg, font=font)
-        widgets["count"].configure(fg=(self.palette.text_secondary if state == "active"
-                                       else self.palette.text_muted))
+        # 角标里的数字颜色跟着「底」走：标红的角标反白，灰角标沿用浅灰
+        if widgets.get("badge_urgent"):
+            count_fg = self.palette.accent_text
+        else:
+            count_fg = (self.palette.text_secondary if state == "active"
+                        else self.palette.text_muted)
+        widgets["count"].configure(fg=count_fg)
         widgets["icon"].configure(image=self._side_icon(kind, key))
 
     def _side_icon(self, kind, key):
@@ -614,8 +725,10 @@ class TodoPage(ttk.Frame):
         # 记下鼠标按在该行内的偏移：换位看的是被拖行的**中心线**，
         # 不是鼠标点 —— 否则按住行的下缘时会提前一整行换位，不跟手
         offset = (event.y_root - widgets["row"].winfo_rooty()) if widgets else 0.0
+        self._stop_auto_scroll()
         self._drag = {"list_id": int(list_id), "start_y": event.y_root,
-                      "offset": offset, "moved": False, "index": None}
+                      "offset": offset, "moved": False, "index": None,
+                      "pointer_y": event.y_root}
 
     def _list_drag_motion(self, list_id, event):
         drag = self._drag
@@ -627,15 +740,86 @@ class TodoPage(ttk.Frame):
                 return
             drag["moved"] = True
             self._begin_drag_visual(drag["list_id"])
+        drag["pointer_y"] = event.y_root
+        self._refresh_drop_target()
+        self._sync_auto_scroll()
+
+    def _refresh_drop_target(self):
+        """按指针当前位置重算插入间隙并画线。
+
+        单独抽出来是因为**自动滚的时候也要重算** —— 内容一动，指针底下
+        压着的行就换了，不重算的话插入线会停在一个早已不对的位置上。
+        """
+        drag = self._drag
+        if not drag or not drag.get("moved"):
+            return
         row = self._list_rows.get(drag["list_id"], {}).get("row")
         height = row.winfo_height() if row is not None else 0
-        drag["index"] = self._drop_index(
-            event.y_root - drag["offset"] + height / 2)
+        pointer = drag.get("pointer_y", drag["start_y"])
+        drag["index"] = self._drop_index(pointer - drag["offset"] + height / 2)
         self._place_drop_line(drag["index"])
+
+    def _sync_auto_scroll(self):
+        """指针贴住清单区上下边缘时自动滚。
+
+        只在方向**变了**的时候重启定时器：指针在边缘区里抖一下不必重开
+        一个。滚不动了由 ``scroll_by`` 的返回值报停（见 _auto_scroll_tick）。
+        """
+        drag = self._drag
+        if not drag or not drag.get("moved"):
+            self._stop_auto_scroll()
+            return
+        canvas = self._list_canvas
+        top = canvas.winfo_rooty()
+        bottom = top + canvas.winfo_height()
+        pointer = drag.get("pointer_y", 0)
+        edge = scaled_px(self, DRAG_EDGE)
+        if pointer < top + edge:
+            direction = -1
+        elif pointer > bottom - edge:
+            direction = 1
+        else:
+            direction = 0
+        if direction == self._auto_scroll_dir and self._auto_scroll_job is not None:
+            return
+        self._auto_scroll_dir = direction
+        self._stop_auto_scroll_job()
+        if direction:
+            self._auto_scroll_job = self.after(DRAG_SCROLL_MS,
+                                               self._auto_scroll_tick)
+
+    def _auto_scroll_tick(self):
+        """自动滚的一拍：滚一点、把落点重算一次、再排下一拍。"""
+        self._auto_scroll_job = None
+        drag = self._drag
+        if not drag or not drag.get("moved") or not self._auto_scroll_dir:
+            return
+        step = scaled_px(self, DRAG_SCROLL_STEP) * self._auto_scroll_dir
+        if not self._list_area.scroll_by(step):
+            self._auto_scroll_dir = 0      # 已经滚到头，先停手
+            return
+        self._refresh_drop_target()
+        self._auto_scroll_job = self.after(DRAG_SCROLL_MS,
+                                           self._auto_scroll_tick)
+
+    def _stop_auto_scroll(self):
+        """停掉自动滚（幂等）：方向归零 + 取消定时器。"""
+        self._auto_scroll_dir = 0
+        self._stop_auto_scroll_job()
+
+    def _stop_auto_scroll_job(self):
+        job = getattr(self, "_auto_scroll_job", None)
+        self._auto_scroll_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
 
     def _list_drag_release(self, list_id, event):
         drag = self._drag
         self._drag = None
+        self._stop_auto_scroll()
         if not drag:
             return
         if not drag["moved"]:
@@ -658,6 +842,14 @@ class TodoPage(ttk.Frame):
         传进来的是**被拖行中心**的屏幕 y，不是鼠标点。统一换算到
         _list_holder 的局部坐标再比 —— 行是 pack 出来的，用行自己的
         winfo_y()/winfo_height() 算中线，不写死行高。
+
+        换算直接减 ``_list_holder`` 的屏幕 y：行的 winfo_y() 本来就是相对
+        holder 的局部坐标，而「清单区」是可滚动的内嵌帧 —— 滚动时 holder
+        的屏幕位置自己会跟着挪，两边天然对齐。
+
+        **不要走 canvas.canvasy()**：它只返回**整数**像素，
+        center_y - canvas_rooty 算出 55.5 这种带小数的值会被进成 56，正好
+        越过「贴在第 2 行中线上」的判定，插入线整体偏一行（实测踩过）。
         """
         order = list(self._list_rows)
         local_y = center_y - self._list_holder.winfo_rooty()
@@ -710,6 +902,7 @@ class TodoPage(ttk.Frame):
 
     def _hide_drop_line(self):
         """收掉插入线并恢复鼠标形状（幂等）。"""
+        self._stop_auto_scroll()
         line = self._drop_line
         self._drop_line = None
         try:
@@ -825,17 +1018,23 @@ class TodoPage(ttk.Frame):
 
     def _refresh_sidebar(self):
         counts = self.db.count_by_scope()
+        overdue = int(counts.get("overdue") or 0)
         for key, _label in SMART_LISTS:
             widgets = self._smart_rows.get(key)
             if widgets:
-                value = counts.get(key, 0)
-                widgets["count"].configure(text=str(value) if value else "")
+                # 「今天」那一格的计数本来就含着逾期项，所以它标红的意思
+                # 正是「今天要做的活里已经有过了期的」
+                self._set_badge(widgets, counts.get(key, 0),
+                                urgent=(key == "today" and overdue > 0))
         list_counts = self.db.open_count_by_list()
+        overdue_lists = self.db.overdue_count_by_list()
 
         # 下面会把 _list_holder 的子控件全部销毁（包括拖动的插入线），
-        # 引用要跟着清掉，否则会拿着一个已销毁的控件
+        # 引用要跟着清掉，否则会拿着一个已销毁的控件；自动滚的定时器
+        # 同理 —— 不停掉，下一拍就会去摸已经没了的行
         self._drag = None
         self._drop_line = None
+        self._stop_auto_scroll()
 
         for child in self._list_holder.winfo_children():
             child.destroy()
@@ -845,13 +1044,43 @@ class TodoPage(ttk.Frame):
                                 key=todo_list.id, label=todo_list.name)
             widgets = self._list_rows.get(todo_list.id)
             if widgets:
-                value = list_counts.get(todo_list.id, 0)
-                widgets["count"].configure(text=str(value) if value else "")
+                self._set_badge(widgets, list_counts.get(todo_list.id, 0),
+                                urgent=bool(overdue_lists.get(todo_list.id)))
 
         for key, _label in SMART_LISTS:
             self._paint_side_row("smart", key)
         for todo_list in self.db.fetch_lists():
             self._paint_side_row("list", todo_list.id)
+        # 行数变了，滚动条该出现还是该收掉要重新判一次。判之前先把几何
+        # 结算掉 —— 刚 pack 完 winfo_reqheight() 还是上一轮的旧值，直接判
+        # 会让该收的滚动条留着（清单删到装得下时尤其明显）
+        self._list_area.inner.update_idletasks()
+        self._list_area._sync_scrollbar()
+
+    def _set_badge(self, widgets, value: int, *, urgent: bool = False):
+        """侧栏行右侧的计数角标（iCloud 那种圆角胶囊）。
+
+        数字为 0 时整枚收掉 —— 挂一排「0」既没用又吵。有逾期时换强调色：
+        角标是灰还是红，本身就是一条信息。
+
+        圆角底交给 Pillow 画（tk.Canvas 画圆角会起毛边），数字仍写在 Label
+        的 ``text`` 里、用 ``compound="center"`` 压上去 —— 于是
+        ``cget("text")`` 读到的还是那个数，脚本与无障碍都拿得到。
+        """
+        label = widgets.get("count")
+        if label is None:
+            return
+        text = str(int(value or 0)) if value else ""
+        widgets["badge_urgent"] = bool(text) and bool(urgent)
+        if not text:
+            label.configure(image="", text="")
+            return
+        fill = (self.palette.danger if widgets["badge_urgent"]
+                else self.palette.badge_bg)
+        width = max(self._badge_h,
+                    self._badge_font.measure(text) + self._badge_pad * 2)
+        label.configure(image=todo_icons.badge_image(width, self._badge_h, fill),
+                        text=text, compound="center")
 
     # -- 中栏列表 ---------------------------------------------------------
     def _current_list(self) -> Optional[TodoList]:
@@ -911,10 +1140,7 @@ class TodoPage(ttk.Frame):
         # 智能分组视图按清单分组显示（苹果的「今天」页就是这样）
         grouped = self.current_list_id is None and self.current_scope != "completed"
         if grouped:
-            buckets: dict[int, list[TodoItem]] = {}
-            for item in open_items:
-                buckets.setdefault(item.list_id, []).append(item)
-            for list_id, bucket in buckets.items():
+            for list_id, bucket in self._bucket_by_list(open_items, list_map):
                 info = list_map.get(list_id)
                 self._make_group_header(area.inner, info, len(bucket))
                 for item in bucket:
@@ -928,10 +1154,39 @@ class TodoPage(ttk.Frame):
         if done_items:
             if self.current_scope != "completed":
                 self._make_done_header(area.inner, len(done_items))
-            for item in done_items:
-                self._make_item_row(area.inner, item, list_map.get(item.list_id))
+            # 这个视图横跨几个清单时（没选中某个清单），已完成那一段**也**按
+            # 清单分段：混在一起的一长串「做过什么」看不出是哪张清单清完了，
+            # 也找不到「这周的工作我都做完了没有」
+            if self.current_list_id is None:
+                for list_id, bucket in self._bucket_by_list(done_items, list_map):
+                    self._make_done_group_header(area.inner,
+                                                 list_map.get(list_id),
+                                                 len(bucket))
+                    for item in bucket:
+                        self._make_item_row(area.inner, item,
+                                            list_map.get(item.list_id))
+            else:
+                for item in done_items:
+                    self._make_item_row(area.inner, item, todo_list)
 
         area._on_inner_configure()
+
+    @staticmethod
+    def _bucket_by_list(items, list_map):
+        """按清单分桶，返回 ``[(list_id, [条目, ...]), ...]``。
+
+        桶的顺序跟着 ``list_map``（就是 ``fetch_lists()`` 的顺序，与左栏
+        一致）—— 用「谁先出现谁在前」的话，中栏的分组顺序会随筛选结果
+        变来变去，眼睛每次都得重新找一遍。查不到清单的条目兜在最后。
+        """
+        buckets: dict[int, list[TodoItem]] = {}
+        for item in items:
+            buckets.setdefault(item.list_id, []).append(item)
+        ordered = [(list_id, buckets[list_id])
+                   for list_id in list_map if list_id in buckets]
+        ordered += [(list_id, bucket) for list_id, bucket in buckets.items()
+                    if list_id not in list_map]
+        return ordered
 
     def _render_empty_list(self, area: ScrollArea, title: str):
         palette = self.palette
@@ -960,6 +1215,31 @@ class TodoPage(ttk.Frame):
                  fg=palette.text_secondary, font=self.typography.caption,
                  anchor="w").pack(side="left", padx=(6, 0))
         tk.Label(head, text=str(count), bg=palette.surface,
+                 fg=palette.text_muted,
+                 font=self.typography.caption).pack(side="right")
+
+    def _make_done_group_header(self, parent, info: Optional[TodoList],
+                               count: int):
+        """「已完成」那一段里的二级分组头（按清单）。
+
+        比未完成区的分组头更轻：不重复画清单图标，只用一枚该清单颜色的
+        小圆点 + 名字 + 条数，再缩进一格 —— 让人一眼看出它是「已完成」
+        这段里的下一级，而不是又一个并列的清单。
+        """
+        palette = self.palette
+        head = tk.Frame(parent, bg=palette.surface)
+        head.pack(fill="x", padx=16, pady=(10, 2))
+        inner = tk.Frame(head, bg=palette.surface)
+        inner.pack(fill="x", padx=(22, 0))
+        dot = tk.Canvas(inner, width=8, height=8, bg=palette.surface,
+                        highlightthickness=0, bd=0)
+        dot.pack(side="left")
+        dot.create_oval(1, 3, 6, 8, fill=(info.color if info else FALLBACK_COLOR),
+                        outline="")
+        tk.Label(inner, text=(info.name if info else "未分组"), bg=palette.surface,
+                 fg=palette.text_muted, font=self.typography.caption,
+                 anchor="w").pack(side="left", padx=(6, 0))
+        tk.Label(inner, text=str(count), bg=palette.surface,
                  fg=palette.text_muted,
                  font=self.typography.caption).pack(side="right")
 
@@ -1211,6 +1491,13 @@ class TodoPage(ttk.Frame):
                                 palette.danger if due and due < date.today() else None))
         self._make_meta_row(meta, "clock", "时间", item.due_time or "无",
                             self._time_menu)
+        # 提前量紧跟时间：两件事是一回事（没有时间，提前量无从谈起，
+        # 所以那种情况明说一句，而不是让人选完发现没反应）
+        advance_value = advance_label(item.advance_minutes)
+        if item.advance_minutes and not item.due_time:
+            advance_value += "（尚未设时间）"
+        self._make_meta_row(meta, "bell", "提前", advance_value,
+                            self._advance_menu)
         self._make_meta_row(meta, "repeat", "重复", item.repeat_label
                             + (f"（{item.repeat_interval}{self._unit_label(item.repeat_unit)}）"
                                if item.repeat_rule == "custom" else ""),
@@ -1769,6 +2056,22 @@ class TodoPage(ttk.Frame):
             return
         self.db.update_item(item_id, {"due_time": f"{hour:02d}:{minute:02d}"})
         self.refresh_all()
+
+    def _advance_menu(self, _event=None):
+        item = self.db.get_item(self.selected_item_id)
+        if item is None:
+            return
+
+        def set_advance(minutes: int):
+            self.db.update_item(item.id, {"advance_minutes": minutes})
+            self.refresh_all()
+
+        actions = []
+        for minutes, label in ADVANCE_CHOICES:
+            mark = "✓ " if int(item.advance_minutes or 0) == minutes else ""
+            actions.append((f"{mark}{label}",
+                            (lambda m=minutes: set_advance(m))))
+        self._popup(actions)
 
     def _repeat_menu(self, _event=None):
         item = self.db.get_item(self.selected_item_id)

@@ -87,6 +87,32 @@ ALERT_GRACE_MINUTES = 60
 # 按一次「稍后提醒」推后的分钟数
 SNOOZE_MINUTES = 10
 
+# 提前提醒：可选的「提前量」（分钟 -> 说法）。0 = 不提前，只在到点响。
+# 上限 1 天 —— 再早就不是「提醒」而是「预告」了；pending_alerts 往下探
+# 几天也是由这里的最大值算出来的（提前一天意味着今天就得看上明天的条目）。
+ADVANCE_CHOICES: list[tuple[int, str]] = [
+    (0, "无"),
+    (5, "提前 5 分钟"),
+    (15, "提前 15 分钟"),
+    (30, "提前 30 分钟"),
+    (60, "提前 1 小时"),
+    (120, "提前 2 小时"),
+    (1440, "提前 1 天"),
+]
+ADVANCE_LABELS = dict(ADVANCE_CHOICES)
+MAX_ADVANCE_MINUTES = max(minutes for minutes, _ in ADVANCE_CHOICES)
+
+# 提醒分两档：提前那一档与到点那一档。两档**各记各的账**，于是「提前响过」
+# 不会把「到点还要再响一次」吃掉 —— 只记一个时刻的话，第二档一到就会被
+# 当成「已经响过」而永远不响。
+ALERT_STAGE_EARLY = "early"
+ALERT_STAGE_DUE = "due"
+ALERT_STAGE_LABELS: dict[str, str] = {
+    ALERT_STAGE_EARLY: "提前",
+    ALERT_STAGE_DUE: "到点",
+}
+ALERT_KEY_SEP = "|"          # 记账串里分隔档位与时刻，见 alert_stage_key
+
 # 重复规则 → (步长, 单位)。custom 走 repeat_interval / repeat_unit 两列。
 REPEAT_RULES: list[tuple[str, str]] = [
     ("none", "永不"),
@@ -220,6 +246,25 @@ def moment_str(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M")
 
 
+def advance_label(minutes) -> str:
+    """提前量的说法（详情面板那一列用它）；认不出的值退回「无」。"""
+    try:
+        value = int(minutes or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return ADVANCE_LABELS.get(value, "无")
+
+
+def due_moment(item: "TodoItem") -> Optional[datetime]:
+    """一条待办**原定**的提醒时刻（不看「稍后提醒」）。
+
+    没设日期或时间 → ``None``：这种根本不参与提醒。
+    """
+    if not _norm(item.due_date) or not _norm(item.due_time):
+        return None
+    return parse_moment(f"{item.due_date} {item.due_time}")
+
+
 def alert_moment(item: "TodoItem") -> Optional[datetime]:
     """一条待办「下一次该响」的时刻。
 
@@ -227,13 +272,74 @@ def alert_moment(item: "TodoItem") -> Optional[datetime]:
     * 按过「稍后提醒」→ 用 ``snooze_until`` 覆盖原定时点
     * 否则 → due_date 与 due_time 拼成的时刻
     """
-    if not _norm(item.due_date) or not _norm(item.due_time):
+    moment = due_moment(item)
+    if moment is None:
         return None
     if _norm(item.snooze_until):
         snoozed = parse_moment(item.snooze_until)
         if snoozed is not None:
             return snoozed
-    return parse_moment(f"{item.due_date} {item.due_time}")
+    return moment
+
+
+def alert_stage_key(stage: str, moment: datetime) -> str:
+    """记账串：``early|2026-09-18 13:30`` / ``due|2026-09-18 14:00``。
+
+    带上档位是为了让两档各记各的：只存时刻的话，提前那档记完账，
+    到点那档会被判成「已经响过」而永远不响。
+    """
+    return f"{stage}{ALERT_KEY_SEP}{moment_str(moment)}"
+
+
+def parse_alert_key(text) -> Optional[tuple[str, str]]:
+    """记账串 → ``(档位, 时刻原文)``；空串 → ``None``。
+
+    **老库里存的是不带档位的裸时刻**（上一版只有到点提醒这一档），
+    一律按「到点那一档」认 —— 升级之后不会因为格式变了就重响一遍。
+    """
+    raw = _norm(text)
+    if not raw:
+        return None
+    stage, sep, rest = raw.partition(ALERT_KEY_SEP)
+    if sep and rest:
+        return stage, rest
+    return ALERT_STAGE_DUE, raw
+
+
+def alert_instants(item: "TodoItem") -> list[tuple[str, datetime]]:
+    """一条待办这一次的排程：按时间升序的 ``[(档位, 时刻), ...]``。
+
+    没设日期或时间 → 空表。设了提前量就是两档（提前 / 到点），否则只有到点。
+
+    「稍后提醒」按**响的是哪一档**分开处理：
+
+    * 到点那档打盹 → 打盹时刻顶替到点时刻（与上一版行为一致）
+    * 提前那档打盹 → 只把提前那一档推后，**到点那一档保留** —— 否则在
+      提前提醒上按一下「稍后提醒」，当天真正的到点就被这次打盹吃掉了
+    """
+    base = due_moment(item)
+    if base is None:
+        return []
+    advance = max(0, int(item.advance_minutes or 0))
+    snoozed = parse_moment(item.snooze_until) if _norm(item.snooze_until) else None
+    if snoozed is None:
+        instants: list[tuple[str, datetime]] = []
+        if advance:
+            instants.append((ALERT_STAGE_EARLY, base - timedelta(minutes=advance)))
+        instants.append((ALERT_STAGE_DUE, base))
+        return instants
+
+    stored = parse_alert_key(item.alerted_for)
+    if stored is None:
+        # 一档都还没响过就打盹了。正常流程走不到这里（提醒窗弹出**之前**
+        # 就已经记账），真出现了就当它是到点那一档，别凭空补一响。
+        return [(ALERT_STAGE_DUE, snoozed)]
+    instants = [(stored[0], snoozed)]
+    if stored[0] == ALERT_STAGE_EARLY:
+        # 打盹的是提前那一档 —— 到点那一档还得留着
+        instants.append((ALERT_STAGE_DUE, base))
+    instants.sort(key=lambda pair: pair[1])
+    return instants
 
 
 def add_months(base: date, months: int) -> date:
@@ -325,8 +431,9 @@ class TodoItem:
         rollover_count   - 被顺延过多少次
         original_due_date- 首次顺延前的原始日期（用于展示「已顺延 N 次」）
         sort_order       - 手动排序号
-        alerted_for      - 已经响过的那一个提醒时刻（``YYYY-MM-DD HH:MM``），
-                           保证同一条在同一时刻只响一次
+        advance_minutes  - 提前提醒的提前量（分钟）；0 = 只在到点响
+        alerted_for      - 已经响过的**那一档**提醒（``early|时刻`` /
+                           ``due|时刻``）；两档各记各的，同一档不会反复响
         snooze_until     - 「稍后提醒」推后的时刻；非空时覆盖原定时点
         created_at / updated_at
     """
@@ -350,6 +457,7 @@ class TodoItem:
     rollover_count: int = 0
     original_due_date: str = ""
     sort_order: int = 0
+    advance_minutes: int = 0
     alerted_for: str = ""
     snooze_until: str = ""
     created_at: str = ""
@@ -406,6 +514,7 @@ class TodoItem:
             rollover_count=int(row["rollover_count"] or 0),
             original_due_date=_norm(row["original_due_date"]),
             sort_order=int(row["sort_order"] or 0),
+            advance_minutes=int(row["advance_minutes"] or 0),
             alerted_for=_norm(row["alerted_for"]),
             snooze_until=_norm(row["snooze_until"]),
             created_at=_norm(row["created_at"]),
@@ -526,9 +635,12 @@ class TodoDB:
                 sort_order        INTEGER NOT NULL DEFAULT 0,
                 created_at        TEXT    NOT NULL,
                 updated_at        TEXT    NOT NULL,
-                /* 到点提醒：alerted_for 记「已经响过的那一个时刻」，
-                   与当前算出的提醒时刻一致就跳过，于是同一条不会反复响；
-                   而改了时间或按过「稍后提醒」后时刻变了，又能重新响。 */
+                /* 提醒：advance_minutes 是提前量（0 = 只在到点响）；
+                   alerted_for 记「已经响过的那一档」（early|… / due|…），
+                   与当前算出的那一档一致就跳过，于是同一档不会反复响；
+                   而改了时间、改了提前量或按过「稍后提醒」后时刻变了，
+                   又能重新响。 */
+                advance_minutes   INTEGER NOT NULL DEFAULT 0,
                 alerted_for       TEXT    NOT NULL DEFAULT '',
                 snooze_until      TEXT    NOT NULL DEFAULT ''
             );
@@ -566,10 +678,10 @@ class TodoDB:
         self._migrate_alert_columns()
 
     def _migrate_alert_columns(self):
-        """给老库补上「到点提醒」的两列。
+        """给老库补上提醒相关的三列。
 
         新装的程序建表时就带上它们，但**已经装过老版本**的库里
-        ``todo_items`` 没有这两列 —— SQLite 又没有
+        ``todo_items`` 没有这几列 —— SQLite 又没有
         ``ADD COLUMN IF NOT EXISTS``，只能先查 ``PRAGMA table_info``
         再按需补，否则用户得删库重来。
         """
@@ -578,6 +690,8 @@ class TodoDB:
             for row in self.conn.execute("PRAGMA table_info(todo_items)").fetchall()
         }
         for column, ddl in (
+            ("advance_minutes", "ALTER TABLE todo_items ADD COLUMN "
+                                "advance_minutes INTEGER NOT NULL DEFAULT 0"),
             ("alerted_for", "ALTER TABLE todo_items ADD COLUMN "
                             "alerted_for TEXT NOT NULL DEFAULT ''"),
             ("snooze_until", "ALTER TABLE todo_items ADD COLUMN "
@@ -1082,6 +1196,21 @@ class TodoDB:
         ).fetchall()
         return {int(r["list_id"]): int(r["n"]) for r in rows}
 
+    def overdue_count_by_list(self, today: Optional[str] = None) -> dict[int, int]:
+        """每个清单下「已过期且未完成」的数量（侧栏角标上色用它）。
+
+        与 ``open_count_by_list`` 分开是刻意的：角标上的**数字**是未完成数，
+        「红不红」看这里 —— 一个清单里已经有活过期了，才是值得标红的事。
+        """
+        today = today or day_str(date.today())
+        rows = self.conn.execute(
+            "SELECT list_id, COUNT(1) AS n FROM todo_items "
+            "WHERE completed = 0 AND due_date <> '' AND due_date < ? "
+            "GROUP BY list_id",
+            (today,),
+        ).fetchall()
+        return {int(r["list_id"]): int(r["n"]) for r in rows}
+
     # --------------------------------------------------------------------------
     # 待办 CRUD
     # --------------------------------------------------------------------------
@@ -1186,8 +1315,10 @@ class TodoDB:
                (list_id, title, notes, due_date, due_time, repeat_rule,
                 repeat_interval, repeat_unit, repeat_until, skip_holidays,
                 priority, flagged, tags, completed, completed_at, is_repeat_copy,
-                rollover_count, original_due_date, sort_order, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', 0, 0, '', ?, ?, ?)""",
+                rollover_count, original_due_date, sort_order, advance_minutes,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', 0, 0, '',
+                       ?, ?, ?, ?)""",
             (
                 list_id,
                 _norm(payload.get("title")),
@@ -1202,7 +1333,7 @@ class TodoDB:
                 int(payload.get("priority") or 0),
                 1 if payload.get("flagged") else 0,
                 json.dumps(payload.get("tags", []), ensure_ascii=False),
-                nxt, now, now,
+                nxt, int(payload.get("advance_minutes") or 0), now, now,
             ),
         )
         self.conn.commit()
@@ -1213,7 +1344,7 @@ class TodoDB:
         allowed = {
             "list_id", "title", "notes", "due_date", "due_time", "repeat_rule",
             "repeat_interval", "repeat_unit", "repeat_until", "skip_holidays",
-            "priority", "flagged", "tags", "sort_order",
+            "priority", "flagged", "tags", "sort_order", "advance_minutes",
         }
         sets, params = [], []
         for key in allowed:
@@ -1226,7 +1357,8 @@ class TodoDB:
                 value = 1 if value else 0
             elif key == "skip_holidays":
                 value = 1 if value else 0
-            elif key in ("list_id", "repeat_interval", "priority", "sort_order"):
+            elif key in ("list_id", "repeat_interval", "priority", "sort_order",
+                         "advance_minutes"):
                 value = int(value or 0)
             else:
                 value = _norm(value)
@@ -1309,15 +1441,17 @@ class TodoDB:
                (list_id, title, notes, due_date, due_time, repeat_rule,
                 repeat_interval, repeat_unit, repeat_until, skip_holidays,
                 priority, flagged, tags, completed, completed_at, is_repeat_copy,
-                rollover_count, original_due_date, sort_order, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?, ?, ?)""",
+                rollover_count, original_due_date, sort_order, advance_minutes,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?, ?,
+                       ?, ?)""",
             (
                 item.list_id, item.title, item.notes, item.due_date, item.due_time,
                 item.repeat_rule, item.repeat_interval, item.repeat_unit,
                 item.repeat_until, item.skip_holidays, item.priority, item.flagged,
                 json.dumps(item.tags, ensure_ascii=False), now,
                 item.rollover_count, item.original_due_date, item.sort_order,
-                now, now,
+                item.advance_minutes, now, now,
             ),
         )
         copy_id = int(cursor.lastrowid)
@@ -1371,43 +1505,57 @@ class TodoDB:
                        *, grace_minutes: int = ALERT_GRACE_MINUTES) -> dict:
         """挑出「此刻该响」的条目。
 
-        只看三件事：有没有设日期与时间、这个时刻过没过、以及**这一轮
-        响过没有** —— ``alerted_for`` 里留着上一次响的时刻原文，跟当前
-        算出来的一致就跳过。于是同一条不会被反复打扰，而改了时间或按了
-        「稍后提醒」之后时刻变了，又立刻能重新响。
+        一条待办可能排了两档（提前 / 到点），这里只拿**时间上最靠后、
+        且已经到点**的那一档来响 —— 程序关了一整天再打开时，不该把提前
+        和到点各弹一次；人已经错过「还有 30 分钟」了，直接说「到时间了」
+        才对。
+
+        记账按**档位**：``alerted_for`` 里留着上一次响的那一档，
+        与当前算出的那一档一致就跳过。于是同一档不会反复打扰，而改了
+        时间、改了提前量或按了「稍后提醒」之后档位变了，又立刻能重新响。
 
         返回::
 
-            {"due": [...], "missed": [...], "moments": {item_id: "YYYY-MM-DD HH:MM"}}
+            {"due": [...], "missed": [...],
+             "moments": {item_id: "early|YYYY-MM-DD HH:MM"},
+             "stages": {item_id: "early" | "due"}}
 
         ``due`` 是刚过点（在 ``grace_minutes`` 以内）的，应当立刻弹窗；
-        ``missed`` 是今天早就过点的，只在托盘汇总一句，不逐个弹窗轰炸。
+        ``missed`` 是很久以前就过点的，只在托盘汇总一句，不逐个弹窗轰炸。
         """
         now = now or datetime.now()
+        # 提前量最大到 1 天，所以今天得连**明天**的条目一起看 —— 只按
+        # due_date <= 今天 过滤的话，「提前一天」的提醒永远来不及响。
+        horizon = day_str(
+            now.date() + timedelta(days=MAX_ADVANCE_MINUTES // (24 * 60))
+        )
         rows = self.conn.execute(
             "SELECT * FROM todo_items "
             "WHERE completed = 0 AND is_repeat_copy = 0 "
             "  AND due_date <> '' AND due_time <> '' AND due_date <= ?",
-            (day_str(now.date()),),
+            (horizon,),
         ).fetchall()
 
         due: list[TodoItem] = []
         missed: list[TodoItem] = []
         moments: dict[int, str] = {}
+        stages: dict[str, str] = {}
         for row in rows:
             item = TodoItem.from_row(row)
-            moment = alert_moment(item)
-            if moment is None or moment > now:
+            fired = [pair for pair in alert_instants(item) if pair[1] <= now]
+            if not fired:
                 continue
-            text = moment_str(moment)
-            if item.alerted_for == text:
+            stage, instant = max(fired, key=lambda pair: pair[1])
+            if parse_alert_key(item.alerted_for) == (stage, moment_str(instant)):
                 continue
-            moments[item.id] = text
-            if (now - moment) <= timedelta(minutes=max(0, grace_minutes)):
+            moments[item.id] = alert_stage_key(stage, instant)
+            stages[item.id] = stage
+            if (now - instant) <= timedelta(minutes=max(0, grace_minutes)):
                 due.append(item)
             else:
                 missed.append(item)
-        return {"due": due, "missed": missed, "moments": moments}
+        return {"due": due, "missed": missed,
+                "moments": moments, "stages": stages}
 
     def mark_alerted(self, moments: dict[int, str]):
         """把「这一轮已经响过」记回条目（键为条目 id，值为提醒时刻原文）。"""
@@ -1421,19 +1569,31 @@ class TodoDB:
         self.conn.commit()
 
     def snooze(self, item_id: int, minutes: int = SNOOZE_MINUTES,
-               now: Optional[datetime] = None) -> str:
+               now: Optional[datetime] = None, *, early: bool = False) -> str:
         """「稍后提醒」：把下一次该响的时刻推后，返回该时刻。
 
         基准取 ``max(原定时点, 现在)`` —— 一条已经逾期两小时的提醒
         若从原定时点起算，推后 10 分钟仍然在过去，下次巡检会被判成
         「错过」而再也弹不出来。
+
+        ``early=True`` 表示打盹的是**提前那一档**：基准改用提前时刻，
+        并且推后到「已经该到点」时就不记这次打盹（返回空串）—— 提前档
+        存在的意义就是在到点之前提个醒，拖过到点时刻就没有意义了，
+        不如让到点提醒照常响。
         """
         item = self.get_item(item_id)
         if item is None:
             return ""
         now = now or datetime.now()
-        base = alert_moment(item) or now
+        due = due_moment(item)
+        if early and due is not None:
+            advance = max(0, int(item.advance_minutes or 0))
+            base = due - timedelta(minutes=advance) if advance else due
+        else:
+            base = alert_moment(item) or now
         nxt = max(base, now) + timedelta(minutes=max(1, minutes))
+        if early and due is not None and nxt >= due:
+            return ""
         self.conn.execute(
             "UPDATE todo_items SET snooze_until = ?, updated_at = ? WHERE id = ?",
             (moment_str(nxt), _now(), item_id),
@@ -1508,9 +1668,11 @@ class TodoDB:
             "          THEN 1 ELSE 0 END) AS today_open, "
             " SUM(CASE WHEN completed = 0 AND due_date <> '' THEN 1 ELSE 0 END) AS scheduled, "
             " SUM(CASE WHEN completed = 0 AND flagged = 1 THEN 1 ELSE 0 END) AS flagged, "
-            " SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END) AS completed "
+            " SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END) AS completed, "
+            " SUM(CASE WHEN completed = 0 AND due_date <> '' AND due_date < ? "
+            "          THEN 1 ELSE 0 END) AS overdue "
             "FROM todo_items WHERE is_repeat_copy = 0 OR completed = 1",
-            (today,),
+            (today, today),
         ).fetchone()
         return {
             "today": int(row["today_open"] or 0),
@@ -1518,6 +1680,9 @@ class TodoDB:
             "all": int(row["all_open"] or 0),
             "flagged": int(row["flagged"] or 0),
             "completed": int(row["completed"] or 0),
+            # 「今天」那一格要不要标红，看的是这个数 —— 不是「今天有几件」，
+            # 而是「有几件已经过期了」
+            "overdue": int(row["overdue"] or 0),
         }
 
     def all_tags(self) -> list[str]:
