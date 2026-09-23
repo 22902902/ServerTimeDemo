@@ -52,7 +52,7 @@ from todo_db import (
     day_str,
     parse_day,
 )
-from ui_components import create_flat_menu
+from ui_components import ScrollArea, create_flat_menu
 from ui_theme import MAIN_PALETTE, TYPOGRAPHY
 
 # 字体：页内大标题用 17pt 粗体（比全局 page_title 略大，用来和主壳标题区分层级）
@@ -164,115 +164,6 @@ def strike_font(base, widget):
                        overstrike=1)
     _STRIKE_FONTS[key] = font
     return font
-
-
-class ScrollArea(tk.Frame):
-    """竖直滚动容器（Canvas + 内嵌 Frame）。
-
-    三条约束来自本项目踩过的坑：
-    1. **先 pack 滚动条、后 pack 画布** —— 反过来的话画布请求宽度会把滚动条
-       挤出可视区（实测两个都只剩 1px）。要重新显出来时用
-       ``pack(..., before=canvas)`` 插回原位，不能直接 pack 到末尾。
-    2. ``scrollregion`` 必须在内嵌帧尺寸变化时**立刻**更新，否则内容变矮之后
-       滚动区还停在旧高度，会出现「明明没铺满却能往下滑一大片」。
-    3. ``autohide_scrollbar=True`` 时滚动条**按需**出现 —— 内容装得下就收掉，
-       省出那十几个像素给正文（侧栏只有 226px 宽，一根常驻的灰条很占地方）。
-    """
-
-    def __init__(self, master, *, bg: str, inner_bg: Optional[str] = None,
-                 autohide_scrollbar: bool = False):
-        super().__init__(master, bg=bg)
-        self._bg = bg
-        self.autohide_scrollbar = autohide_scrollbar
-        self._sb_visible = True
-
-        self.vsb = ttk.Scrollbar(self, orient="vertical")
-        self.vsb.pack(side="right", fill="y")
-
-        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0,
-                                yscrollcommand=self.vsb.set)
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.vsb.configure(command=self.canvas.yview)
-
-        self.inner = tk.Frame(self.canvas, bg=inner_bg or bg)
-        self._window = self.canvas.create_window((0, 0), window=self.inner,
-                                                 anchor="nw")
-
-        self.inner.bind("<Configure>", self._on_inner_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-        self.canvas.bind("<Enter>", self._bind_wheel)
-        self.canvas.bind("<Leave>", self._unbind_wheel)
-
-    # -- 尺寸同步 ------------------------------------------------------------
-    def _on_inner_configure(self, _event=None):
-        self.canvas.update_idletasks()
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        self._sync_scrollbar()
-
-    def _sync_scrollbar(self):
-        """按需显隐滚动条（幂等）。
-
-        只在状态真的翻转时才动 pack —— 在 ``<Configure>`` 里反复
-        forget/pack 会来回触发布局，把尺寸自己抖起来。比较时留 4px
-        余量当滞回，避免卡在临界高度上反复横跳。
-        """
-        if not self.autohide_scrollbar:
-            return
-        need = self.inner.winfo_reqheight() > self.canvas.winfo_height() + 4
-        if need == self._sb_visible:
-            return
-        self._sb_visible = need
-        if need:
-            self.vsb.pack(side="right", fill="y", before=self.canvas)
-        else:
-            self.vsb.pack_forget()
-
-    def _on_canvas_configure(self, event):
-        self.canvas.itemconfigure(self._window, width=event.width)
-        self._on_inner_configure()
-
-    # -- 滚轮 ---------------------------------------------------------------
-    def _bind_wheel(self, _event=None):
-        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
-
-    def _unbind_wheel(self, _event=None):
-        self.canvas.unbind_all("<MouseWheel>")
-
-    def _on_wheel(self, event):
-        if self.canvas.bbox("all") is None:
-            return
-        delta = -1 if event.delta > 0 else 1
-        self.canvas.yview_scroll(delta, "units")
-
-    # -- 对外 ---------------------------------------------------------------
-    def scroll_by(self, pixels: float) -> bool:
-        """按**像素**滚动，返回「是否真的动了」。
-
-        不用 ``yview_scroll(1, "units")``：canvas 的「一个单位」按
-        ``yscrollincrement`` 算，默认为 0 时是窗口高度的十分之一 ——
-        自动滚时一跳半行，快得抓不住。按像素走既能定速，也能据返回值
-        判断「已经滚到头」，从而停掉定时器。
-        """
-        region = self.canvas.bbox("all")
-        if not region:
-            return False
-        total = region[3] - region[1]
-        view = self.canvas.winfo_height()
-        if total <= view or view <= 1:
-            return False
-        first = self.canvas.yview()[0] * total
-        target = min(max(0.0, first + float(pixels)), float(total - view))
-        if abs(target - first) < 0.5:
-            return False
-        self.canvas.yview_moveto(target / total)
-        return True
-
-    def clear(self):
-        for child in self.inner.winfo_children():
-            child.destroy()
-
-    def scroll_top(self):
-        self.canvas.yview_moveto(0)
 
 
 # =============================================================================

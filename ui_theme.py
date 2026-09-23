@@ -40,6 +40,7 @@ class Typography:
     nav_item: tuple = ("Microsoft YaHei UI", 10)
     nav_item_active: tuple = ("Microsoft YaHei UI", 10, "bold")
     nav_group: tuple = ("Microsoft YaHei UI", 9, "bold")
+    mono: tuple = ("Consolas", 10)
 
 
 @dataclass(frozen=True)
