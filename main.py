@@ -163,6 +163,8 @@ import app_version
 import markdown_view
 from todo_db import TodoDB  # 待办事项数据库（含法定节假日日历）
 from todo_page import TodoAlertDialog, TodoPage  # 待办 / 提醒事项页面
+from excel_db import ExcelDB  # Excel 学习中心数据库（200 个内置函数 + 复习进度）
+from excel_page import ExcelImageTools, ExcelLearningPage  # Excel 学习中心页面
 
 
 # =============================================================================
@@ -2839,7 +2841,8 @@ class AppShutdownManager:
     def shutdown(self):
         self._close_backend_windows()
         self._close_optional_resource("tray")
-        for attr_name in ("db", "study_notes_db", "qa_work_log_db", "study_demo_db_conn", "todo_db"):
+        for attr_name in ("db", "study_notes_db", "qa_work_log_db", "study_demo_db_conn",
+                          "todo_db", "excel_db"):
             self._close_optional_resource(attr_name)
         try:
             self.app.quit()
@@ -2928,6 +2931,9 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         self.qa_work_log_db = QAWorkLogDBExt(DB_PATH)
         self.study_demo_db_conn = get_study_demo_conn()  # Python 学习模块数据库
         self.todo_db = TodoDB(DB_PATH)  # 待办模块数据库
+        # Excel 学习中心数据库：与其它模块共用同一个 db 文件（表名前缀 excel_
+        # 自成一套，互不干扰）。首次启动会自动建表并灌入 200 个内置函数。
+        self.excel_db = ExcelDB(DB_PATH)
         self.tray = TrayController(self)
         self.shutdown_manager = AppShutdownManager(self)
         self.search_var = tk.StringVar()
@@ -2985,6 +2991,13 @@ class ExpiryManagerApp(TkinterDnD.Tk):
                 "desc": "提醒事项式的待办清单：彩色列表分组、重复规则、优先级、标签、子任务与多行备注；未完成自动顺延，周末与法定节假日自动跳过，假期后第一个工作日汇总提醒。",
                 "page": "todo",
             },
+            "module_life_excel": {
+                "title": "Excel 宝典",
+                "path": "生活 / Excel 宝典",
+                "desc": "配合《Excel 函数与公式速查宝典》的自学工作台：200 个内置函数、"
+                        "7 阶段路径、20 条实战配方、间隔重复复习与打卡统计。",
+                "page": "excel_learn",
+            },
             "module_study_notes": {
                 "title": "学习笔记",
                 "path": "学习 / 笔记",
@@ -3024,6 +3037,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             "qa_work_log":    (self.qa_work_log_page,    None),
             "system_toolbox": (self.system_toolbox_page, None),
             "todo":           (self.todo_page,            self.todo_page_refresh),
+            "excel_learn":    (self.excel_learn_page,     self.excel_page_refresh),
             "study_demo":     (self.study_demo_page,     None),
             "note":           (self.note_page,          None),
             "placeholder":    (self.placeholder_page,    None),
@@ -3311,6 +3325,10 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         # 待办 / 提醒事项页面
         self.todo_page = ttk.Frame(self.page_container)
         self._build_todo_page()
+
+        # Excel 学习中心页面
+        self.excel_learn_page = ttk.Frame(self.page_container)
+        self._build_excel_page()
 
         # 简单笔记页面
         self.note_page = ttk.Frame(self.page_container)
@@ -3744,6 +3762,33 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         page = TodoPage(self.todo_page, self.todo_db)
         page.pack(fill='both', expand=True)
         self.todo_view = page
+
+    def _build_excel_page(self):
+        """构建 Excel 学习中心页面（嵌入主窗口，非独立窗口）。
+
+        图片能力走 ``ExcelImageTools`` 适配器注入，页面**不反向 import main** ——
+        与流程中心同一套做法（避免循环导入）。
+        """
+        self.excel_view = ExcelLearningPage(
+            self.excel_learn_page,
+            self.excel_db,
+            app_title=APP_TITLE,
+            image_preview_cls=AccountImagePreview,
+            images=ExcelImageTools(
+                base_dir=BASE_DIR,
+                resolve_paths=resolve_account_image_paths,
+                storage_value=get_account_image_storage_value,
+                make_dir=ensure_account_image_dir,
+                parse_items=parse_account_image_items,
+                serialize_items=serialize_account_image_items,
+            ),
+            on_status=self.log_status,
+        )
+        self.excel_view.pack(fill="both", expand=True)
+
+    def excel_page_refresh(self):
+        """页面切换垫片：拉一次最新进度，再重画当前视图。"""
+        self.excel_view.refresh()
 
     def _build_study_demo_page(self):
         """构建 Python 学习辅助模块页面"""
