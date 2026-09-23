@@ -7,6 +7,10 @@
 1. 版本号本身合法（x.y.z）、最新一版与 ``APP_VERSION`` 对得上、顺序是降序
 2. 界面真的会显示它（main.py 引用 app_version.APP_TITLE，而不是又写死一串）
 3. ``CHANGELOG.md`` 与 ``app_version.VERSION_HISTORY`` 没有漂移
+4. 打包 spec 把新增模块写进了 hiddenimports、没被 excludes 排掉
+5. 主窗口结构完整：``self._build_*`` 的每次调用都有对应定义。重构时最容易被
+   吃掉的就是方法定义那一行（那段代码会并进上一个方法），而语法检查、pyflakes
+   全绿，只有真开窗口才炸 —— 所以用 AST 对账
 
 用法::
 
@@ -15,6 +19,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -176,7 +181,9 @@ def test_wired_into_ui():
         spec_src = spec.read_text(encoding="utf-8", errors="replace")
         # 以 main.py 实际 import 的本地模块为准，避免「加了模块忘了写 spec」
         # 只在新增时才会被发现（历史上就是这么漏掉 app_version 的）
-        need = ["app_version", "markdown_view", "todo_db", "todo_page", "todo_icons"]
+        need = ["app_version", "markdown_view", "todo_db", "todo_page", "todo_icons",
+                "process_db", "process_page", "credential_process_dialogs",
+                "image_clipboard"]
         missing = [n for n in need if n not in spec_src]
         check("打包 spec 把新模块写进了 hiddenimports",
               not missing, f"漏了 {missing}（运行版会 ImportError）")
@@ -189,6 +196,78 @@ def test_wired_into_ui():
               not [n for n in need if n in excluded], excluded.strip())
 
 
+# ---------------------------------------------------------------------------
+# [E] 主窗口结构：self._build_* 的调用必须有对应定义
+# ---------------------------------------------------------------------------
+
+def test_app_structure():
+    """为什么要有这一节
+    ------------------------------------------------------------------------
+    把流程中心改成页面类时，补丁把 ``def _build_process_page(self):`` **整行**
+    吃掉了 —— 那段代码于是被并进了上一个方法。后果极其隐蔽：
+
+    * 语法完全合法，``py_compile`` 通过、``pyflakes`` 全绿
+    * 静态看源码完全看不出来（构造语句还在、缩进也在）
+    * 只有真的构造主窗口才炸：
+      ``AttributeError: '_tkinter.tkapp' object has no attribute '_build_process_page'``
+      （tkinter 的 ``__getattr__`` 兜底把它变成 AttributeError，不是静默失效）
+
+    纯文本检索抓不到这种「方法定义被吃掉」，所以这里用 AST 把
+    「类里定义了哪些 ``_build_*``」与「``self._build_*`` 调用了哪些」对一遍。
+    """
+    print("\n[E] 主窗口结构")
+
+    src = (ROOT / "main.py").read_text(encoding="utf-8", errors="replace")
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as exc:
+        check("main.py 能被 ast 解析", False, repr(exc))
+        return
+    check("main.py 能被 ast 解析", True)
+
+    app = next((node for node in ast.walk(tree)
+                if isinstance(node, ast.ClassDef) and node.name == "ExpiryManagerApp"), None)
+    check("找得到 ExpiryManagerApp 类", app is not None)
+    if app is None:
+        return
+
+    defined = {node.name for node in app.body
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    called = sorted({sub.func.attr for sub in ast.walk(app)
+                     if isinstance(sub, ast.Call)
+                     and isinstance(sub.func, ast.Attribute)
+                     and isinstance(sub.func.value, ast.Name)
+                     and sub.func.value.id == "self"
+                     and sub.func.attr.startswith("_build_")})
+    missing = [name for name in called if name not in defined]
+    check(f"self._build_* 全都有定义（{len(called)} 个）", not missing,
+          f"缺 {missing} —— 类被重构时最容易丢的就是 def 那一行")
+
+    # 流程中心这一轮的接线必须都在
+    check("流程中心页面对象已创建", "self.process_page = ProcessPage(" in src)
+    check("页面切换垫片 process_page_refresh 有定义",
+          "def process_page_refresh(self):" in src)
+    check("_page_registry 的 processes 指向垫片",
+          "self.process_page,        self.process_page_refresh" in src)
+    check("ProcessImageTools 已注入（图片能力不反向 import main）",
+          "images=ProcessImageTools(" in src)
+    check("main.py 不再持有流程界面控件",
+          not any(token in src for token in
+                  ("self.process_flow_tree", "self.process_step_tree",
+                   "self.process_step_preview", "self.process_search_var",
+                   "self.process_status_var")))
+    check("流程界面处理器已全部搬到 process_page",
+          not any(token in src for token in
+                  ("def refresh_process_flows", "def refresh_process_steps",
+                   "def set_process_step_detail_text")))
+    check("死代码 ensure_process_flow_image_dir / PROCESS_FLOW_IMAGE_DIR 已清掉",
+          "ensure_process_flow_image_dir" not in src
+          and "PROCESS_FLOW_IMAGE_DIR" not in src)
+    check("流程表 DDL 归 process_db 管（main.py 不再内联建表）",
+          "CREATE TABLE IF NOT EXISTS process_flows (" not in src
+          and "init_process_tables(self.conn)" in src)
+
+
 def main() -> int:
     print("=" * 78)
     print("发布元信息：版本号 / 更新日志 / CHANGELOG.md")
@@ -198,6 +277,7 @@ def main() -> int:
     test_markdown_export()
     test_changelog_file()
     test_wired_into_ui()
+    test_app_structure()
 
     print("\n" + "=" * 78)
     print(f"通过 {PASSED} 项，失败 {FAILED} 项")
