@@ -183,7 +183,10 @@ def test_wired_into_ui():
         # 只在新增时才会被发现（历史上就是这么漏掉 app_version 的）
         need = ["app_version", "markdown_view", "todo_db", "todo_page", "todo_icons",
                 "process_db", "process_page", "credential_process_dialogs",
-                "image_clipboard"]
+                "image_clipboard", "excel_db", "excel_page", "excel_seed",
+                "excel_seed_schema", "excel_seed_math", "excel_seed_stat",
+                "excel_seed_lookup", "excel_seed_text", "excel_seed_date",
+                "excel_seed_misc", "excel_seed_extra"]
         missing = [n for n in need if n not in spec_src]
         check("打包 spec 把新模块写进了 hiddenimports",
               not missing, f"漏了 {missing}（运行版会 ImportError）")

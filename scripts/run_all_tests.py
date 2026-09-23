@@ -47,6 +47,8 @@ SUITES = [
     "test_todo_ui",
     "test_process",
     "test_process_ui",
+    "test_excel",
+    "test_excel_ui",
 ]
 SMOKE = "runtime_smoke"
 SUMMARY_RE = re.compile(r"通过\s*(\d+)\s*项[，,]\s*失败\s*(\d+)\s*项")
