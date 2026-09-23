@@ -151,11 +151,12 @@ from study_demo_window import StudyDemoPage           # Python 学习辅助模�
 from study_demo_db import get_conn as get_study_demo_conn  # 学习模块数据库
 from account_windows import AccountManagerDialog as SharedAccountManagerDialog
 from backend_page import BackendPage
-from credential_process_dialogs import CredentialItemDialog, ProcessFlowDialog, ProcessStepDialog
+from credential_process_dialogs import CredentialItemDialog
 from expiry_dialogs import AssetDialog, DetailDialog, SettingsDialog
 from expiry_page import ExpiryPage, summarize_cell_text, treeview_font
 from credentials_page import CredentialsPage
-from process_page import ProcessPage
+from process_page import ProcessImageTools, ProcessPage
+from process_db import ProcessDBMixin, init_process_tables
 from ui_theme import MAIN_PALETTE, THEME, TYPOGRAPHY
 from dialog_form_style import apply_dialog_form_style, create_form_entry, create_form_frame, create_form_label
 import app_version
@@ -356,7 +357,6 @@ def ensure_excel_dir() -> Path:
     EXCEL_DIR.mkdir(parents=True, exist_ok=True)
     return EXCEL_DIR
 ACCOUNT_IMAGE_DIR = BASE_DIR / "account_images"
-PROCESS_FLOW_IMAGE_DIR = BASE_DIR / "process_flow_images"  # 流程截图独立目录
 ACCOUNT_IMAGE_FILE_TYPES = [("图片文件", "*.png *.jpg *.jpeg *.webp *.bmp *.gif")]
 CHECK_INTERVAL_MS = 60 * 60 * 1000
 # 待办到点提醒的巡检间隔：30 秒。比主提醒的 1 小时密得多 —— 提醒是按分钟
@@ -578,21 +578,6 @@ def ensure_account_image_dir(subdir: str = "") -> Path:
         图片存储目录的完整路径
     """
     target_dir = ACCOUNT_IMAGE_DIR / subdir if subdir else ACCOUNT_IMAGE_DIR
-    target_dir.mkdir(parents=True, exist_ok=True)
-    return target_dir
-
-
-def ensure_process_flow_image_dir(flow_id: int = 0) -> Path:
-    """确保流程截图存储目录存在。
-    
-    Args:
-        flow_id: 流程ID，为0时存到 _new 临时目录
-    
-    Returns:
-        流程截图存储目录的完整路径
-    """
-    subdir = str(flow_id) if flow_id else "_new"
-    target_dir = PROCESS_FLOW_IMAGE_DIR / subdir
     target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir
 
@@ -1209,7 +1194,7 @@ def format_datetime_text(value: str) -> str:
 # ----------------------------------------------------------------------------
 
 
-class Database:
+class Database(ProcessDBMixin):
     """SQLite 数据库封装类，所有数据库操作的唯一入口。
 
     职责:
@@ -1322,33 +1307,6 @@ class Database:
                 updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS process_flows (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                category TEXT,
-                platform TEXT,
-                link_url TEXT,
-                note TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS process_steps (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                flow_id INTEGER NOT NULL,
-                step_no INTEGER NOT NULL,
-                title TEXT NOT NULL,
-                link_url TEXT,
-                screenshot_path TEXT,
-                description_text TEXT,
-                required_text TEXT,
-                optional_text TEXT,
-                note TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (flow_id) REFERENCES process_flows(id) ON DELETE CASCADE
-            );
-
             CREATE TABLE IF NOT EXISTS bat_scripts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -1362,6 +1320,7 @@ class Database:
             """
         )
         self.conn.commit()
+        init_process_tables(self.conn)  # ★ 流程中心：执行留痕两张表 + 新列迁移
         self.ensure_default_admin()
         self.ensure_shared_account_schema()
         self.migrate_legacy_accounts()
@@ -1722,157 +1681,6 @@ class Database:
         )
         self.conn.commit()
 
-    def fetch_process_flows(self, keyword: str = "") -> list[sqlite3.Row]:
-        if keyword:
-            like = f"%{normalize_text(keyword)}%"
-            return self.conn.execute(
-                """
-                SELECT *
-                FROM process_flows
-                WHERE title LIKE ?
-                   OR category LIKE ?
-                   OR platform LIKE ?
-                   OR link_url LIKE ?
-                   OR note LIKE ?
-                ORDER BY updated_at DESC, id DESC
-                """,
-                (like, like, like, like, like),
-            ).fetchall()
-        return self.conn.execute(
-            """
-            SELECT *
-            FROM process_flows
-            ORDER BY updated_at DESC, id DESC
-            """
-        ).fetchall()
-
-    def get_process_flow(self, flow_id: int) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM process_flows WHERE id = ?", (flow_id,)).fetchone()
-
-    def add_process_flow(self, payload: dict) -> int:
-        now = datetime.now().isoformat(timespec="seconds")
-        cursor = self.conn.execute(
-            """
-            INSERT INTO process_flows (title, category, platform, link_url, note, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                payload.get("title", ""),
-                payload.get("category", ""),
-                payload.get("platform", ""),
-                payload.get("link_url", ""),
-                payload.get("note", ""),
-                now,
-                now,
-            ),
-        )
-        self.conn.commit()
-        return int(cursor.lastrowid)
-
-    def update_process_flow(self, flow_id: int, payload: dict):
-        now = datetime.now().isoformat(timespec="seconds")
-        self.conn.execute(
-            """
-            UPDATE process_flows
-            SET title = ?, category = ?, platform = ?, link_url = ?, note = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                payload.get("title", ""),
-                payload.get("category", ""),
-                payload.get("platform", ""),
-                payload.get("link_url", ""),
-                payload.get("note", ""),
-                now,
-                flow_id,
-            ),
-        )
-        self.conn.commit()
-
-    def delete_process_flow(self, flow_id: int):
-        self.conn.execute("DELETE FROM process_flows WHERE id = ?", (flow_id,))
-        self.conn.commit()
-
-    def fetch_process_steps(self, flow_id: int) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            """
-            SELECT *
-            FROM process_steps
-            WHERE flow_id = ?
-            ORDER BY step_no ASC, id ASC
-            """,
-            (flow_id,),
-        ).fetchall()
-
-    def fetch_all_process_steps(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            """
-            SELECT *
-            FROM process_steps
-            ORDER BY flow_id ASC, step_no ASC, id ASC
-            """
-        ).fetchall()
-
-    def get_process_step(self, step_id: int) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM process_steps WHERE id = ?", (step_id,)).fetchone()
-
-    def get_next_process_step_no(self, flow_id: int) -> int:
-        row = self.conn.execute("SELECT COALESCE(MAX(step_no), 0) AS max_no FROM process_steps WHERE flow_id = ?", (flow_id,)).fetchone()
-        return int(row["max_no"] or 0) + 1
-
-    def add_process_step(self, flow_id: int, payload: dict) -> int:
-        now = datetime.now().isoformat(timespec="seconds")
-        cursor = self.conn.execute(
-            """
-            INSERT INTO process_steps (
-                flow_id, step_no, title, link_url, screenshot_path, description_text,
-                required_text, optional_text, note, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                flow_id,
-                payload.get("step_no", 1),
-                payload.get("title", ""),
-                payload.get("link_url", ""),
-                payload.get("screenshot_path", ""),
-                payload.get("description_text", ""),
-                payload.get("required_text", ""),
-                payload.get("optional_text", ""),
-                payload.get("note", ""),
-                now,
-                now,
-            ),
-        )
-        self.conn.commit()
-        return int(cursor.lastrowid)
-
-    def update_process_step(self, step_id: int, payload: dict):
-        now = datetime.now().isoformat(timespec="seconds")
-        self.conn.execute(
-            """
-            UPDATE process_steps
-            SET step_no = ?, title = ?, link_url = ?, screenshot_path = ?, description_text = ?,
-                required_text = ?, optional_text = ?, note = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                payload.get("step_no", 1),
-                payload.get("title", ""),
-                payload.get("link_url", ""),
-                payload.get("screenshot_path", ""),
-                payload.get("description_text", ""),
-                payload.get("required_text", ""),
-                payload.get("optional_text", ""),
-                payload.get("note", ""),
-                now,
-                step_id,
-            ),
-        )
-        self.conn.commit()
-
-    def delete_process_step(self, step_id: int):
-        self.conn.execute("DELETE FROM process_steps WHERE id = ?", (step_id,))
-        self.conn.commit()
 
     def get_shared_account(self, account_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM shared_accounts WHERE id = ?", (account_id,)).fetchone()
@@ -1976,7 +1784,7 @@ class Database:
         self.conn.execute("DELETE FROM assets WHERE source_file = ?", (source_file,))
         now = datetime.now().isoformat(timespec="seconds")
         for item in items:
-            cursor = self.conn.execute(
+            self.conn.execute(
                 """
                 INSERT INTO assets (
                     record_no, platform, account_no, account_subject_code, account_subject_name,
@@ -3124,8 +2932,6 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         self.shutdown_manager = AppShutdownManager(self)
         self.search_var = tk.StringVar()
         self.credential_search_var = tk.StringVar()
-        self.process_search_var = tk.StringVar()
-        self.process_template_var = tk.StringVar(value=PROCESS_FLOW_TEMPLATES[0]["label"] if PROCESS_FLOW_TEMPLATES else "")
         self.credential_source_var = tk.StringVar(value="全部来源")
         self.credential_group_var = tk.StringVar(value="不分组")
         self.status_var = tk.StringVar(value="准备就绪")
@@ -3133,9 +2939,6 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         self.module_title_var = tk.StringVar(value=EXPIRY_MODULE_TITLE)
         self.module_path_var = tk.StringVar(value="")
         self.module_desc_var = tk.StringVar(value="")
-        self.process_flow_summary_var = tk.StringVar(value="请选择左侧流程。")
-        self.process_status_var = tk.StringVar(value="流程中心已就绪。")
-        self.process_step_title_var = tk.StringVar(value="步骤详情")
         self.login_memory_service = LoginMemoryService()
         self.visible_columns = self.load_visible_columns()
         self.close_behavior = self.load_close_behavior()
@@ -3215,7 +3018,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         self._page_registry: dict[str, tuple] = {
             "expiry":         (self.expiry_page,         self.refresh_table),
             "credentials":    (self.credentials_page,     self.refresh_credentials_table),
-            "processes":      (self.process_page,        self.refresh_process_flows),
+            "processes":      (self.process_page,        self.process_page_refresh),
             "backend_tools":  (self.backend_page,         self.refresh_backend_tools_page),
             "study_notes":    (self.study_notes_page,    None),
             "qa_work_log":    (self.qa_work_log_page,    None),
@@ -3551,13 +3354,28 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         CredentialsPage(self, self.page_container, AccountImagePreview).build()
 
     def _build_process_page(self):
-        """构建 process page。"""
-        ProcessPage(
-            self,
+        """构建流程中心页面（视图与交互都在 process_page.ProcessPage 里）。"""
+        self.process_page = ProcessPage(
             self.page_container,
-            process_flow_templates=PROCESS_FLOW_TEMPLATES,
+            self.db,
+            app_title=APP_TITLE,
+            flow_templates=PROCESS_FLOW_TEMPLATES,
             image_preview_cls=AccountImagePreview,
-        ).build()
+            images=ProcessImageTools(
+                base_dir=BASE_DIR,
+                resolve_paths=resolve_account_image_paths,
+                storage_value=get_account_image_storage_value,
+                make_dir=ensure_account_image_dir,
+                parse_items=parse_account_image_items,
+                serialize_items=serialize_account_image_items,
+            ),
+            format_datetime=format_datetime_text,
+            on_status=self.log_status,
+        )
+
+    def process_page_refresh(self):
+        """页面切换垫片：让流程中心按当前选中项重新渲染。"""
+        self.process_page.refresh_flows()
 
     def _build_expiry_page(self):
         """构建 expiry page。"""
@@ -4362,383 +4180,6 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         if asset_id is None:
             return
         self.show_account_manager(asset_id)
-
-    def set_process_step_detail_text(self, content: str):
-        self.process_step_detail_text.configure(state="normal")
-        self.process_step_detail_text.delete("1.0", "end")
-        self.process_step_detail_text.insert("1.0", content)
-        self.process_step_detail_text.configure(state="disabled")
-
-    def get_selected_process_flow_id(self, silent: bool = False) -> int | None:
-        selection = self.process_flow_tree.selection()
-        if not selection:
-            if not silent:
-                messagebox.showinfo(APP_TITLE, "请先选择一个流程。", parent=self)
-            return None
-        row = self.process_flow_row_meta.get(selection[0])
-        if not row:
-            if not silent:
-                messagebox.showwarning(APP_TITLE, "当前流程不存在。", parent=self)
-            return None
-        return int(row["id"])
-
-    def get_selected_process_flow(self, silent: bool = False) -> sqlite3.Row | None:
-        flow_id = self.get_selected_process_flow_id(silent=silent)
-        if flow_id is None:
-            return None
-        return self.db.get_process_flow(flow_id)
-
-    def get_selected_process_step_id(self, silent: bool = False) -> int | None:
-        selection = self.process_step_tree.selection()
-        if not selection:
-            if not silent:
-                messagebox.showinfo(APP_TITLE, "请先选择一个步骤。", parent=self)
-            return None
-        row = self.process_step_row_meta.get(selection[0])
-        if not row:
-            if not silent:
-                messagebox.showwarning(APP_TITLE, "当前步骤不存在。", parent=self)
-            return None
-        return int(row["id"])
-
-    def get_selected_process_step(self, silent: bool = False) -> sqlite3.Row | None:
-        step_id = self.get_selected_process_step_id(silent=silent)
-        if step_id is None:
-            return None
-        return self.db.get_process_step(step_id)
-
-    def refresh_process_flows(self, select_flow_id: int | None = None):
-        current_selected_id = self.get_selected_process_flow_id(silent=True)
-        target_flow_id = select_flow_id if select_flow_id is not None else current_selected_id
-        for item in self.process_flow_tree.get_children():
-            self.process_flow_tree.delete(item)
-        self.process_flow_row_meta = {}
-        rows = self.db.fetch_process_flows(self.process_search_var.get().strip())
-        for row in rows:
-            item_id = f"process_flow_{row['id']}"
-            self.process_flow_row_meta[item_id] = row
-            self.process_flow_tree.insert(
-                "",
-                "end",
-                iid=item_id,
-                values=(
-                    row["title"],
-                    row["category"] or "",
-                    row["platform"] or "",
-                    format_datetime_text(row["updated_at"] or ""),
-                ),
-            )
-        if rows:
-            selected_item = None
-            for item_id, row in self.process_flow_row_meta.items():
-                if int(row["id"]) == int(target_flow_id or rows[0]["id"]):
-                    selected_item = item_id
-                    break
-            selected_item = selected_item or next(iter(self.process_flow_row_meta))
-            self.process_flow_tree.selection_set(selected_item)
-            self.process_flow_tree.focus(selected_item)
-            self.process_flow_tree.see(selected_item)
-            self.refresh_process_steps()
-            self.process_status_var.set(f"当前共 {len(rows)} 个流程。")
-            return
-        self.process_flow_summary_var.set("当前没有流程记录。点击上方“新增流程”开始录入。")
-        self.process_step_title_var.set("步骤详情")
-        self.process_step_preview.set_value("")
-        self.set_process_step_detail_text("当前没有步骤可显示。")
-        for item in self.process_step_tree.get_children():
-            self.process_step_tree.delete(item)
-        self.process_step_row_meta = {}
-        self.process_status_var.set("当前没有流程记录。")
-
-    def refresh_process_steps(self, select_step_id: int | None = None):
-        flow = self.get_selected_process_flow(silent=True)
-        for item in self.process_step_tree.get_children():
-            self.process_step_tree.delete(item)
-        self.process_step_row_meta = {}
-        if not flow:
-            self.process_flow_summary_var.set("请选择左侧流程。")
-            self.process_step_title_var.set("步骤详情")
-            self.process_step_preview.set_value("")
-            self.set_process_step_detail_text("请选择左侧流程后查看步骤详情。")
-            return
-        steps = self.db.fetch_process_steps(int(flow["id"]))
-        summary_lines = [
-            f"流程名称：{flow['title']}",
-            f"分类：{flow['category'] or ''}",
-            f"平台：{flow['platform'] or ''}",
-            f"流程入口链接：{flow['link_url'] or ''}",
-            f"步骤数：{len(steps)}",
-            f"备注：{flow['note'] or ''}",
-        ]
-        self.process_flow_summary_var.set("\n".join(summary_lines))
-        current_selected_id = self.get_selected_process_step_id(silent=True)
-        target_step_id = select_step_id if select_step_id is not None else current_selected_id
-        for row in steps:
-            item_id = f"process_step_{row['id']}"
-            self.process_step_row_meta[item_id] = row
-            self.process_step_tree.insert(
-                "",
-                "end",
-                iid=item_id,
-                values=(
-                    row["step_no"],
-                    row["title"],
-                    row["link_url"] or "",
-                ),
-            )
-        if steps:
-            selected_item = None
-            for item_id, row in self.process_step_row_meta.items():
-                if int(row["id"]) == int(target_step_id or steps[0]["id"]):
-                    selected_item = item_id
-                    break
-            selected_item = selected_item or next(iter(self.process_step_row_meta))
-            self.process_step_tree.selection_set(selected_item)
-            self.process_step_tree.focus(selected_item)
-            self.process_step_tree.see(selected_item)
-            self.refresh_process_step_detail()
-            self.process_status_var.set(f"当前流程“{flow['title']}”共有 {len(steps)} 个步骤。")
-            return
-        self.process_step_title_var.set("步骤详情")
-        self.process_step_preview.set_value("")
-        self.set_process_step_detail_text("当前流程还没有步骤。点击“新增步骤”开始录入。")
-        self.process_status_var.set(f"当前流程“{flow['title']}”还没有步骤。")
-
-    def build_process_step_detail_text(self, row: sqlite3.Row) -> str:
-        return "\n".join(
-            [
-                f"步骤序号：{row['step_no']}",
-                f"步骤标题：{row['title']}",
-                f"步骤链接：{row['link_url'] or ''}",
-                f"步骤截图：{get_account_image_display_text(row['screenshot_path'] or '')}",
-                "",
-                "步骤描述：",
-                row["description_text"] or "",
-                "",
-                "必填项说明：",
-                row["required_text"] or "",
-                "",
-                "选填项说明：",
-                row["optional_text"] or "",
-                "",
-                "备注：",
-                row["note"] or "",
-            ]
-        ).strip()
-
-    def refresh_process_step_detail(self):
-        row = self.get_selected_process_step(silent=True)
-        if not row:
-            self.process_step_title_var.set("步骤详情")
-            self.process_step_preview.set_value("")
-            self.set_process_step_detail_text("请选择步骤后查看详情。")
-            return
-        self.process_step_title_var.set(f"【{row['step_no']}】{row['title']}")
-        self.process_step_preview.set_value(row["screenshot_path"] or "")
-        self.set_process_step_detail_text(self.build_process_step_detail_text(row))
-
-    def add_process_flow(self):
-        dialog = ProcessFlowDialog(self, "新增流程", app_title=APP_TITLE)
-        if dialog.result:
-            flow_id = self.db.add_process_flow(dialog.result)
-            self.refresh_process_flows(select_flow_id=flow_id)
-            self.log_status("已新增流程。")
-
-    def get_selected_process_template(self) -> dict | None:
-        selected_label = normalize_text(self.process_template_var.get())
-        for item in PROCESS_FLOW_TEMPLATES:
-            if normalize_text(item.get("label", "")) == selected_label:
-                return item
-        return PROCESS_FLOW_TEMPLATES[0] if PROCESS_FLOW_TEMPLATES else None
-
-    def create_process_template(self):
-        template = self.get_selected_process_template()
-        if not template:
-            messagebox.showinfo(APP_TITLE, "当前没有可用的流程模板。", parent=self)
-            return
-        template_title = normalize_text(template["flow"].get("title", ""))
-        existing_titles = {normalize_text(row["title"]) for row in self.db.fetch_process_flows()}
-        if template_title and template_title in existing_titles:
-            if not messagebox.askyesno(
-                APP_TITLE,
-                f"当前已存在同名流程“{template_title}”。\n\n是否仍然继续创建一份新模板副本？",
-                parent=self,
-            ):
-                return
-        flow_id = self.db.add_process_flow(template["flow"])
-        created_steps = 0
-        for step in template.get("steps", []):
-            self.db.add_process_step(flow_id, step)
-            created_steps += 1
-        self.refresh_process_flows(select_flow_id=flow_id)
-        self.log_status(f"已创建流程模板：{template_title or '未命名模板'}。")
-        messagebox.showinfo(
-            APP_TITLE,
-            f"模板创建成功：{template_title or '未命名模板'}\n共生成 {created_steps} 个步骤，你可以继续按实际业务修改。",
-            parent=self,
-        )
-
-    def edit_process_flow(self):
-        row = self.get_selected_process_flow()
-        if not row:
-            return
-        dialog = ProcessFlowDialog(self, "编辑流程", initial=dict(row), app_title=APP_TITLE)
-        if dialog.result:
-            self.db.update_process_flow(int(row["id"]), dialog.result)
-            self.refresh_process_flows(select_flow_id=int(row["id"]))
-            self.log_status("已更新流程。")
-
-    def delete_process_flow(self):
-        row = self.get_selected_process_flow()
-        if not row:
-            return
-        step_count = len(self.db.fetch_process_steps(int(row["id"])))
-        if not messagebox.askyesno(
-            APP_TITLE,
-            f"确认删除流程“{row['title']}”吗？\n\n删除后将同时删除该流程下的 {step_count} 个步骤记录。",
-            parent=self,
-        ):
-            return
-        self.db.delete_process_flow(int(row["id"]))
-        self.refresh_process_flows()
-        self.log_status("已删除流程。")
-
-    def build_process_flow_text(self, flow: sqlite3.Row, steps: list[sqlite3.Row]) -> str:
-        lines = [
-            f"流程名称：{flow['title']}",
-            f"分类：{flow['category'] or ''}",
-            f"平台：{flow['platform'] or ''}",
-            f"流程入口链接：{flow['link_url'] or ''}",
-            f"备注：{flow['note'] or ''}",
-            "",
-            "步骤明细：",
-        ]
-        if not steps:
-            lines.append("当前没有步骤。")
-        for step in steps:
-            lines.extend(
-                [
-                    f"【{step['step_no']}】{step['title']}",
-                    f"步骤链接：{step['link_url'] or ''}",
-                    f"步骤截图：{get_account_image_display_text(step['screenshot_path'] or '')}",
-                    f"步骤描述：{step['description_text'] or ''}",
-                    f"必填项：{step['required_text'] or ''}",
-                    f"选填项：{step['optional_text'] or ''}",
-                    f"备注：{step['note'] or ''}",
-                    "",
-                ]
-            )
-        return "\n".join(lines).strip()
-
-    def copy_process_flow(self):
-        flow = self.get_selected_process_flow()
-        if not flow:
-            return
-        steps = self.db.fetch_process_steps(int(flow["id"]))
-        text = self.build_process_flow_text(flow, steps)
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        self.update()
-        self.log_status(f"已复制流程：{flow['title']}")
-        messagebox.showinfo(APP_TITLE, "流程内容已复制到剪贴板。", parent=self)
-
-    def open_process_flow_link(self):
-        flow = self.get_selected_process_flow()
-        if not flow:
-            return
-        link_url = normalize_text(flow["link_url"])
-        if not link_url:
-            messagebox.showinfo(APP_TITLE, "当前流程没有入口链接。", parent=self)
-            return
-        target_url = link_url if re.match(r"^https?://", link_url, re.I) else f"https://{link_url}"
-        try:
-            webbrowser.open(target_url)
-            self.log_status("已打开流程入口链接。")
-        except (webbrowser.Error, OSError, Exception) as exc:
-            messagebox.showerror(APP_TITLE, f"打开流程链接失败：\n{exc}", parent=self)
-
-    def add_process_step(self):
-        flow = self.get_selected_process_flow()
-        if not flow:
-            return
-        dialog = ProcessStepDialog(
-            self,
-            "新增步骤",
-            initial={"step_no": self.db.get_next_process_step_no(int(flow["id"]))},
-            app_title=APP_TITLE,
-            image_preview_cls=AccountImagePreview,
-        )
-        if dialog.result:
-            step_id = self.db.add_process_step(int(flow["id"]), dialog.result)
-            self.refresh_process_steps(select_step_id=step_id)
-            self.log_status("已新增流程步骤。")
-
-    def edit_process_step(self):
-        row = self.get_selected_process_step()
-        if not row:
-            return
-        dialog = ProcessStepDialog(
-            self,
-            "编辑步骤",
-            initial=dict(row),
-            app_title=APP_TITLE,
-            image_preview_cls=AccountImagePreview,
-        )
-        if dialog.result:
-            self.db.update_process_step(int(row["id"]), dialog.result)
-            self.refresh_process_steps(select_step_id=int(row["id"]))
-            self.log_status("已更新流程步骤。")
-
-    def delete_process_step(self):
-        row = self.get_selected_process_step()
-        if not row:
-            return
-        if not messagebox.askyesno(APP_TITLE, f"确认删除步骤【{row['step_no']}】{row['title']}吗？", parent=self):
-            return
-        self.db.delete_process_step(int(row["id"]))
-        self.refresh_process_steps()
-        self.log_status("已删除流程步骤。")
-
-    def open_process_step_link(self):
-        row = self.get_selected_process_step()
-        if not row:
-            return
-        link_url = normalize_text(row["link_url"])
-        if not link_url:
-            messagebox.showinfo(APP_TITLE, "当前步骤没有链接。", parent=self)
-            return
-        target_url = link_url if re.match(r"^https?://", link_url, re.I) else f"https://{link_url}"
-        try:
-            webbrowser.open(target_url)
-            self.log_status("已打开步骤链接。")
-        except (webbrowser.Error, OSError, Exception) as exc:
-            messagebox.showerror(APP_TITLE, f"打开步骤链接失败：\n{exc}", parent=self)
-
-    def open_process_step_image(self):
-        row = self.get_selected_process_step()
-        if not row:
-            return
-        image_value = normalize_text(row["screenshot_path"])
-        if not image_value:
-            messagebox.showinfo(APP_TITLE, "当前步骤没有截图。", parent=self)
-            return
-        self.process_step_preview.set_value(image_value)
-        self.process_step_preview.open_large_viewer(parent=self, title="查看步骤截图")
-
-    def open_process_step_image_folder(self):
-        row = self.get_selected_process_step()
-        if not row:
-            return
-        image_value = normalize_text(row["screenshot_path"])
-        if not image_value:
-            messagebox.showinfo(APP_TITLE, "当前步骤没有截图。", parent=self)
-            return
-        try:
-            self.process_step_preview.set_value(image_value)
-            self.process_step_preview.open_current_image_folder(parent=self)
-            self.log_status("已打开步骤截图目录。")
-        except (OSError, Exception) as exc:
-            messagebox.showerror(APP_TITLE, f"打开步骤截图目录失败：\n{exc}", parent=self)
 
     def build_credential_group_label(self, row: dict) -> str:
         group_mode = self.credential_group_var.get()
