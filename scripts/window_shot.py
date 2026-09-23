@@ -8,10 +8,18 @@
 ``PrintWindow(hwnd, memdc, PW_RENDERFULLCONTENT)`` 是让窗口自己把界面画到
 我们给的 DC 上，与前后台、与有没有真实桌面都无关。
 
+**但跨进程抓图不能用这个标志**：``PW_RENDERFULLCONTENT(0x2)`` 对**本进程**窗口
+没问题（WM_PRINT 同步处理），对**别的进程**的 Tk 窗口会抓到近空白（客户区纯白，
+看图会以为程序没起来）。抓 exe 这类跨进程窗口必须传 ``flag=0``。实测见
+``build/probe/grab_exe_flags.py``。
+
 用法::
 
     from window_shot import shot_widget
     shot_widget(tk_window, "build/probe/alert.png")
+
+    from window_shot import _grab          # 跨进程（如打包好的 exe）要 flag=0
+    _grab(hwnd, flag=0).save("exe.png")
 
 命令行::
 
@@ -37,8 +45,13 @@ class CaptureFailed(RuntimeError):
     """抓图失败（窗口句柄不对、窗口已销毁、或抓到的是纯色空图）。"""
 
 
-def _grab(hwnd: int):
-    """把窗口内容抓成 PIL.Image。"""
+def _grab(hwnd: int, *, flag: int = PW_RENDERFULLCONTENT):
+    """把窗口内容抓成 PIL.Image。
+
+    ``flag`` 是 PrintWindow 的标志位。默认 ``PW_RENDERFULLCONTENT`` 适合**本进程**
+    窗口；抓**别的进程**的窗口（打包好的 exe）必须传 ``flag=0``，否则客户区一片白
+    （本机实测：flag=2 → 441 色、纯白；flag=0 → 793 色、界面完整）。
+    """
     from PIL import Image
 
     rect = wintypes.RECT()
@@ -54,7 +67,7 @@ def _grab(hwnd: int):
     bitmap = _gdi32.CreateCompatibleBitmap(window_dc, width, height)
     _gdi32.SelectObject(mem_dc, bitmap)
     try:
-        if not _user32.PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT):
+        if not _user32.PrintWindow(hwnd, mem_dc, flag):
             raise CaptureFailed("PrintWindow 返回 0")
 
         class BITMAPINFOHEADER(ctypes.Structure):
