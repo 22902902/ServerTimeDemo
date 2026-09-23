@@ -201,6 +201,15 @@ def _g_checklist(g: Pen) -> None:        # 待办
     g.poly([(5.6, 10.9), (10.5, 10.9)])
 
 
+def _g_excel(g: Pen) -> None:            # Excel 宝典
+    # 表格 + 一条竖向分隔：与 _g_grid（四个实心方块）区分开，
+    # 15px 下「外框 + 两横一竖」比任何字母缩写都更容易认出来是一张表。
+    g.box(2.6, 3.4, 13.4, 12.6, r=1.6)
+    g.poly([(2.6, 6.5), (13.4, 6.5)])
+    g.poly([(2.6, 9.6), (13.4, 9.6)])
+    g.poly([(7.0, 3.4), (7.0, 12.6)])
+
+
 def _g_dot(g: Pen) -> None:              # 兜底（未登记图标的模块）
     g.box(6.8, 6.8, 9.2, 9.2, r=1.2, fill=True)
 
@@ -227,6 +236,7 @@ NAV_GLYPHS = {
     "module_study_notes": _g_doc,
     "module_study_demo": _g_book,
     "module_life_todo": _g_checklist,
+    "module_life_excel": _g_excel,
 }
 
 
