@@ -184,6 +184,7 @@ def test_wired_into_ui():
         need = ["app_version", "markdown_view", "todo_db", "todo_page", "todo_icons",
                 "process_db", "process_page", "credential_process_dialogs",
                 "image_clipboard", "excel_db", "excel_page", "excel_todo_bridge",
+                "excel_note_bridge",
                 "excel_seed", "excel_seed_schema", "excel_seed_math",
                 "excel_seed_stat", "excel_seed_lookup", "excel_seed_text",
                 "excel_seed_date", "excel_seed_misc", "excel_seed_extra"]
