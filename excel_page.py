@@ -36,7 +36,7 @@ Excel 学习中心 · 界面层
 from __future__ import annotations
 
 import tkinter as tk
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -67,6 +67,7 @@ from excel_db import (
     build_choice_question,
     build_formula_question,
     difficulty_label,
+    group_quiz_round,
     importance_label,
     mastery_label,
     parse_date,
@@ -527,7 +528,8 @@ class ExcelLearningPage(ttk.Frame):
 
     def __init__(self, master, db, *, app_title: str, image_preview_cls=None,
                  images: ExcelImageTools | None = None, on_status=None,
-                 todo_hook=None, palette=MAIN_PALETTE, typography=TYPOGRAPHY):
+                 todo_hook=None, notes=None, palette=MAIN_PALETTE,
+                 typography=TYPOGRAPHY):
         super().__init__(master)
         self.db = db
         self.app_title = app_title
@@ -537,6 +539,10 @@ class ExcelLearningPage(ttk.Frame):
         # 「生成今日复习待办」的落库动作，由 main 注入 ExcelTodoBridge 的方法。
         # 本模块不 import todo_db / main —— 与图片能力同一个手法（避免循环依赖）。
         self.todo_hook = todo_hook
+        # 「生成学习笔记」的落库动作，由 main 注入 ExcelNoteBridge 对象。
+        # 与 todo_hook / images 同一个手法：本模块既不认识 study_notes_db
+        # 也不认识 main，所以不会形成循环依赖。
+        self.notes = notes
         self.palette = palette
         self.typography = typography
 
@@ -558,6 +564,13 @@ class ExcelLearningPage(ttk.Frame):
         self.quiz_picked = ""                          # 选择题刚点的那个选项
         self.quiz_formula_state = ""                   # 写公式题的自评结果
         self.quiz_retry_id: int | None = None          # 从错题本进来时记着它
+        # **本轮**（本次运行）的自测作答，顺序 = 作答先后。
+        # 「生成学习笔记」优先用它；应用重启后它是空的，那时从库里捞最近一轮
+        # （见 _note_source_items）。
+        self.quiz_session: list[dict] = []
+        # 本会话里建过的复习待办标题。只在「生成今日复习待办」成功之后才有值，
+        # 笔记的生成区拿它写「关联待办」那一行 —— 没建过就干脆不提。
+        self.review_todo_title = ""
         self.quiz_formula_var = tk.StringVar()
         self.quiz_mode_var = tk.StringVar(value=QUIZ_MODE_CHOICES[0][1])
 
@@ -603,6 +616,7 @@ class ExcelLearningPage(ttk.Frame):
             "更多",
             [
                 ("导出学习进度（Markdown）", self.export_progress),
+                ("生成学习笔记（整理到「学习笔记」）", self.generate_study_notes),
                 "---",
                 ("批量导入函数（CSV / Excel）", self.import_functions_dialog),
                 ("下载导入模板", self.save_import_template),
@@ -1206,9 +1220,125 @@ class ExcelLearningPage(ttk.Frame):
         payload = review_todo_payload(
             due_count=self.db.due_count(),
             today=today_str(),
-            extra_wrong=self.db.quiz_stats()["pending"])
+            extra_wrong=self.db.quiz_stats()["pending"],
+            note_hint=self._note_pointer_text())
         result = self.todo_hook(payload) or {}
         self._set_status(result.get("message", "已处理。"))
+
+    # ==================================================================
+    # 自测 → 学习笔记模板
+    # ==================================================================
+    # 不是视图，是一个动作：把「本轮自测碰过的函数」整理成笔记模块里的一套
+    # 模板（落点见 excel_note_bridge，是一个锁定分类）。
+    #
+    # 为什么做成按钮而不是「做完自动生成」：与待办联动同一个原则 —— 学习工具
+    # 不该在用户没同意的时候往别的模块里塞东西。按钮就摆在自测结算卡上，
+    # 答完一轮顺手一点；不点也不影响任何既有功能。
+
+    def _note_source_items(self):
+        """这一轮自测碰过的函数：答错的排前面，每个函数只留一条。
+
+        两条来源、一个口径：
+
+          1. **本轮**（``self.quiz_session``）：应用没重启时最准，「我刚做的
+             那十道题」就是它；
+          2. **最近一轮**（``recent_quiz_answers`` + ``group_quiz_round``）：
+             重启之后内存没了，但作答流水还在库里。隔 45 分钟以上算换了一轮，
+             所以捞回来的是「上一次那一轮」，不是今天所有作答。
+
+        两条都过一遍 ``group_quiz_round``，去重与排序口径完全一致 ——
+        来源不同不该导致整理出来的东西不一样。
+        """
+        if self.quiz_session:
+            # 内存里的顺序是「先做的在前」，而 group_quiz_round 要的是倒序
+            # （它从最新一条往回吃），所以先翻一下。
+            return group_quiz_round(list(reversed(self.quiz_session)))
+        return group_quiz_round(self.db.recent_quiz_answers())
+
+    def _note_pointer_text(self) -> str:
+        """「笔记区在哪、已经有几篇」—— 写进待办备注用。
+
+        一篇都没生成过时返回空串：那就不提这件事，别在待办备注里塞一句
+        「笔记：0 篇」，看着像错误。**只读**，不会顺手把分类建出来。
+        """
+        if self.notes is None:
+            return ""
+        return self.notes.pointer_text()
+
+    def _note_confirm_text(self, plan: dict) -> str:
+        """确认框里那段话：落点、条数、已有的会被怎么处理，一次说清。
+
+        单独抽出来是为了能测 —— 弹窗里的文案本来最容易写歪（说「新建 3 篇」
+        实际却更新了 3 篇），而它又是用户唯一的事前依据。
+        """
+        lines = [f"把这一轮自测的 {plan['total']} 个函数整理成学习笔记模板。", ""]
+        area = f"落点：{plan['area']}"
+        if plan.get("first_run"):
+            area += "（首次生成时会自动建好这个分类）"
+        lines.append(area)
+
+        def block(title: str, titles: list, limit: int = 5) -> None:
+            if not titles:
+                return
+            lines.append("")
+            lines.append(f"{title}（{len(titles)} 篇）：")
+            lines.extend(f"    · {name}" for name in titles[:limit])
+            if len(titles) > limit:
+                lines.append(f"    …… 另外 {len(titles) - limit} 篇")
+
+        block("新建", plan.get("created_titles") or [])
+        block("更新（只换自动生成那一段，你写的「我的补充」原样保留）",
+              plan.get("updated_titles") or [])
+        lines += [
+            "",
+            "笔记里上面那段是自动生成的（颜色 / 字体 / 排版都跟你自己写的不同，"
+            "一眼能分开），下面「我的补充」是你自己的地方；重新生成只覆盖上面那段。",
+        ]
+        return "\n".join(lines)
+
+    def generate_study_notes(self):
+        """把这一轮自测整理成学习笔记模板。
+
+        **只在点这个按钮时才写**（与待办联动同一个原则）：不做后台自动整理。
+        真正的写库全在注入进来的 ``notes``（``ExcelNoteBridge``）里。
+        """
+        if self.notes is None:
+            self._set_status("这一版没注入笔记桥，笔记联动还没接上。")
+            return
+        items = self._note_source_items()
+        if not items:
+            messagebox.showinfo(
+                "生成学习笔记",
+                "还没有可整理的自测记录。\n\n"
+                "先去「自测出题」做一轮（答错的那几道最值得记），"
+                "回来这里就能一键整理成一套笔记模板。",
+                parent=self)
+            return
+
+        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+        todo_title = self.review_todo_title
+        # 先干跑一遍：确认框要说的「新建几篇 / 更新几篇」与实际写库走的是
+        # 同一条判定路径（bridge 里 _classify 收口），不然确认框会骗人。
+        plan = self.notes.plan_notes(items, generated_at=generated_at,
+                                     todo_title=todo_title, todo_done=False)
+        if not plan["total"]:
+            self._set_status("这一轮里没有可整理的函数。")
+            return
+        if not messagebox.askyesno("生成学习笔记", self._note_confirm_text(plan),
+                                   parent=self):
+            return
+
+        result = self.notes.sync_notes(items, generated_at=generated_at,
+                                       todo_title=todo_title, todo_done=False)
+        parts = []
+        if result["created"]:
+            parts.append(f"新建 {result['created']} 篇")
+        if result["updated"]:
+            parts.append(f"更新 {result['updated']} 篇")
+        self._set_status(
+            f"已{'、'.join(parts)}学习笔记 → {result['area']}。"
+            "切到「学习笔记」模块就能接着写。")
+        self.refresh_nav()
 
     # ==================================================================
     # 视图 2：函数宝典
@@ -1833,6 +1963,22 @@ class ExcelLearningPage(ttk.Frame):
             prompt=question["prompt"], answer=question["answer"],
             user_answer=user_answer, is_correct=is_correct,
             category=question.get("category", ""))
+        # 记一笔「本轮」作答。字段名刻意跟 recent_quiz_answers 查出来的行对齐
+        # （created_at / user_answer / is_correct），这样「本轮」和「重启后从
+        # 库里捞回来的最近一轮」能走同一个 group_quiz_round —— 两条来源的去重
+        # 与排序口径必须完全一致，否则同一件事在两种情况下整理出的结果不同。
+        entry = {
+            **question,
+            "user_answer": user_answer,
+            "is_correct": bool(is_correct),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        # 掌握度 / 下次复习时间从回灌结果里带回来：笔记模板的元信息要用，
+        # 而且这两个值只有刚做完自测时才最新鲜。
+        if state.get("mastery") is not None:
+            entry["mastery"] = state["mastery"]
+            entry["next_review_at"] = state.get("next_review_at", "")
+        self.quiz_session.append(entry)
         # 从「重做这一道」进来的：做对了就顺手把它移出错题本
         if self.quiz_retry_id and is_correct:
             self.db.mark_quiz_retried(self.quiz_retry_id, correct=False)
@@ -1884,6 +2030,13 @@ class ExcelLearningPage(ttk.Frame):
                 side="left", padx=6)
         ttk.Button(row, text="去做今日复习",
                    command=self.start_today_review).pack(side="left")
+        # 答完一轮就是「学完了」的那一刻 —— 把整理笔记的入口放在这儿最顺手。
+        # 数量直接写在按钮上：不用点开才知道要做多少事。
+        note_count = len(self._note_source_items())
+        if note_count:
+            ttk.Button(row, text=f"生成学习笔记（{note_count}）",
+                       command=self.generate_study_notes).pack(
+                side="left", padx=(6, 0))
         return card
 
     # ==================================================================

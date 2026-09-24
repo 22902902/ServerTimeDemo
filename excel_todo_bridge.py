@@ -36,11 +36,15 @@ REVIEW_TODO_TAG = "Excel"
 DEFAULT_REVIEW_PRIORITY = 2
 
 
-def review_todo_payload(*, due_count, today, extra_wrong=0) -> dict:
+def review_todo_payload(*, due_count, today, extra_wrong=0,
+                        note_hint="") -> dict:
     """拼一条复习待办的标题与备注。**纯函数，测试直接打这里。**
 
     ``due_count``  —— 今天到期的函数数（来自 ``ExcelDB.due_count``）
     ``extra_wrong``—— 错题本里还挂着几条（顺手写进备注，省得来回切视图）
+    ``note_hint``  —— 「生成学习笔记」整理出来的笔记区在哪、有几篇。
+        这是「待办 ⇄ 笔记」的反向那一半：从待办点进去的人，一眼就知道
+        之前整理的那些笔记放在哪。没生成过笔记时传空串，这句话就不出现。
     """
     count = max(0, int(due_count or 0))
     title = f"复习 Excel 函数 {count} 个" if count else "复习 Excel 函数"
@@ -49,6 +53,9 @@ def review_todo_payload(*, due_count, today, extra_wrong=0) -> dict:
         lines.append("队列是空的，可以去「函数宝典」标几个不熟的，或做一轮自测。")
     if int(extra_wrong or 0) > 0:
         lines.append(f"错题本里还有 {int(extra_wrong)} 条没订正。")
+    hint = str(note_hint or "").strip()
+    if hint:
+        lines.append(hint)
     lines.append("打开：个人系统 → 生活 → Excel 宝典 → 今日复习。")
     return {
         "title": title,
