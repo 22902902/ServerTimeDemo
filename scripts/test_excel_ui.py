@@ -5,7 +5,7 @@
 ------------------------------------------------------------------------------
 数据层测「算得对」，这里测「画出来了没有」。本模块实测踩到/堵住过的坑：
 
-* **六个视图是建一次、pack_forget 切换的**，不是每次重建。切错帧的表现是
+* **八个视图是建一次、pack_forget 切换的**，不是每次重建。切错帧的表现是
   「点了一下什么都没发生」，不看控件树看不出来。
 * **`<<TreeviewSelect>>` 是延迟投递的**（实测：selection_set 之后不进一次
   事件循环根本收不到）。原来的 `_nav_guard` 布尔守卫因此完全无效 ——
@@ -27,8 +27,8 @@
 
 覆盖：
 A. 骨架        左右两栏宽度 / 工具栏按钮 / 状态栏贴在底部
-B. 左栏导航    视图 6 项 + 分类 12 项 / 数量列 / 默认选中今日复习
-C. 视图切换    六视图逐一切换不炸、帧真的换了、标题跟着变
+B. 左栏导航    视图 8 项 + 分类 12 项 / 数量列 / 默认选中今日复习
+C. 视图切换    八视图逐一切换不炸、帧真的换了、标题跟着变
 D. 今日复习    卡片数 == min(队列, 12) / 三个反馈按钮 / 空队列提示
 E. 函数宝典    列表 200 行 / 详情字段 / 掌握度下拉 / 相关函数胶囊可点
 F. 筛选行      按视图换候选值 / 配方视图收起掌握度 / 配方分类真的筛
@@ -39,6 +39,12 @@ I. 学习笔记    空状态 / 存一条后出现在列表 / 预览渲染 Markdo
 J. 打卡统计    5 个指标卡 / 打卡日历 35 格 / 分类条形
 K. 自建函数    入口存在 / 走数据层加一条后列表变 201 / 内置不给删
 L. 关键纪律    定宽控件不被 expand 控件饿死 / 状态栏在底部
+M. 自测/错题本 两个新视图切得动 / 筛选行只留分类 / 答题前不揭晓 /
+                 答错进错题本并回灌 / 重做做对自动移出
+N. 批量导入   「更多」菜单四个入口 / 模板与导出真的落盘 / 先报规模再写 /
+                 撞内置会先问 / 点「否」一个字都不写
+O. 待办按钮   打开页面不会自动建 / 点一下才调一次桥 / 未注入时只提示
+P. 雷达图     定宽 Canvas / 12 个分类名与官方一致 / 12 轴顶点 / 排在条形图之前
 
 用法::
 
@@ -73,8 +79,10 @@ from excel_page import (  # noqa: E402
     VIEW_LIBRARY,
     VIEW_NOTE,
     VIEW_PATH,
+    VIEW_QUIZ,
     VIEW_RECIPE,
     VIEW_STATS,
+    VIEW_WRONG,
     ExcelFunctionDialog,
     ExcelLearningPage,
 )
@@ -200,7 +208,7 @@ def test_nav(page, db) -> None:
     check("分组顺序是 视图 → 分类", groups == ("g::views", "g::cats"), groups)
 
     views = page.nav_tree.get_children("g::views")
-    check("视图 6 项", len(views) == 6, len(views))
+    check("视图 8 项", len(views) == 8, len(views))
     labels = [page.nav_tree.item(iid, "text") for iid in views]
     check("视图名与 VIEW_CHOICES 一致",
           all(any(label in text for _k, label in VIEW_CHOICES) for text in labels),
@@ -799,6 +807,372 @@ def collect_canvases(widget) -> list:
     return found
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# M. 自测出题 / 错题本
+# ══════════════════════════════════════════════════════════════════════════
+def walk_all(widget) -> list:
+    """把一棵控件树摊平（含自身）。"""
+    found = [widget]
+    try:
+        children = widget.winfo_children()
+    except tk.TclError:
+        return found
+    for child in children:
+        found.extend(walk_all(child))
+    return found
+
+
+def collect_menu_labels(widget) -> list:
+    """收集所有下拉菜单的条目文字（``create_menu_button`` 把菜单挂在 .menu 上）。"""
+    labels: list[str] = []
+    for child in walk_all(widget):
+        menu = getattr(child, "menu", None)
+        if not isinstance(menu, tk.Menu):
+            continue
+        try:
+            end = menu.index("end")
+        except tk.TclError:
+            continue
+        if end is None:
+            continue
+        for index in range(int(end) + 1):
+            try:
+                if menu.type(index) == "separator":
+                    continue
+                labels.append(str(menu.entrycget(index, "label")))
+            except tk.TclError:
+                continue
+    return labels
+
+
+def test_quiz_view(root, page, db) -> None:
+    section("[M] 自测出题 / 错题本两个视图")
+    check("两个新视图的帧都建了",
+          VIEW_QUIZ in page.view_frames and VIEW_WRONG in page.view_frames,
+          sorted(page.view_frames))
+    check("视图总数 8", len(VIEW_CHOICES) == 8, len(VIEW_CHOICES))
+
+    views = page.nav_tree.get_children("g::views")
+    labels = [page.nav_tree.item(iid, "text") for iid in views]
+    check("导航里有「自测出题」", any("自测出题" in t for t in labels), labels)
+    check("导航里有「错题本」", any("错题本" in t for t in labels), labels)
+
+    # 切过去不许被延迟投递的 <<TreeviewSelect>> 抢回来（老坑）
+    for key in (VIEW_QUIZ, VIEW_WRONG):
+        page.show_view(key)
+        settle(root)
+        check(f"切到 {key} 后视图没被抢走", page.view_key == key, page.view_key)
+        check(f"{key} 的帧真的映射了", mapped(page.view_frames[key]))
+
+    # 筛选行：这两个视图只留分类
+    page.show_view(VIEW_QUIZ)
+    settle(root)
+    check("自测视图收起搜索框", not page.search_group.winfo_ismapped())
+    check("自测视图保留分类下拉", page.category_group.winfo_ismapped())
+    check("自测视图收起掌握度下拉", not page.mastery_group.winfo_ismapped())
+    page.show_view(VIEW_WRONG)
+    settle(root)
+    check("错题本同样收起掌握度下拉",
+          not page.mastery_group.winfo_ismapped())
+    check("错题本保留分类下拉", page.category_group.winfo_ismapped())
+    check("错题本的搜索框还在（按函数名 / 题干搜）",
+          page.search_group.winfo_ismapped())
+    page.show_view(VIEW_LIBRARY)
+    settle(root)
+    check("切回宝典三组都回来，且 pack 顺序固定（搜索→分类→掌握度→提示）",
+          page.filter_row.pack_slaves()
+          == [page.search_group, page.category_group, page.mastery_group,
+              page.filter_hint],
+          page.filter_row.pack_slaves())
+
+    # 抽题
+    page.show_view(VIEW_QUIZ)
+    page.start_quiz()
+    settle(root)
+    check("抽出一轮题（默认 10 道）",
+          len(page.quiz_questions) == 10, len(page.quiz_questions))
+    check("计数归零重来", page.quiz_correct == 0 and page.quiz_wrong == 0,
+          (page.quiz_correct, page.quiz_wrong))
+    question = page.quiz_questions[0]
+    check("首题有题干", bool(question["prompt"].strip()))
+    if question["quiz_type"] == "choice":
+        check("选择题摆了 4 个选项",
+              len(question["options"]) == 4, question["options"])
+        check("题面上没有答案（函数名打过码）",
+              question["answer"] not in question["prompt"], question["prompt"])
+
+    body = " ".join(texts_of(page.quiz_area.inner))
+    check("答题前不揭晓答案（没有「看完整说明」这种揭晓块）",
+          "看完整说明" not in body, body[:120])
+    check("答题前没有判分结论",
+          "答对了" not in body and "答错了" not in body, body[:120])
+
+    # 故意答错 → 进错题本 + 回灌掌握度
+    target_id = int(question["function_id"])
+    before_mastery = int((db.progress_map().get(target_id) or {})
+                         .get("mastery", 0) or 0)
+    if question["quiz_type"] == "choice":
+        wrong_option = [o for o in question["options"]
+                        if o != question["answer"]][0]
+        page.answer_choice(wrong_option)
+    else:
+        page.reveal_formula()
+        settle(root)
+        page.grade_formula(False)
+    settle(root)
+    check("答错计数 +1", page.quiz_wrong == 1, page.quiz_wrong)
+    after_mastery = int((db.progress_map().get(target_id) or {})
+                        .get("mastery", 0) or 0)
+    check("答错没让掌握度上升", after_mastery <= max(before_mastery, 1),
+          (before_mastery, after_mastery))
+    check("答完后揭晓块出现了", "看完整说明" in " ".join(
+        texts_of(page.quiz_area.inner)))
+    check("落进自测流水",
+          db.quiz_stats()["attempts"] == 1 and db.quiz_stats()["pending"] == 1,
+          db.quiz_stats())
+    check("导航里的错题本计数跟着更新（带「条」后缀）",
+          page.nav_tree.set(f"view::{VIEW_WRONG}", "count").startswith("1"),
+          page.nav_tree.set(f"view::{VIEW_WRONG}", "count"))
+
+    # 错题本视图：卡片、重做、订正
+    page.show_view(VIEW_WRONG)
+    settle(root)
+    cards = [w for w in page.wrong_area.inner.winfo_children()
+             if isinstance(w, tk.Frame)]
+    check("错题本画出了卡片", bool(cards), len(cards))
+    item = db.quiz_wrong_items()[0]
+    check("卡片上写了函数名", item["code"] in " ".join(
+        texts_of(page.wrong_area.inner)), item["code"])
+
+    page.redo_wrong_item(item)
+    settle(root)
+    check("重做只出这一道", len(page.quiz_questions) == 1,
+          len(page.quiz_questions))
+    check("重做的是同一个函数",
+          int(page.quiz_questions[0]["function_id"]) == int(item["function_id"]))
+    check("标着「错题重做」", page.quiz_retry_id == item["id"],
+          page.quiz_retry_id)
+
+    redo = page.quiz_questions[0]
+    if redo["quiz_type"] == "choice":
+        page.answer_choice(redo["answer"])
+    else:
+        page.reveal_formula()
+        settle(root)
+        page.grade_formula(True)
+    settle(root)
+    check("做对后错题本清空", db.quiz_wrong_items() == [],
+          [i["code"] for i in db.quiz_wrong_items()])
+    check("重做标记已复位", page.quiz_retry_id is None)
+    check("答对计数 +1", page.quiz_correct == 1, page.quiz_correct)
+
+    # 错题本空状态
+    page.show_view(VIEW_WRONG)
+    settle(root)
+    check("错题本空了以后有提示文案",
+          "错题" in " ".join(texts_of(page.wrong_area.inner))
+          or "干净" in " ".join(texts_of(page.wrong_area.inner)),
+          " ".join(texts_of(page.wrong_area.inner))[:120])
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# N. 批量导入 / 导出
+# ══════════════════════════════════════════════════════════════════════════
+def test_import_ui(root, page, db, tmpdir) -> None:
+    section("[N] 批量导入 / 导出（界面入口）")
+    labels = collect_menu_labels(page)
+    for label in ("批量导入函数（CSV / Excel）", "下载导入模板",
+                  "导出函数库为 CSV", "打开导出目录"):
+        check(f"「更多」菜单里有「{label}」", label in labels, labels)
+
+    export_dir = Path(page._export_dir())
+    check("导出目录与数据库同级（不往代码目录乱写）",
+          export_dir.parent == Path(db.db_path).parent,
+          (str(export_dir), str(db.db_path)))
+
+    page.save_import_template()
+    template = export_dir / "excel_import_template.csv"
+    check("「下载导入模板」真的落盘", template.exists() and template.stat().st_size > 0,
+          str(template))
+    check("模板是 UTF-8 BOM（Excel 双击不乱码）",
+          template.read_bytes().startswith(b"\xef\xbb\xbf"))
+    page.export_functions_csv()
+    exported = sorted(export_dir.glob("excel_functions_*.csv"))
+    check("「导出函数库为 CSV」真的落盘", bool(exported),
+          [p.name for p in exported])
+
+    # 不真弹窗：把文件选择与确认框换成假货
+    import excel_page as module
+    src = Path(tmpdir) / "ui_import.csv"
+    src.write_text(
+        "*code,*name_cn,*category,*syntax,*description,difficulty\n"
+        "MYUIFUNC,界面导入,统计,\"MYUIFUNC(区域)\",从界面导进来的,常用\n"
+        "VLOOKUP,撞内置,查找与引用,VLOOKUP(...),和内置重名,常用\n",
+        encoding="utf-8-sig")
+    asked = {"preview": [], "overwrite": []}
+
+    def fake_askyesno(title=None, message="", **kwargs):
+        if "重名" in message:
+            asked["overwrite"].append(message)
+            return False                 # 保留内置的，只导新的
+        asked["preview"].append(message)
+        return True
+
+    saved = (module.filedialog.askopenfilename, module.messagebox.askyesno,
+             module.messagebox.showinfo, module.messagebox.showerror)
+    module.filedialog.askopenfilename = lambda **k: str(src)
+    module.messagebox.askyesno = fake_askyesno
+    module.messagebox.showinfo = lambda *a, **k: None
+    module.messagebox.showerror = lambda *a, **k: None
+    before = db.count_functions()
+    try:
+        page.import_functions_dialog()
+        settle(root)
+    finally:
+        (module.filedialog.askopenfilename, module.messagebox.askyesno,
+         module.messagebox.showinfo, module.messagebox.showerror) = saved
+
+    check("先报了规模：弹过预览确认", bool(asked["preview"]), asked)
+    if asked["preview"]:
+        text = asked["preview"][0]
+        check("预览里写了新增 / 更新 / 跳过",
+              all(k in text for k in ("新增", "更新", "跳过")), text)
+        check("预览里点出了文件名的来处", src.name in text, text)
+    check("撞内置时会先问一句「要不要覆盖」", bool(asked["overwrite"]),
+          asked["overwrite"])
+    check("导入后库里 +1", db.count_functions() == before + 1, db.count_functions())
+    imported = db.get_function_by_code("MYUIFUNC")
+    check("导进来的是自建函数（可删）",
+          imported is not None and not int(imported["is_builtin"]),
+          imported and imported["is_builtin"])
+    check("内置的没被覆盖",
+          db.get_function_by_code("VLOOKUP")["name_cn"] != "撞内置",
+          db.get_function_by_code("VLOOKUP")["name_cn"])
+    check("导完自动切到函数宝典", page.view_key == VIEW_LIBRARY, page.view_key)
+    check("状态栏报了导入结果", "导入" in page.status_var.get(),
+          page.status_var.get())
+
+    # 取消路径：预览时点「否」，一个字都不该写
+    src2 = Path(tmpdir) / "ui_import_cancel.csv"
+    src2.write_text(
+        "*code,*name_cn,*category,*syntax,*description\n"
+        "MYCANCEL,被取消的,统计,\"MYCANCEL()\",不该被导进来\n",
+        encoding="utf-8-sig")
+    before2 = db.count_functions()
+    module.filedialog.askopenfilename = lambda **k: str(src2)
+    module.messagebox.askyesno = lambda *a, **k: False
+    module.messagebox.showinfo = lambda *a, **k: None
+    module.messagebox.showerror = lambda *a, **k: None
+    try:
+        page.import_functions_dialog()
+        settle(root)
+    finally:
+        (module.filedialog.askopenfilename, module.messagebox.askyesno,
+         module.messagebox.showinfo, module.messagebox.showerror) = saved
+    check("预览时点「否」不会写库", db.count_functions() == before2,
+          db.count_functions())
+    check("取消有明确文案", "取消" in page.status_var.get(), page.status_var.get())
+
+    # 收尾：把导入进来的清掉，别把多出来的那条留给后面的小节
+    db.delete_function(imported["id"])
+    page.refresh_nav()
+    check("收尾：自建函数删掉后回到原数（可删这条也是约定）",
+          db.count_functions() == before, db.count_functions())
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# O. 今日复习 → 生成待办
+# ══════════════════════════════════════════════════════════════════════════
+def test_todo_button(root, page, db) -> None:
+    section("[O] 今日复习 → 生成待办（只手动触发）")
+    calls: list = []
+
+    def hook(payload):
+        calls.append(dict(payload))
+        return {"created": True, "item_id": 42, "message": "假桥：已建待办。"}
+
+    original = page.todo_hook
+    page.todo_hook = hook
+    try:
+        page.show_view(VIEW_DUE)
+        settle(root)
+        check("光是打开今日复习页不会自动建待办（学习工具不做催命符）",
+              calls == [], calls)
+
+        joined = " ".join(texts_of(page.head_actions))
+        check("今日复习页有「生成今日复习待办」按钮",
+              "生成今日复习待办" in joined, joined)
+
+        page.create_review_todo()
+        settle(root)
+        check("点一下才调一次桥", len(calls) == 1, len(calls))
+        if calls:
+            payload = calls[0]
+            check("payload 四件套齐全（标题 / 日期 / 备注 / 优先级）",
+                  all(k in payload for k in ("title", "due_date", "notes",
+                                             "priority")), sorted(payload))
+            check("标题里带「复习」", "复习" in str(payload.get("title", "")))
+            check("日期就是今天（页面上看到哪天就落在哪天）",
+                  payload.get("due_date") == today_str(), payload.get("due_date"))
+        check("状态栏回了桥给的那句话", "假桥" in page.status_var.get(),
+              page.status_var.get())
+
+        # 没注入时只给提示，不许把页面搞崩
+        page.todo_hook = None
+        page.create_review_todo()
+        settle(root)
+        check("没注入 hook 时只给提示不报错",
+              "todo_hook" in page.status_var.get(), page.status_var.get())
+    finally:
+        page.todo_hook = original
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# P. 分类掌握雷达图
+# ══════════════════════════════════════════════════════════════════════════
+def test_radar(root, page, db) -> None:
+    section("[P] 分类掌握雷达图")
+    for item in db.all_functions()[:12]:
+        db.set_mastery(item["id"], MASTERY_GOOD)
+
+    page.show_view(VIEW_STATS)
+    settle(root)
+    canvases = collect_canvases(page.stats_area.inner)
+    radar = [c for c in canvases if int(c.cget("width")) == 400]
+    check("统计页画出了雷达图（定宽 400 的 Canvas，避开首帧宽度报 1）",
+          len(radar) == 1, [c.cget("width") for c in canvases])
+    if not radar:
+        return
+    canvas = radar[0]
+    polygons = [i for i in canvas.find_all() if canvas.type(i) == "polygon"]
+    labels = [canvas.itemcget(i, "text") for i in canvas.find_all()
+              if canvas.type(i) == "text"]
+    check("网格环 + 两层数据多边形都画了（同心环 4 层 + 2 层数据）",
+          len(polygons) >= 6, len(polygons))
+    check("12 个分类都标了名", len(labels) == 12, labels)
+    check("分类名就是官方 12 类（不多不少）",
+          set(labels) == {c["name"] for c in CATEGORIES}, sorted(set(labels)))
+    check("每个标签都有锚点（否则会全挤在圆心看不清）",
+          all(canvas.itemcget(i, "anchor") for i in canvas.find_all()
+              if canvas.type(i) == "text"))
+    data_polygon = polygons[-1]
+    check("数据多边形按 12 轴取点（12 个顶点 = 24 个坐标）",
+          len(canvas.coords(data_polygon)) == 24,
+          len(canvas.coords(data_polygon)))
+    check("有分类被标了熟练时数据多边形不是缩在圆心的空壳",
+          max(abs(v) for v in canvas.coords(data_polygon)) > 20,
+          canvas.coords(data_polygon)[:6])
+
+    # collect_canvases 是深度优先、按子控件顺序收集的，所以列表顺序就是版式顺序
+    # 版式：总进度 → 最近 7 天 → 打卡日历 → **雷达图** → 分类横向条
+    index = canvases.index(radar[0])
+    check("雷达图前面有老图（是新增，不是替换）",
+          any(int(c.cget("width")) != 400 for c in canvases[:index]),
+          [c.cget("width") for c in canvases])
+    check("雷达图排在分类横向条之前（先看形状，再看逐类明细）",
+          any(int(c.cget("width")) != 400 for c in canvases[index + 1:]),
+          [c.cget("width") for c in canvases])
+
 def main_test() -> None:
     tmpdir = Path(tempfile.mkdtemp(prefix="excel_ui_test_"))
     root = tk.Tk()
@@ -826,6 +1200,10 @@ def main_test() -> None:
         test_note(root, page, db)
         test_stats(root, page, db)
         test_custom_function(root, page, db, monkey)
+        test_quiz_view(root, page, db)
+        test_import_ui(root, page, db, tmpdir)
+        test_todo_button(root, page, db)
+        test_radar(root, page, db)
     finally:
         if db is not None:
             db.close()

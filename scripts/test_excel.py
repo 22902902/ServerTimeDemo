@@ -20,8 +20,8 @@
 
 另一类被锁死的是「有意设计」：
 * 内置函数**不许删**（``delete_function`` 对 builtin 返回 False），自定义的可以删
-* ``**强调**`` 标记留在种子文本里（导出 Markdown 要用），由界面层负责去掉再上屏
-* 五个视图 + 三栏布局是页面层的取舍，数据层不掺和
+* ``**强调**`` 标记留在种子文本里（导出 Markdown 要用）；上屏、出题前统一由 ``strip_emphasis`` 剥掉
+* 八个视图 + 三栏布局是页面层的取舍，数据层不掺和
 
 覆盖
 ------------------------------------------------------------------------------
@@ -38,11 +38,17 @@ I. 检索          关键词 / 分类 / 掌握度 / 组合 / 空词
 J. 笔记 CRUD     增改查删 / 计数 / 按函数筛选 / 关键词命中
 K. 打卡          upsert 只改传入字段 / 连续天数 / 最长 / 累计 / 最近 7 天补零
 L. 统计与导出    掌握度总览 / 分类统计 / 路径进度 / 配方 CRUD
+M. 自测出题      剥强调 / 切场景 / 函数名打码（IF 不许误伤 IFERROR）/ 四选一不泄露选项 / 同种子同套题 / 优先挑不熟的
+N. 自测作答      答对答错都回灌同一条遗忘曲线 / 错题本按函数去重 / 订正后消失 / 删函数不留孤儿 / 只出错题本模式
+O. 批量导入解析  模板往返 / 中英文列头别名 / 三种分隔符 / GBK 回退 / 幂等归一化 / 必填与格式校验
+P. 批量导入写库  dry_run 不落盘 / 新增入自建 / 内置默认跳过 / 覆盖只写非空列（书页码与心得保住）/ 导出再导入是更新
+Q. 待办联动桥    只在点击时建 / 周六不被顺延（对照证明 skip_holidays 必要）/ 当天幂等 / 缺字段不建
 
 用法：
     python scripts/test_excel.py
 """
 
+import random
 import shutil
 import sqlite3
 import sys
@@ -90,7 +96,30 @@ from excel_db import (  # noqa: E402
     shift_date,
     split_codes,
     today_str,
+    IMPORT_COLUMNS,
+    QUIZ_CHOICE,
+    QUIZ_FORMULA,
+    QUIZ_OPTION_COUNT,
+    build_choice_question,
+    build_formula_question,
+    build_quiz_questions,
+    import_template_csv,
+    import_template_headers,
+    import_template_rows,
+    mask_code,
+    normalize_import_header,
+    normalize_import_row,
+    normalize_import_value,
+    parse_import_csv_text,
+    parse_import_file,
+    quiz_prompt,
+    read_import_text,
+    scenario_sentences,
+    strip_emphasis,
+    validate_import_row,
 )
+from excel_todo_bridge import ExcelTodoBridge, review_todo_payload  # noqa: E402
+from todo_db import TodoDB  # noqa: E402
 from excel_seed import (  # noqa: E402
     CATEGORIES,
     LEARNING_PATHS,
@@ -769,10 +798,567 @@ def test_stats_and_recipes() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# M. 页面会用到的聚合口径
+# M. 自测出题：题干与凑题
+# ══════════════════════════════════════════════════════════════════════════
+def test_quiz_questions() -> None:
+    section("[M] 自测出题（题干与凑题）")
+    db = fresh("quiz")
+
+    # -- 正文清理与切句 ---------------------------------------------------
+    check("strip_emphasis 剥掉 ** 标记",
+          strip_emphasis("**IF** 是判断用的") == "IF 是判断用的",
+          strip_emphasis("**IF** 是判断用的"))
+    check("scenario_sentences 中英文分号都拆、空句丢掉",
+          scenario_sentences("甲；乙; 丙；；丁") == ["甲", "乙", "丙", "丁"],
+          scenario_sentences("甲；乙; 丙；；丁"))
+    check("scenario_sentences 尊重 limit",
+          scenario_sentences("甲；乙；丙", limit=2) == ["甲", "乙"],
+          scenario_sentences("甲；乙；丙", limit=2))
+
+    # -- mask_code：这里有个真会踩的坑 ------------------------------------
+    check("mask_code 把函数名换成「这个函数」",
+          mask_code("用 IF 做判断", "IF") == "用 这个函数 做判断",
+          mask_code("用 IF 做判断", "IF"))
+    check("mask_code 不误伤 IFERROR（既没 \\b 也没前缀导致的关键回归点）",
+          mask_code("用 IFERROR 包住 IF", "IF") == "用 IFERROR 包住 这个函数",
+          mask_code("用 IFERROR 包住 IF", "IF"))
+    check("mask_code 对空函数名原样返回",
+          mask_code("原样", "") == "原样")
+
+    # -- 题干：选择题必须打码，写公式题不打 -------------------------------
+    target = db.get_function_by_code("VLOOKUP")
+    check("库里能拿到 VLOOKUP（后面几条都靠它）", target is not None)
+    prompt_c = quiz_prompt(target, quiz_type=QUIZ_CHOICE)
+    check("选择题题干不含函数名",
+          "VLOOKUP" not in prompt_c.upper(), prompt_c)
+    check("题干里不留 ** 强调标记", "**" not in prompt_c, prompt_c)
+    check("选择题不给语法原型（那是答案的一部分）",
+          "语法原型" not in prompt_c, prompt_c)
+    prompt_f = quiz_prompt(target, quiz_type=QUIZ_FORMULA)
+    check("写公式题题干保留函数名",
+          "VLOOKUP" in prompt_f.upper(), prompt_f)
+    check("写公式题给出语法原型", "语法原型" in prompt_f, prompt_f)
+
+    # -- 选择题：四选一、正解在选项里、题面不泄露选项 ---------------------
+    pool = db.all_functions()
+    question = build_choice_question(target, pool, rng=random.Random(1))
+    check("选择题能出出来", question is not None)
+    if question:
+        check("恰好 4 个选项",
+              len(question["options"]) == QUIZ_OPTION_COUNT, question["options"])
+        check("选项不重复",
+              len(set(question["options"])) == len(question["options"]),
+              question["options"])
+        check("正解在选项里",
+              question["answer"] == "VLOOKUP"
+              and "VLOOKUP" in question["options"], question["options"])
+        check("题面里一个选项名都没出现（否则是在暗示答案）",
+              all(opt not in question["prompt"] for opt in question["options"]),
+              question["prompt"])
+        check("「答完才揭晓」的字段都齐备",
+              {"reveal_formula", "reveal_result", "reveal_pitfalls", "syntax"}
+              <= set(question), sorted(question))
+        check("题目带上函数 id 与分类（错题本要靠它）",
+              int(question["function_id"]) == int(target["id"])
+              and question["category"] == target["category"], question)
+    check("候选池太小（凑不满 4 个）时返回 None，让调用方跳过这题",
+          build_choice_question(target, [target], rng=random.Random(1)) is None)
+
+    # -- 写公式题：答案是示例公式，自己写自己评 ---------------------------
+    fq = build_formula_question(target, rng=random.Random(2))
+    check("写公式题能出出来", fq is not None)
+    if fq:
+        check("写公式题的答案就是示例公式",
+              fq["answer"] == strip_emphasis(target["example_formula"]).strip(),
+              fq["answer"])
+        check("写公式题没有选项（自评，不是机判）", fq["options"] == [], fq["options"])
+    no_example = dict(target)
+    no_example["example_formula"] = ""
+    check("没有示例公式的函数出不了写公式题",
+          build_formula_question(no_example, rng=random.Random(3)) is None)
+
+    # -- 凑一轮：同种子同套题 / 题型模式 / 优先不熟的 ---------------------
+    round_a = db.quiz_questions(count=8, seed=42)
+    round_b = db.quiz_questions(count=8, seed=42)
+    check("同一个种子凑出同一套题（测试与「重做错题」都靠它）",
+          [q["code"] for q in round_a] == [q["code"] for q in round_b],
+          [q["code"] for q in round_a])
+    check("凑题数量不超过上限", 0 < len(round_a) <= 8, len(round_a))
+    check("每题都带题干与类型",
+          all(q["prompt"] and q["quiz_type"] in (QUIZ_CHOICE, QUIZ_FORMULA)
+              for q in round_a), round_a[:1])
+
+    kinds = {q["quiz_type"] for q in db.quiz_questions(count=10, seed=5)}
+    check("混合模式两种题型都有",
+          kinds == {QUIZ_CHOICE, QUIZ_FORMULA}, kinds)
+    only_choice = build_quiz_questions(db.all_functions(), count=6,
+                                      mode=QUIZ_CHOICE, rng=random.Random(9))
+    check("只出选择题模式确实只有选择题",
+          only_choice and all(q["quiz_type"] == QUIZ_CHOICE for q in only_choice),
+          len(only_choice))
+    only_formula = build_quiz_questions(db.all_functions(), count=6,
+                                        mode=QUIZ_FORMULA, rng=random.Random(9))
+    check("只出写公式模式确实只有写公式题",
+          only_formula and all(q["quiz_type"] == QUIZ_FORMULA for q in only_formula),
+          len(only_formula))
+
+    # 把一批标成熟练，再凑一轮：应当基本不抽它们
+    strong_codes = set()
+    for item in db.all_functions()[:40]:
+        db.set_mastery(item["id"], MASTERY_GOOD, today="2026-09-23")
+        strong_codes.add(item["code"])
+    picked = db.quiz_questions(count=5, seed=11)
+    check("抽题优先挑不熟的（quiz_questions 走 list_functions 才带 mastery）",
+          picked and all(q["code"] not in strong_codes for q in picked),
+          [q["code"] for q in picked])
+
+    check("空库凑题返回空列表而不是报错",
+          build_quiz_questions([], count=5, rng=random.Random(1)) == [])
+    check("分类过滤只出该分类的题",
+          {q["category"] for q in db.quiz_questions(count=6, seed=3,
+                                                    category="文本")}
+          == {"文本"},
+          {q["category"] for q in db.quiz_questions(count=6, seed=3,
+                                                    category="文本")})
+    db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# N. 自测作答：回灌遗忘曲线 + 错题本
+# ══════════════════════════════════════════════════════════════════════════
+def test_quiz_answers() -> None:
+    section("[N] 自测作答（回灌 + 错题本）")
+    db = fresh("quiz_answer")
+
+    # -- 答对：按「熟练」回灌，间隔往后跳 --------------------------------
+    right = db.get_function_by_code("SUM")
+    db.set_mastery(right["id"], MASTERY_WEAK, today="2026-09-23")
+    first = db.record_quiz_result(function_id=right["id"], quiz_type=QUIZ_CHOICE,
+                                  prompt="题干", answer="SUM", user_answer="SUM",
+                                  is_correct=True, category=right["category"],
+                                  today="2026-09-23")
+    check("作答落进流水（有主键）", first["id"] > 0, first)
+    state = db.progress_map()[right["id"]]
+    check("答对掌握度 +1", state["mastery"] == MASTERY_WEAK + 1, state["mastery"])
+    check("答对连对次数 +1", state["correct_streak"] == 1, state["correct_streak"])
+    check("答对排到明天（连对 1 次 → 1 天）",
+          state["next_review_at"] == "2026-09-24", state["next_review_at"])
+
+    db.record_quiz_result(function_id=right["id"], quiz_type=QUIZ_CHOICE,
+                          is_correct=True, today="2026-09-24")
+    state = db.progress_map()[right["id"]]
+    check("连对两次后间隔跳到 3 天（同一条遗忘曲线）",
+          state["next_review_at"] == "2026-09-27", state["next_review_at"])
+
+    # -- 答错：掌握度 −1、明天再来、进错题本 ------------------------------
+    wrong = db.get_function_by_code("COUNT")
+    state0 = db.progress_map().get(wrong["id"]) or {}
+    db.record_quiz_result(function_id=wrong["id"], quiz_type=QUIZ_CHOICE,
+                          prompt="题干", answer="COUNT", user_answer="SUM",
+                          is_correct=False, category=wrong["category"],
+                          today="2026-09-23")
+    after = db.progress_map()[wrong["id"]]
+    check("答错掌握度落在「生疏」（未学的答错也至少是生疏）",
+          after["mastery"] == MASTERY_WEAK,
+          (state0.get("mastery"), after["mastery"]))
+    check("答错明天再来", after["next_review_at"] == "2026-09-24",
+          after["next_review_at"])
+    check("答错连对归零", after["correct_streak"] == 0, after["correct_streak"])
+
+    # 同一个函数连错三次，错题本里仍只有一行
+    for _ in range(2):
+        db.record_quiz_result(function_id=wrong["id"], quiz_type=QUIZ_CHOICE,
+                              is_correct=False, category=wrong["category"],
+                              today="2026-09-23")
+    book = db.quiz_wrong_items()
+    ids = [int(item["function_id"]) for item in book]
+    check("错题本按函数去重（连错三次只占一行）",
+          ids.count(int(wrong["id"])) == 1, ids)
+    check("错题本带上函数名与分类（界面直接显示）",
+          all(item["code"] and item["category"] for item in book),
+          [(item["code"], item["category"]) for item in book])
+    check("错题本带出示例公式与示例结果（写公式题要看）",
+          "example_formula" in book[0] and "example_result" in book[0],
+          sorted(book[0]))
+
+    # -- 订正：从错题本消失，并按「熟练」回灌 ----------------------------
+    log_id = int(book[0]["id"])
+    before_mastery = db.progress_map()[wrong["id"]]["mastery"]
+    check("标订正返回 True", db.mark_quiz_retried(log_id, correct=True,
+                                                 today="2026-09-23") is True)
+    check("订正后不再出现在错题本（同一个函数错过的每一行都要销账，"
+          "否则下次刷新它又被捞回来）",
+          int(wrong["id"]) not in [int(i["function_id"])
+                                   for i in db.quiz_wrong_items()],
+          [i["code"] for i in db.quiz_wrong_items()])
+    check("订正把该函数名下所有未订正的错题一起销账",
+          db.conn.execute(
+              "SELECT COUNT(*) FROM excel_quiz_log "
+              "WHERE function_id = ? AND is_correct = 0 AND retried = 0",
+              (int(wrong["id"]),)).fetchone()[0] == 0)
+    check("订正也按「熟练」回灌（掌握度 +1）",
+          db.progress_map()[wrong["id"]]["mastery"] == before_mastery + 1,
+          db.progress_map()[wrong["id"]]["mastery"])
+    check("订正不存在的记录返回 False", db.mark_quiz_retried(999999) is False)
+
+    # -- 汇总口径 --------------------------------------------------------
+    stats = db.quiz_stats()
+    check("自测汇总：作答 5 次、对 2 次、错 3 次",
+          stats["attempts"] == 5 and stats["correct"] == 2 and stats["wrong"] == 3,
+          stats)
+    check("正确率四舍五入成整数（2/5）", stats["accuracy"] == 40, stats)
+    check("错题本已清空（pending 归零）", stats["pending"] == 0, stats)
+
+    # -- 只出错题本里的题 -------------------------------------------------
+    db.record_quiz_result(function_id=wrong["id"], quiz_type=QUIZ_CHOICE,
+                          is_correct=False, category=wrong["category"],
+                          today="2026-09-23")
+    only = db.quiz_questions(count=5, only_wrong=True, seed=2)
+    check("只出错题本模式：抽到的都在错题本里（错题本只剩 1 条时也必须出得来题，"
+          "干扰项要从全库取）",
+          only and {q["function_id"] for q in only} == {int(wrong["id"])},
+          [(q["code"], q["function_id"]) for q in only])
+    if only and only[0]["options"]:
+        check("只练错题时干扰项仍从全库来（选项不止错题本里那一个）",
+              len(only[0]["options"]) == QUIZ_OPTION_COUNT,
+              only[0]["options"])
+
+    # -- 删函数要把它的流水一并清掉 ---------------------------------------
+    victim_id = db.add_custom_function({
+        "code": "MYTEMP", "name_cn": "临时函数", "category": "逻辑",
+        "syntax": "MYTEMP()", "description": "只为验删除的孤儿清理"})
+    db.record_quiz_result(function_id=victim_id, quiz_type=QUIZ_CHOICE,
+                          is_correct=False, category="逻辑", today="2026-09-23")
+    check("自建函数能删", db.delete_function(victim_id) is True)
+    orphan = [item["code"] for item in db.quiz_wrong_items()]
+    check("删掉函数后错题本不留孤儿（否则会出现没有名字的一行）",
+          "MYTEMP" not in orphan, orphan)
+
+    # -- 清理：只清错 / 全清 ---------------------------------------------
+    removed = db.clear_quiz_log(wrong_only=True)
+    check("清错题本确实删掉了错题流水", removed >= 1, removed)
+    check("清完错题本为空", db.quiz_wrong_items() == [])
+    check("清错题本不动答对的流水",
+          db.quiz_stats()["correct"] == 2, db.quiz_stats())
+    check("作答总数也不变（清错题本 ≠ 统计清零，答对的 2 条还在）",
+          db.quiz_stats()["attempts"] == 2, db.quiz_stats())
+    db.clear_quiz_log(wrong_only=False)
+    check("全清后统计归零",
+          db.quiz_stats()["attempts"] == 0 and db.quiz_stats()["accuracy"] == 0,
+          db.quiz_stats())
+    db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# O. 批量导入：解析与校验
+# ══════════════════════════════════════════════════════════════════════════
+def test_import_parsing() -> None:
+    section("[O] 批量导入（解析与校验）")
+
+    # -- 模板 ------------------------------------------------------------
+    headers = import_template_headers()
+    check("模板列数 = IMPORT_COLUMNS 列数",
+          len(headers) == len(IMPORT_COLUMNS), len(headers))
+    check("必填列的列头带 * 前缀",
+          headers[0] == "*code" and headers[1] == "*name_cn"
+          and headers[2] == "*category", headers[:5])
+    check("可选列的列头不带 *",
+          not any(h.startswith("*") for h in headers[5:]), headers[5:])
+
+    rows = parse_import_csv_text(import_template_csv())
+    check("模板 CSV 能被自己的解析器读回来（照模板填就能导）",
+          len(rows) == len(import_template_rows()), len(rows))
+    first = normalize_import_row(rows[0])
+    check("模板行认得出函数名", first["code"] == "MYFUNC1", first["code"])
+    check("模板行认得出中文名与分类",
+          first["name_cn"] == "我的函数一" and first["category"] == "查找与引用",
+          (first["name_cn"], first["category"]))
+    check("模板行的难度中文认成数字（常用 → 2）",
+          first["difficulty"] == 2, first["difficulty"])
+    check("模板行的重要度中文认成数字（核心 → 3）",
+          first["importance"] == 3, first["importance"])
+    check("模板行本身没有校验问题（否则模板就是错的）",
+          validate_import_row(first) == [], validate_import_row(first))
+
+    # -- 列头别名与归一化 -------------------------------------------------
+    check("中文列头能认成字段名",
+          normalize_import_header("函数名") == "code"
+          and normalize_import_header("中文名称") == "name_cn"
+          and normalize_import_header(" 我的理解 ") == "my_note",
+          (normalize_import_header("函数名"), normalize_import_header("我的理解")))
+    check("模板里的 * 前缀不影响识别",
+          normalize_import_header("*难度") == "difficulty")
+    check("认不出来的列头返回 None（那一列直接忽略）",
+          normalize_import_header("随便写点什么") is None
+          and normalize_import_header("") is None)
+
+    check("None 归一化成空串", normalize_import_value(None) == "")
+    check("整数值的浮点去掉 .0（Excel 读出来是 412.0）",
+          normalize_import_value(412.0) == "412", normalize_import_value(412.0))
+    check("日期转 ISO",
+          normalize_import_value(date(2026, 9, 23)) == "2026-09-23",
+          normalize_import_value(date(2026, 9, 23)))
+    check("布尔转 1/0", normalize_import_value(True) == "1")
+
+    check("normalize_import_row 幂等（预览与写库共用同一条路径）",
+          normalize_import_row(first) == first,
+          {k: (first[k], normalize_import_row(first)[k])
+           for k in first if first[k] != normalize_import_row(first)[k]})
+    check("函数名统一大写并去掉内部空格",
+          normalize_import_row({"函数": " my func 1 "})["code"] == "MYFUNC1",
+          normalize_import_row({"函数": " my func 1 "})["code"])
+    check("分类留空时兜到「逻辑」",
+          normalize_import_row({"函数": "AAA"})["category"] == "逻辑")
+
+    # -- 校验 ------------------------------------------------------------
+    blank = normalize_import_row({})
+    check("必填全空时报出 4 个问题（分类会兜到「逻辑」，所以不算缺）",
+          len(validate_import_row(blank)) == 4, validate_import_row(blank))
+    check("分类留空时兜底不算错", blank["category"] == "逻辑", blank["category"])
+    base = {"code": "AAA", "name_cn": "甲", "category": "逻辑",
+            "syntax": "AAA()", "description": "说明"}
+    check("完整的一行没有校验问题", validate_import_row(base) == [],
+          validate_import_row(base))
+    check("函数名带空格会被拦下",
+          any("空格" in p for p in validate_import_row({**base, "code": "MY FUNC"})),
+          validate_import_row({**base, "code": "MY FUNC"}))
+    check("函数名超 32 字符会被拦下",
+          any("32" in p for p in validate_import_row({**base, "code": "X" * 33})),
+          validate_import_row({**base, "code": "X" * 33}))
+    check("难度填成 9 会被拦下",
+          any("difficulty" in p
+              for p in validate_import_row({**base, "difficulty": "9"})),
+          validate_import_row({**base, "difficulty": "9"}))
+    check("难度留空不算问题（有默认值）",
+          validate_import_row({**base, "difficulty": "", "importance": ""}) == [])
+
+    # -- 分隔符嗅探：逗号 / 分号 / 制表符 --------------------------------
+    body = ("甲,列号,替换\n乙,列号,替换\n丙,列号,替换\n")
+    cases = {
+        "逗号": "函数名,中文名,分类,语法,用途\n" + body,
+        "分号": "函数名;中文名;分类;语法;用途\n" + body.replace(",", ";"),
+        "制表符": "函数名\t中文名\t分类\t语法\t用途\n" + body.replace(",", "\t"),
+    }
+    for label, text in cases.items():
+        parsed = parse_import_csv_text(text)
+        ok = len(parsed) == 3 and normalize_import_row(parsed[0])["code"] == "甲"
+        check(f"{label}分隔的文件能解析（不靠 csv.Sniffer 猜，靠表头认不认得出来）",
+              ok,
+              (len(parsed), normalize_import_row(parsed[0]) if parsed else None))
+    check("中间夹的空行会被丢掉",
+          len(parse_import_csv_text("函数名,分类\n甲,逻辑\n,\n乙,逻辑\n")) == 2)
+
+    # -- 编码回退与文件派发 ----------------------------------------------
+    folder = Path(tempfile.mkdtemp(prefix="excel_import_"))
+    _TMP.append(folder)
+    gbk_path = folder / "gbk.csv"
+    gbk_path.write_bytes(cases["逗号"].encode("gbk"))
+    check("GBK 的 CSV 也能读（Excel 在中文 Windows 上就是这么存的）",
+          "甲" in read_import_text(gbk_path), read_import_text(gbk_path)[:12])
+    utf8_path = folder / "utf8.csv"
+    utf8_path.write_bytes(("\ufeff" + cases["逗号"]).encode("utf-8"))
+    check("带 BOM 的 UTF-8 也认",
+          normalize_import_row(parse_import_file(utf8_path)[0])["code"] == "甲")
+    try:
+        parse_import_file(folder / "nope.csv")
+        check("文件不存在时抛 ValueError", False, "没报错")
+    except ValueError:
+        check("文件不存在时抛 ValueError", True)
+
+    # 导出的 CSV（列头是英文字段名）也要能被导入端认出来
+    check("导出的列头能被导入端认回字段名",
+          normalize_import_header("example_formula") == "example_formula"
+          and normalize_import_header("book_page") == "book_page")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# P. 批量导入：写库三分支
+# ══════════════════════════════════════════════════════════════════════════
+def test_import_writing() -> None:
+    section("[P] 批量导入（新增 / 更新 / 跳过）")
+    db = fresh("import")
+    before = db.count_functions()
+
+    new_row = {"函数名": "MYTEXT", "中文名": "我的文本函数", "分类": "文本",
+               "语法": "MYTEXT(文本)", "用途": "照书补录的冷门函数", "难度": "入门"}
+
+    # -- dry_run：先报规模、一个字都不写 ---------------------------------
+    preview = db.import_functions([new_row], dry_run=True)
+    check("dry_run 报出 1 条新增", preview["added"] == ["MYTEXT"], preview)
+    check("dry_run 入库数不变", db.count_functions() == before)
+    check("dry_run 不会把函数真的建出来",
+          db.get_function_by_code("MYTEXT") is None)
+
+    # -- 新增：入成自建，所以可删 ----------------------------------------
+    result = db.import_functions([new_row])
+    check("导入后新增 1 条", result["added"] == ["MYTEXT"], result)
+    check("库里总数 +1", db.count_functions() == before + 1)
+    created = db.get_function_by_code("MYTEXT")
+    check("导入进来的算自建（is_builtin=0）",
+          created is not None and not int(created["is_builtin"]),
+          created and created["is_builtin"])
+    check("自建函数允许删除", db.delete_function(created["id"]) is True)
+
+    # -- 同名内置：默认跳过，勾了覆盖才改写 -------------------------------
+    builtin_rows = [{"函数名": "vlookup", "中文名": "改过的中文名",
+                     "分类": "查找与引用", "语法": "VLOOKUP(值,区域,列)",
+                     "用途": "试图覆盖内置"}]
+    skipped = db.import_functions(builtin_rows)
+    check("同名内置默认跳过", skipped["skipped"] and not skipped["updated"], skipped)
+    check("跳过时内置内容一个字都没动",
+          db.get_function_by_code("VLOOKUP")["name_cn"] != "改过的中文名")
+
+    forced = db.import_functions(builtin_rows, overwrite_builtin=True)
+    check("勾了「覆盖内置」才更新", forced["updated"] == ["VLOOKUP"], forced)
+    after = db.get_function_by_code("VLOOKUP")
+    check("覆盖后内容确实改了", after["name_cn"] == "改过的中文名",
+          after["name_cn"])
+    check("覆盖不改 is_builtin（它还是内置，仍然不许删）",
+          int(after["is_builtin"]) == 1)
+
+    # -- 覆盖只写非空列：书页码与心得不能被一次导入抹掉 -------------------
+    db.update_function_fields(after["id"], book_page="88", my_note="我自己的心得")
+    db.import_functions([{"函数名": "VLOOKUP", "中文名": "第三次改名",
+                          "分类": "查找与引用", "语法": "VLOOKUP()",
+                          "用途": "只改名字，书页与心得留空"}],
+                        overwrite_builtin=True)
+    kept = db.get_function_by_code("VLOOKUP")
+    check("覆盖只写非空列（书页码与心得都保住了）",
+          kept["book_page"] == "88" and kept["my_note"] == "我自己的心得",
+          (kept["book_page"], kept["my_note"]))
+    check("同一行的非空列照常改掉", kept["name_cn"] == "第三次改名",
+          kept["name_cn"])
+
+    # -- 错误分支：必填空、同文件重名 ------------------------------------
+    messy = [
+        {"函数名": "", "中文名": "没函数名", "分类": "逻辑", "语法": "x", "用途": "y"},
+        {"函数名": "DUP", "中文名": "甲", "分类": "逻辑", "语法": "x", "用途": "y"},
+        {"函数名": "dup", "中文名": "乙", "分类": "逻辑", "语法": "x", "用途": "y"},
+    ]
+    report = db.import_functions(messy)
+    check("第一行（第 2 行）缺函数名 → errors 里点名行号",
+          any(e["row"] == 2 for e in report["errors"]), report["errors"])
+    check("同一个文件里大小写不同的重名也算重名",
+          any("两次" in e["message"] for e in report["errors"]), report["errors"])
+    check("重名的那一组只入了一条",
+          report["added"] == ["DUP"], (report["added"], report["errors"]))
+    check("大小写归一后能查到", db.get_function_by_code("dup") is not None)
+
+    # -- 非官方分类：提示一句，但照样入库 ---------------------------------
+    odd = db.import_functions([{"函数名": "MYODD", "中文名": "怪分类",
+                                "分类": "我瞎编的分类", "语法": "MYODD()",
+                                "用途": "试试自定义分类"}])
+    check("非官方分类会给出提示", bool(odd["warnings"]), odd["warnings"])
+    check("但照样入库（只是挂自定义分类）",
+          db.get_function_by_code("MYODD") is not None)
+    check("返回值里有 total（新增 + 更新）", odd["total"] == 1, odd)
+
+    # -- 导出与模板落盘：导出的东西能被导入端读回来 -----------------------
+    folder = Path(tempfile.mkdtemp(prefix="excel_export_"))
+    _TMP.append(folder)
+    csv_path = folder / "out.csv"
+    exported = db.export_functions_csv(csv_path)
+    check("导出条数与库内一致", exported == db.count_functions(), exported)
+    check("导出文件带 BOM（Excel 双击不乱码）",
+          csv_path.read_bytes().startswith(b"\xef\xbb\xbf"))
+    back = parse_import_csv_text(read_import_text(csv_path))
+    check("导出能被自己解析回来（导出 → 改 → 再导）",
+          len(back) == exported, (len(back), exported))
+    check("导出再导入是「原地更新」而不是新增",
+          db.import_functions(back)["added"] == [],
+          db.import_functions(back)["added"])
+
+    tpl_path = folder / "template.csv"
+    db.write_import_template(tpl_path)
+    check("模板能落盘且带 BOM",
+          tpl_path.exists() and tpl_path.read_bytes().startswith(b"\xef\xbb\xbf"))
+    db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Q. 待办联动桥
+# ══════════════════════════════════════════════════════════════════════════
+def test_todo_bridge() -> None:
+    section("[Q] 待办联动桥（Excel 宝典 → 待办）")
+    folder = Path(tempfile.mkdtemp(prefix="excel_todo_"))
+    _TMP.append(folder)
+    todo = TodoDB(folder / "todo.db")
+    bridge = ExcelTodoBridge(todo)
+
+    # 2026-09-26 是周六：「今天要做的事」不该被顺延到下周一
+    saturday = "2026-09-26"
+    payload = review_todo_payload(due_count=7, today=saturday, extra_wrong=3)
+    check("标题里带数量", payload["title"] == "复习 Excel 函数 7 个",
+          payload["title"])
+    check("到期日就是今天", payload["due_date"] == saturday, payload["due_date"])
+    check("备注里顺手提一句错题本还有几条", "3" in payload["notes"],
+          payload["notes"])
+    check("中优先级（不该盖过真正的工作项）", payload["priority"] == 2,
+          payload["priority"])
+    node = review_todo_payload(due_count=0, today=saturday)
+    check("队列为空时标题不带「0 个」", node["title"] == "复习 Excel 函数",
+          node["title"])
+    check("队列为空时备注给出下一步（标几个或做一轮自测）",
+          "函数宝典" in node["notes"] or "自测" in node["notes"], node["notes"])
+
+    # -- 写入 ------------------------------------------------------------
+    out = bridge.create_review_todo(payload)
+    check("点一下就能建出待办",
+          out["created"] is True and out["item_id"], out)
+    items = todo.fetch_items(scope="all", include_completed=True)
+    mine = [item for item in items if str(item.title) == payload["title"]]
+    check("待办真的建出来了", len(mine) == 1, [str(i.title) for i in items])
+    check("落在周六当天，没被顺延到下周一",
+          mine and str(mine[0].due_date) == saturday,
+          mine and str(mine[0].due_date))
+    check("打了 Excel 标签（方便按标签滤出学习类）",
+          mine and "Excel" in list(mine[0].tags), mine and mine[0].tags)
+
+    # 对照组：不传 skip_holidays 的默认行为就会顺延 —— 说明桥这个参数是必要的
+    plain_id = todo.add_item({"title": "对照：默认会被顺延", "due_date": saturday})
+    plain = [i for i in todo.fetch_items(scope="all", include_completed=True)
+             if int(i.id) == int(plain_id)]
+    check("对照：默认 skip_holidays 会把周六顺延到下周一",
+          plain and str(plain[0].due_date) == "2026-09-28",
+          plain and str(plain[0].due_date))
+
+    # -- 当天幂等 --------------------------------------------------------
+    again = bridge.create_review_todo(payload)
+    check("同一天再点不重复建",
+          again["created"] is False and int(again["item_id"]) == int(out["item_id"]),
+          again)
+    check("「同标题同日期」的待办仍然只有一条",
+          len([i for i in todo.fetch_items(scope="all", include_completed=True)
+               if str(i.title) == payload["title"]]) == 1)
+
+    # 已完成的那条不再算重复：明天（或今天重开）该能再建
+    todo.set_completed(int(out["item_id"]), True)
+    third = bridge.create_review_todo(payload)
+    check("已完成的同名待办不再算重复，会再建一条", third["created"] is True, third)
+
+    # 换一天不算重复
+    other_day = dict(payload, due_date="2026-09-27")
+    check("换一天可以再建",
+          bridge.create_review_todo(other_day)["created"] is True)
+
+    # -- 缺字段不建（界面上不该出现半条待办） -----------------------------
+    miss_title = bridge.create_review_todo({"title": "", "due_date": saturday})
+    check("缺标题不建，并给出一句话",
+          miss_title["created"] is False and miss_title["item_id"] is None
+          and miss_title["message"], miss_title)
+    miss_date = bridge.create_review_todo({"title": "复习 Excel 函数 1 个",
+                                          "due_date": ""})
+    check("缺日期不建", miss_date["created"] is False, miss_date)
+    check("空 payload 不建", bridge.create_review_todo({})["created"] is False)
+
+    todo.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# R. 页面会用到的聚合口径
 # ══════════════════════════════════════════════════════════════════════════
 def test_page_contracts() -> None:
-    section("[M] 页面契约（页面用到的每个数据入口）")
+    section("[R] 页面契约（页面用到的每个数据入口）")
     db = fresh("contract")
 
     # excel_page 里调过的每一个 ExcelDB 方法都要真的存在（防改名漏改）
@@ -784,7 +1370,10 @@ def test_page_contracts() -> None:
         "learning_progress progress_map all_recipes list_recipes get_recipe "
         "update_recipe_fields recipe_categories list_notes save_note get_note "
         "delete_note note_count upsert_checkin checkin_dates get_checkin "
-        "streak longest_streak totals recent_activity"
+        "streak longest_streak totals recent_activity "
+        "quiz_questions record_quiz_result quiz_wrong_items mark_quiz_retried "
+        "quiz_stats clear_quiz_log import_functions update_function_content "
+        "export_functions_csv write_import_template"
     ).split()
     missing = [name for name in used if not callable(getattr(db, name, None))]
     check("页面用到的数据入口都存在", not missing, missing)
@@ -816,6 +1405,12 @@ def test_page_contracts() -> None:
                            "codes": []}, {}, {})
     check("空阶段不除零", empty["percent"] == 0, empty)
     check("空分类统计不炸", category_stats([], {}) == [] or True)
+
+    # 自测汇总的键（导航徽标与错题本视图直接取下标）
+    empty_quiz = db.quiz_stats()
+    check("自测汇总字段齐全（空库也不除零）",
+          {"attempts", "correct", "wrong", "pending", "accuracy"}
+          <= set(empty_quiz) and empty_quiz["accuracy"] == 0, empty_quiz)
     db.close()
 
 
@@ -832,6 +1427,11 @@ def main_test() -> None:
     test_notes()
     test_checkins()
     test_stats_and_recipes()
+    test_quiz_questions()
+    test_quiz_answers()
+    test_import_parsing()
+    test_import_writing()
+    test_todo_bridge()
     test_page_contracts()
 
 
