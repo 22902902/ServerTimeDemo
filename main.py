@@ -165,6 +165,7 @@ from todo_db import TodoDB  # 待办事项数据库（含法定节假日日历�
 from todo_page import TodoAlertDialog, TodoPage  # 待办 / 提醒事项页面
 from excel_db import ExcelDB  # Excel 学习中心数据库（200 个内置函数 + 复习进度）
 from excel_page import ExcelImageTools, ExcelLearningPage  # Excel 学习中心页面
+from excel_todo_bridge import ExcelTodoBridge  # Excel 宝典 → 待办：把「今日复习」变成一条待办
 
 
 # =============================================================================
@@ -2934,6 +2935,10 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         # Excel 学习中心数据库：与其它模块共用同一个 db 文件（表名前缀 excel_
         # 自成一套，互不干扰）。首次启动会自动建表并灌入 200 个内置函数。
         self.excel_db = ExcelDB(DB_PATH)
+        # Excel 宝典 → 待办的写入胶水。**只包着 todo_db，不碰界面**；
+        # 页面拿到的是它的方法（见 _build_excel_page 的 todo_hook），
+        # 这样页面不需要 import main，也不会形成循环依赖。
+        self.excel_todo_bridge = ExcelTodoBridge(self.todo_db)
         self.tray = TrayController(self)
         self.shutdown_manager = AppShutdownManager(self)
         self.search_var = tk.StringVar()
@@ -3768,6 +3773,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
 
         图片能力走 ``ExcelImageTools`` 适配器注入，页面**不反向 import main** ——
         与流程中心同一套做法（避免循环导入）。
+        「生成今日复习待办」同理：页面只拿到一个 ``todo_hook`` 可调用对象。
         """
         self.excel_view = ExcelLearningPage(
             self.excel_learn_page,
@@ -3783,12 +3789,23 @@ class ExpiryManagerApp(TkinterDnD.Tk):
                 serialize_items=serialize_account_image_items,
             ),
             on_status=self.log_status,
+            todo_hook=self.excel_todo_hook,
         )
         self.excel_view.pack(fill="both", expand=True)
 
     def excel_page_refresh(self):
         """页面切换垫片：拉一次最新进度，再重画当前视图。"""
         self.excel_view.refresh()
+
+    def excel_todo_hook(self, payload):
+        """Excel 宝典 → 待办：把「今日复习 N 个」变成一条待办。
+
+        **只有用户点那个按钮时才会走到这里**，不做后台自动生成 —— 设计文档
+        第七节写明了「与待办联动……本轮明确不做（自动），避免打扰」，
+        学习工具不该变成催命符。真正的写库在 ``ExcelTodoBridge`` 里
+        （含「当天不重复建」与「不被顺延到工作日」两条约定）。
+        """
+        return self.excel_todo_bridge.create_review_todo(payload)
 
     def _build_study_demo_page(self):
         """构建 Python 学习辅助模块页面"""
