@@ -17,6 +17,25 @@
 │ study_notes      │ 学习笔记表：标题、正文（Markdown）、所属分类、标签、来源关联  │
 └──────────────────┴──────────────────────────────────────────────────────────┘
 
+「锁定分类」是什么
+------------------------------------------------------------------------------
+study_categories 上多了两列：
+
+    locked      1 = 系统占用的分类，界面禁止改名 / 删除（例：「Excel 宝典」）
+    source_key  锁定分类的归属标识（例："excel"），用来幂等地找回同一个分类
+
+为什么要锁：有些分类是**别的模块的地盘** —— 「Excel 宝典」把一轮自测整理成
+笔记模板，落在它自己的分类里。用户可以照常在自己的分类下随便增删改，但这个
+地盘不能被改名或删掉（删了另一头就找不到落点）。锁定**只约束它自己**，
+不影响任何其他分类 / 笔记的新增。
+
+生成区标记
+------------------------------------------------------------------------------
+笔记正文里可以有一对被 HTML 注释圈起来的「自动生成」段落（见 GEN_START /
+GEN_END）。渲染器认这对标记，把圈内的文字换成另一套样式 —— 于是「系统生成的」
+和「你自己写的」在颜色、字体、排版上一眼能分开；重新生成时也只覆盖圈内，
+圈外「我的补充」一个字都不会动。
+
 作者：代可行
 日期：2026-07-14
 ================================================================================
@@ -55,6 +74,28 @@ def _now() -> str:
     示例: "2026-07-14T11:30:00"
     """
     return datetime.now().isoformat(timespec="seconds")
+
+
+# =============================================================================
+# 笔记正文的「生成区」标记
+# =============================================================================
+
+# 有些笔记是系统生成的模板（「Excel 宝典」把一轮自测整理成一页）。正文里用
+# 一对 HTML 注释把「自动生成的那一段」圈起来：
+#
+#   * 重新生成时**只覆盖这一对标记之间**的内容，标记之外的「我的补充」原样
+#     保留 —— 用户二创过的东西永远不会被冲掉；
+#   * markdown_view 认这对标记，把圈内的文字换成另一套样式（冷色底 / 宋体 /
+#     缩进 / 小一号字），于是「生成的」和「自己写的」在颜色、字体、排版上
+#     一眼能分开；
+#   * 为什么是 HTML 注释：它在 Markdown 里天然不可见，复制到别处不会显示成
+#     乱码，也不依赖任何渲染器扩展（多数 Markdown 实现都会忽略注释）。
+#
+# ★ 这两个字符串会随笔记正文**落库**。改一次就等于让所有老笔记的标记失配
+#   （渲染器认不出、重新生成会把用户的补充当成生成区冲掉），所以视为永久
+#   常量：真要改，必须同时提供一次全库迁移。
+GEN_START = "<!-- gen:start -->"
+GEN_END = "<!-- gen:end -->"
 
 
 # =============================================================================
@@ -150,8 +191,14 @@ class StudyCategory:
         parent_code - 父级编码；顶级分类此字段为空字符串 ""
         level       - 层级深度：1=一级、2=二级、3=三级
         sort_order  - 同级排序序号，数字越小越靠前
+        locked      - 1=系统锁定分类（界面禁止改名 / 删除），0=用户自己的分类
+        source_key  - 锁定分类的归属标识（如 "excel"）；普通分类为空
         created_at  - 创建时间
         updated_at  - 最后修改时间
+
+    关于 locked / source_key：这两个字段在老库里是**后加的**（见
+    `_ensure_category_columns`），因此 `from_row` 对缺失列做了兜底 ——
+    读不到就当「普通分类」，不会因为列不存在而炸。
     """
     id: int = 0
     code: str = ""
@@ -159,6 +206,8 @@ class StudyCategory:
     parent_code: str = ""
     level: int = 1  # 1=一级 2=二级 3=三级
     sort_order: int = 0
+    locked: int = 0
+    source_key: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -167,6 +216,9 @@ class StudyCategory:
         """
         将 sqlite3.Row 转换为 StudyCategory 实例。
         """
+        # 老库可能还没有 locked / source_key 两列，用 keys() 判断再取，
+        # 免得直接 row["locked"] 抛 IndexError。
+        keys = row.keys()
         return cls(
             id=int(row["id"]),
             code=_norm(row["code"]),
@@ -175,6 +227,8 @@ class StudyCategory:
             # 数据库中 level/sort_order 可能存为 NULL，做安全默认值兜底
             level=int(row["level"]) if row["level"] is not None else 1,
             sort_order=int(row["sort_order"]) if row["sort_order"] is not None else 0,
+            locked=(int(row["locked"] or 0) if "locked" in keys else 0),
+            source_key=(_norm(row["source_key"]) if "source_key" in keys else ""),
             created_at=_norm(row["created_at"]),
             updated_at=_norm(row["updated_at"]),
         )
@@ -278,11 +332,46 @@ class StudyNotesDB:
         self.conn.execute("PRAGMA foreign_keys = ON")  # 开启外键级联
         self.create_tables()    # 建表（如已存在则忽略）
         self._migrate_code_constraint()  # 迁移：放宽 code 长度限制到 8 位（支持四级分类）
+        self._ensure_category_columns()  # 迁移：补齐 locked / source_key 两列
         self.seed_default_categories()  # 填充预设分类（仅首次）
 
     # --------------------------------------------------------------------------
     # 表结构
     # --------------------------------------------------------------------------
+
+    # 「锁定分类」相关的两列。老库建表时没有它们，用 ALTER TABLE 补上。
+    # 声明放在这里而不是散在方法里，是为了让「表到底有哪些列」一眼可见。
+    CATEGORY_EXTRA_COLUMNS = {
+        "locked": "INTEGER NOT NULL DEFAULT 0",
+        "source_key": "TEXT NOT NULL DEFAULT ''",
+    }
+
+    def _ensure_category_columns(self):
+        """迁移：给 study_categories 补上 locked / source_key 两列。
+
+        SQLite 的 ALTER TABLE ADD COLUMN 可以带 NOT NULL，只要给了非空默认值。
+        幂等：已经有的列直接跳过，所以每次启动跑一遍没有副作用。
+
+        失败一律吞掉不阻断启动：真读不到这两列时 `StudyCategory.from_row` 会把
+        它们当默认值（普通分类），分类树照样能用，只是「锁定」失效。
+        """
+        try:
+            existing = {row["name"] for row in self.conn.execute(
+                "PRAGMA table_info(study_categories)"
+            ).fetchall()}
+        except Exception:
+            return  # 表都读不出信息，交给上层去报错
+        for column, declaration in self.CATEGORY_EXTRA_COLUMNS.items():
+            if column in existing:
+                continue
+            try:
+                self.conn.execute(
+                    f"ALTER TABLE study_categories ADD COLUMN {column} {declaration}"
+                )
+            except Exception:
+                pass  # 加不上就退回「普通分类」，不影响笔记本身
+        self.conn.commit()
+
 
     def create_tables(self):
         """
@@ -314,6 +403,8 @@ class StudyNotesDB:
                 parent_code TEXT    DEFAULT '',       -- 父级编码；空=顶级分类
                 level       INTEGER NOT NULL DEFAULT 1, -- 层级深度：1/2/3
                 sort_order  INTEGER NOT NULL DEFAULT 0, -- 同级排序号
+                locked      INTEGER NOT NULL DEFAULT 0, -- 1=系统锁定分类（界面禁止改名/删除）
+                source_key  TEXT    NOT NULL DEFAULT '', -- 锁定分类的归属标识（如 excel）
                 created_at  TEXT    NOT NULL,
                 updated_at  TEXT    NOT NULL,
                 CHECK (length(code) >= 2 AND length(code) <= 8)
@@ -365,15 +456,22 @@ class StudyNotesDB:
                         parent_code TEXT    DEFAULT '',
                         level       INTEGER NOT NULL DEFAULT 1,
                         sort_order  INTEGER NOT NULL DEFAULT 0,
+                        locked      INTEGER NOT NULL DEFAULT 0,
+                        source_key  TEXT    NOT NULL DEFAULT '',
                         created_at  TEXT    NOT NULL,
                         updated_at  TEXT    NOT NULL,
                         CHECK (length(code) >= 2 AND length(code) <= 8)
                     )
                 """)
-                # 2. 复制数据
+                # 2. 复制数据。★ 必须**显式列名**，不能 `SELECT *`：
+                #    新表比老表多 locked / source_key 两列，按位置搬会对不上。
                 self.conn.execute("""
-                    INSERT INTO study_categories_new 
-                    SELECT * FROM study_categories
+                    INSERT INTO study_categories_new
+                        (id, code, name, parent_code, level, sort_order,
+                         created_at, updated_at)
+                    SELECT id, code, name, parent_code, level, sort_order,
+                           created_at, updated_at
+                      FROM study_categories
                 """)
                 # 3. 删除旧表
                 self.conn.execute("DROP TABLE study_categories")
@@ -494,7 +592,8 @@ class StudyNotesDB:
         return [StudyCategory.from_row(r) for r in rows]
 
     def add_category(self, code: str, name: str, parent_code: str = "",
-                     level: int = 1, sort_order: int = 0):
+                     level: int = 1, sort_order: int = 0,
+                     locked: int = 0, source_key: str = ""):
         """
         新增一条分类记录。
 
@@ -504,17 +603,24 @@ class StudyNotesDB:
             parent_code- 父级编码；空字符串表示顶级分类
             level      - 层级：1=一级、2=二级、3=三级
             sort_order - 同级排序序号
+            locked     - 1=系统锁定分类（界面禁止改名 / 删除）
+            source_key - 锁定分类的归属标识；普通分类留空
+
+        ``locked`` / ``source_key`` 平时不用手填 —— 外部模块走
+        `ensure_locked_category` 就够了。
         """
         now = _now()
         self.conn.execute(
             """INSERT INTO study_categories
-               (code, name, parent_code, level, sort_order, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (code, name, parent_code, level, sort_order, now, now),
+               (code, name, parent_code, level, sort_order, locked, source_key,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (code, name, parent_code, level, sort_order, int(locked or 0),
+             _norm(source_key), now, now),
         )
         self.conn.commit()
 
-    def update_category(self, cat_id: int, name: str, sort_order: int = 0):
+    def update_category(self, cat_id: int, name: str, sort_order: int = 0) -> bool:
         """
         更新分类名称和排序号（不支持修改编码和层级，防止树结构被意外破坏）。
 
@@ -522,13 +628,24 @@ class StudyNotesDB:
             cat_id     - 分类主键 ID
             name       - 新的分类名称
             sort_order - 新的排序号
+
+        返回:
+            True = 改成功；False = 被拒绝（分类不存在，或是锁定分类）
+
+        ★ 锁定分类**改不动**：它是别的模块的落点，名字被改掉之后那头的说明
+        就跟界面文字对不上了。要在数据层拦一道，因为界面上的按钮状态可能
+        被别处的刷新改掉 —— 界面拦是提示，这里拦才是保证。
         """
+        cat = self.get_category(cat_id)
+        if not cat or cat.locked:
+            return False
         now = _now()
         self.conn.execute(
             "UPDATE study_categories SET name=?, sort_order=?, updated_at=? WHERE id=?",
             (name, sort_order, now, cat_id),
         )
         self.conn.commit()
+        return True
 
     def delete_category(self, cat_id: int) -> tuple[int, int]:
         """
@@ -545,9 +662,13 @@ class StudyNotesDB:
 
         参数:
             cat_id - 分类主键 ID
+
+        ★ 锁定分类不删，直接返回 (0, 0) —— 与「分类不存在」同一个返回值。
+        界面会先看 `cat.locked` 给出人话提示，这里只是最后一道保险：
+        哪怕界面判断漏了，也不会把别的模块的落点删掉。
         """
         cat = self.get_category(cat_id)
-        if not cat:
+        if not cat or cat.locked:
             return 0, 0
 
         # ① 统计即将受影响的笔记和子分类数量
@@ -595,33 +716,105 @@ class StudyNotesDB:
 
         这确保了新增分类时编码不会重复，同时保持编码的连续性。
 
+        ★ **只认纯数字编码**。锁定分类有可能落到字母兜底码（如 "L09"，
+        见 `_free_top_code`），旧写法 `int(last_code[:2])` 撞上它会直接
+        ValueError —— 表现是「点新增分类没反应 / 弹报错」，而且只有装了
+        锁定分类的机器才会遇到。所以这里把同级编码全捞回来自己挑数字，
+        非数字的一律跳过。
+
         参数:
             parent_code - 父级编码；空字符串表示顶级分类
         """
+        rows = self.conn.execute(
+            "SELECT code FROM study_categories WHERE parent_code = ?",
+            (parent_code or "",),
+        ).fetchall()
+        codes = [_norm(row["code"]) for row in rows]
+
         if not parent_code:
-            # 顶级分类：只查 parent_code='' 的记录，取前两位最大者
-            row = self.conn.execute(
-                "SELECT code FROM study_categories WHERE parent_code='' ORDER BY code DESC LIMIT 1"
-            ).fetchone()
-            if not row:
-                return "01"  # 第一个顶级分类
+            # 顶级分类：只看长度 2 且全数字的编码
+            numbers = [int(c) for c in codes if len(c) == 2 and c.isdigit()]
+            return f"{max(numbers) + 1:02d}" if numbers else "01"
 
-            last_code = row["code"]
-            # 取前两位转为整数后 +1，再格式化为2位
-            num = int(last_code[:2]) if len(last_code) >= 2 else int(last_code)
-            return f"{num + 1:02d}"
-        else:
-            # 子分类：查 parent_code 匹配的记录，取末尾2位
-            row = self.conn.execute(
-                "SELECT code FROM study_categories WHERE parent_code=? ORDER BY code DESC LIMIT 1",
-                (parent_code,)
-            ).fetchone()
-            if not row:
-                return parent_code + "01"  # 该父分类下第一个子分类
+        # 子分类：只看「父编码 + 两位数字」这种形状
+        numbers = []
+        for code in codes:
+            if not code.startswith(parent_code):
+                continue
+            tail = code[len(parent_code):]
+            if len(tail) == 2 and tail.isdigit():
+                numbers.append(int(tail))
+        if numbers:
+            return parent_code + f"{max(numbers) + 1:02d}"
+        return parent_code + "01"
 
-            last_code = row["code"]
-            num = int(last_code[-2:])  # 取后两位
-            return parent_code + f"{num + 1:02d}"
+    # --------------------------------------------------------------------------
+    # 锁定分类（系统占用的分类）
+    # --------------------------------------------------------------------------
+
+    def find_category_by_source_key(self, source_key: str) -> Optional[StudyCategory]:
+        """按归属标识找回锁定分类；没有就返回 None。
+
+        为什么不按编码找：编码只是主键，谁先占了就是谁的。外部模块认的是
+        ``source_key``（如 "excel"），换台机器 / 换个编码都还能找回同一个分类。
+        """
+        key = _norm(source_key)
+        if not key:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM study_categories WHERE source_key = ? LIMIT 1", (key,)
+        ).fetchone()
+        return StudyCategory.from_row(row) if row else None
+
+    def _free_top_code(self) -> str:
+        """挑一个没被占用的顶级分类编码。
+
+        从 "09" 往上找（预设分类只到 "08"）。全占满（90 个顶级分类，
+        基本不可能）时退回字母码 —— `get_next_category_code` 会跳过它。
+        """
+        taken = {
+            _norm(row["code"])
+            for row in self.conn.execute(
+                "SELECT code FROM study_categories WHERE parent_code = ''"
+            ).fetchall()
+        }
+        for number in range(9, 100):
+            code = f"{number:02d}"
+            if code not in taken:
+                return code
+        return f"L{len(taken):02d}"
+
+    def ensure_locked_category(self, *, source_key: str, name: str,
+                               sort_order: int = 90) -> str:
+        """幂等地拿到（必要时创建）一个锁定分类，返回它的编码。
+
+        **按 source_key 找人**：找到就返回原编码，顺带把它重新标成 locked
+        （万一被别的手段改回过）；找不到才新建一个。
+
+        ``sort_order`` 默认 90：预设分类排 1~8，锁定分类落在末尾 —— 它是
+        「系统地盘」，压在用户自己的分类下面比顶在最上面合适。
+
+        这套「先查后建」是幂等的关键：同一个模块被初始化两次、或者用户连点
+        两下按钮，都只会有一个分类。
+        """
+        key = _norm(source_key)
+        if not key:
+            raise ValueError("source_key 不能为空 —— 没有它就没法幂等地找回分类")
+        existing = self.find_category_by_source_key(key)
+        if existing:
+            if not existing.locked:
+                # 曾经被手工改回过：这里补一道，别再让它能被删掉
+                self.conn.execute(
+                    "UPDATE study_categories SET locked = 1 WHERE id = ?",
+                    (existing.id,),
+                )
+                self.conn.commit()
+            return existing.code
+        code = self._free_top_code()
+        self.add_category(code=code, name=_norm(name) or key, parent_code="",
+                          level=1, sort_order=int(sort_order),
+                          locked=1, source_key=key)
+        return code
 
     # --------------------------------------------------------------------------
     # 笔记 CRUD
