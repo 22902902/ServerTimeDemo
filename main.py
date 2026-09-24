@@ -166,6 +166,7 @@ from todo_page import TodoAlertDialog, TodoPage  # 待办 / 提醒事项页面
 from excel_db import ExcelDB  # Excel 学习中心数据库（200 个内置函数 + 复习进度）
 from excel_page import ExcelImageTools, ExcelLearningPage  # Excel 学习中心页面
 from excel_todo_bridge import ExcelTodoBridge  # Excel 宝典 → 待办：把「今日复习」变成一条待办
+from excel_note_bridge import ExcelNoteBridge  # Excel 宝典 → 学习笔记：把自测整理成一套模板
 
 
 # =============================================================================
@@ -2939,6 +2940,12 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         # 页面拿到的是它的方法（见 _build_excel_page 的 todo_hook），
         # 这样页面不需要 import main，也不会形成循环依赖。
         self.excel_todo_bridge = ExcelTodoBridge(self.todo_db)
+        # Excel 宝典 → 学习笔记的写入胶水：只包着 study_notes_db，不碰界面。
+        # 与 todo_hook 同一套注入手法（页面拿对象、不 import main），所以
+        # 「生成学习笔记」既不认识主窗口也不认识笔记窗口，绕不回环形导入。
+        # 落点是一个**锁定分类**（见 study_notes_db.ensure_locked_category）：
+        # 它在笔记模块里改不了名、删不掉，但完全不挡用户自己的笔记与分类。
+        self.excel_note_bridge = ExcelNoteBridge(self.study_notes_db)
         self.tray = TrayController(self)
         self.shutdown_manager = AppShutdownManager(self)
         self.search_var = tk.StringVar()
@@ -3038,7 +3045,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             "credentials":    (self.credentials_page,     self.refresh_credentials_table),
             "processes":      (self.process_page,        self.process_page_refresh),
             "backend_tools":  (self.backend_page,         self.refresh_backend_tools_page),
-            "study_notes":    (self.study_notes_page,    None),
+            "study_notes":    (self.study_notes_page,    self.study_notes_view.reload),
             "qa_work_log":    (self.qa_work_log_page,    None),
             "system_toolbox": (self.system_toolbox_page, None),
             "todo":           (self.todo_page,            self.todo_page_refresh),
@@ -3748,6 +3755,10 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         """
         page = StudyNotesPage(self.study_notes_page, self.study_notes_db)
         page.pack(fill="both", expand=True)
+        # 存一份引用，两个用处：① 切到这一页时要刷新 —— Excel 宝典可能刚往
+        # 这个模块里写过笔记，不重拉就看不见；② 页面注册表拿它的 reload 当
+        # on_show。注意是**每次进页面重拉**，不是常驻轮询。
+        self.study_notes_view = page
 
     def _build_qa_work_log_page(self):
         """
@@ -3774,6 +3785,8 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         图片能力走 ``ExcelImageTools`` 适配器注入，页面**不反向 import main** ——
         与流程中心同一套做法（避免循环导入）。
         「生成今日复习待办」同理：页面只拿到一个 ``todo_hook`` 可调用对象。
+        「生成学习笔记」也是注入一个 ``notes`` 对象（``ExcelNoteBridge``）——
+        把这一轮自测整理成笔记模块里的一套模板，写库全在它自己那边。
         """
         self.excel_view = ExcelLearningPage(
             self.excel_learn_page,
@@ -3790,6 +3803,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             ),
             on_status=self.log_status,
             todo_hook=self.excel_todo_hook,
+            notes=self.excel_note_bridge,
         )
         self.excel_view.pack(fill="both", expand=True)
 
