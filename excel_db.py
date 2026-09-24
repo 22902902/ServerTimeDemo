@@ -7,15 +7,16 @@ Excel 学习中心 · 数据层
 好处是测试能脱离 tkinter 跑（``scripts/test_excel.py`` 是纯数据层套件，
 在便携版 Python 上也能过），而界面层 ``excel_page`` 只消费这里的方法。
 
-五张表
+六张表
 --------------------------------------------------------------------------------
 ``excel_functions``  函数库。内置 200 条 + 你自己加的；``code`` 唯一，种子靠它幂等。
 ``excel_progress``   掌握度与复习状态，1:1 挂在函数上（**懒创建**，没学过的函数不占行）。
 ``excel_recipes``    20 条实战配方（组合套路），也能写自己的心得。
 ``excel_notes``      我的笔记：可挂书页、可挂函数、可带截图。
 ``excel_checkins``   打卡：一天一行，``check_date`` 唯一。
+``excel_quiz_log``   自测流水：每答一题一行，错题本与正确率都从它算（P1 新增）。
 
-两条设计取舍，值得写下来
+三条设计取舍，值得写下来
 --------------------------------------------------------------------------------
 **1. 掌握度独立成表，而不是加在 ``excel_functions`` 上。**
    种子每次启动都会 ``INSERT OR IGNORE`` 走一遍，函数表是「种子说了算」的；
@@ -27,14 +28,23 @@ Excel 学习中心 · 数据层
    这里用 ``1 / 3 / 7 / 15 / 30 / 60 / 120`` 天七档：
    连续答对就往后跳一档，模糊就砍半，忘了就回到 1 天。
    规则简单到能背，才可能真的天天用。
+
+**3. 自测只存「流水」，不存「题库」。**
+   题干是从函数本身推出来的（场景 + 语法 + 示例），存一遍等于给同一份数据
+   留第二个副本。库里只留你答了什么（``excel_quiz_log``），题干按出题当时的
+   样子快照进去 —— 以后改了函数，老记录也不会跟着变。
 """
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
+import random
 import re
 import sqlite3
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from excel_seed import CATEGORIES, LEARNING_PATHS, SEED_FUNCTIONS, SEED_RECIPES
 
@@ -82,6 +92,98 @@ SRS_INTERVALS = (1, 3, 7, 15, 30, 60, 120)
 # 详情页里「我的理解」是就地编辑的，可改的字段白名单就在这里
 EDITABLE_FUNCTION_FIELDS = ("book_page", "my_note")
 EDITABLE_RECIPE_FIELDS = ("book_page", "my_note")
+
+
+# ----------------------------------------------------------------------
+# 自测出题（P1）
+# ----------------------------------------------------------------------
+# 为什么题目不额外建表存：题干是从函数本身推出来的（场景 + 语法 + 示例），
+# 存一遍就等于给同一份数据留了第二个副本，改一处忘一处。
+# 库里只留「你答了什么」的流水（``excel_quiz_log``），题干按当时的样子快照进去。
+QUIZ_CHOICE = "choice"      # 看场景选函数：机器判分
+QUIZ_FORMULA = "formula"    # 给场景写公式：写完自评
+QUIZ_TYPE_LABELS = {QUIZ_CHOICE: "选函数", QUIZ_FORMULA: "写公式"}
+
+QUIZ_MODE_MIXED = "mixed"
+QUIZ_MODE_CHOICES = (
+    (QUIZ_MODE_MIXED, "混合出题"),
+    (QUIZ_CHOICE, "只出选择题"),
+    (QUIZ_FORMULA, "只出写公式"),
+)
+
+# 一轮几题：10 题大约三五分钟，是「顺手做一下」还愿意做的上限。
+QUIZ_BATCH = 10
+# 选择题选项数 = 1 个答案 + (QUIZ_OPTION_COUNT - 1) 个干扰项
+QUIZ_OPTION_COUNT = 4
+# 错题本一次最多列多少条，再多就该靠分类筛了
+QUIZ_WRONG_LIMIT = 50
+
+# ----------------------------------------------------------------------
+# CSV / Excel 批量导入（P1）
+# ----------------------------------------------------------------------
+# 模板列顺序 = 这里的顺序；``True`` 表示必填（模板列头会加 ``*`` 前缀）。
+IMPORT_COLUMNS = (
+    ("code", True),
+    ("name_cn", True),
+    ("category", True),
+    ("syntax", True),
+    ("description", True),
+    ("args_desc", False),
+    ("returns", False),
+    ("example_formula", False),
+    ("example_result", False),
+    ("pitfalls", False),
+    ("use_cases", False),
+    ("related", False),
+    ("tags", False),
+    ("min_version", False),
+    ("difficulty", False),
+    ("importance", False),
+    ("book_page", False),
+    ("my_note", False),
+)
+
+# 列头别名：中文表头也认，省得为了导入把自己表里的列名改一遍。
+# 比对前会去掉首尾空白、去掉模板里常见的前导 ``*``、去掉内部空白，再转小写。
+IMPORT_HEADER_ALIASES = {
+    "code": ("code", "函数", "函数名", "函数名code"),
+    "name_cn": ("name_cn", "中文名", "中文名称", "别名"),
+    "category": ("category", "分类", "类别", "官方分类"),
+    "syntax": ("syntax", "语法", "语法原型"),
+    "description": ("description", "用途", "一句话", "一句话用途", "说明"),
+    "args_desc": ("args_desc", "参数", "参数说明"),
+    "returns": ("returns", "返回值", "返回"),
+    "example_formula": ("example_formula", "示例", "示例公式", "例子"),
+    "example_result": ("example_result", "示例结果", "期望结果", "结果"),
+    "pitfalls": ("pitfalls", "易错点", "注意", "坑"),
+    "use_cases": ("use_cases", "适用场景", "场景", "用途场景"),
+    "related": ("related", "相关函数", "相关"),
+    "tags": ("tags", "标签"),
+    "min_version": ("min_version", "最低版本", "版本"),
+    "difficulty": ("difficulty", "难度"),
+    "importance": ("importance", "重要度", "重要性"),
+    "book_page": ("book_page", "书页", "书页码", "页码"),
+    "my_note": ("my_note", "我的理解", "笔记", "心得"),
+}
+
+# 导入能改的字段白名单。``is_builtin`` / ``sort_order`` 一律不给碰 ——
+# 前者决定「这条能不能删」，后者是课程顺序，都不是导入该管的事。
+IMPORT_WRITABLE_FIELDS = (
+    "name_cn", "category", "tags", "syntax", "args_desc", "returns",
+    "description", "example_formula", "example_result", "pitfalls",
+    "use_cases", "related", "min_version", "difficulty", "importance",
+    "book_page", "my_note",
+)
+
+# 走 openpyxl 的后缀；其余（.csv / .tsv / .txt）按 CSV 解析
+IMPORT_EXCEL_SUFFIXES = (".xlsx", ".xlsm")
+
+# 官方 12 类之外的自定义分类会被提示一句，但仍允许入库
+CATEGORY_NAMES = tuple(item["name"] for item in CATEGORIES)
+# ``**强调**``：种子正文里的 Markdown 标记，上屏 / 出题前统一剥掉
+EMPHASIS_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
+# ``use_cases`` 是「；分隔的场景串」，中英文分号都要认
+SCENARIO_SPLIT_RE = re.compile(r"[；;]")
 
 # ======================================================================
 # DDL
@@ -173,14 +275,37 @@ CREATE TABLE IF NOT EXISTS excel_checkins (
 )
 """
 
+TABLE_QUIZ_LOG = """
+CREATE TABLE IF NOT EXISTS excel_quiz_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    function_id INTEGER NOT NULL DEFAULT 0,
+    quiz_type   TEXT    NOT NULL DEFAULT 'choice',
+    prompt      TEXT    NOT NULL DEFAULT '',
+    answer      TEXT    NOT NULL DEFAULT '',
+    user_answer TEXT    NOT NULL DEFAULT '',
+    is_correct  INTEGER NOT NULL DEFAULT 0,
+    category    TEXT    NOT NULL DEFAULT '',
+    created_at  TEXT    NOT NULL DEFAULT '',
+    retried     INTEGER NOT NULL DEFAULT 0,
+    retried_at  TEXT    NOT NULL DEFAULT ''
+)
+"""
+
+# 错题本按「没错对 + 没订正」筛，量大时全表扫会钝，给它一条索引
+TABLE_QUIZ_WRONG_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_excel_quiz_log_wrong
+    ON excel_quiz_log (is_correct, retried, id)
+"""
+
 TABLES = (
     TABLE_FUNCTIONS,
     TABLE_PROGRESS,
     TABLE_RECIPES,
     TABLE_NOTES,
     TABLE_CHECKINS,
+    TABLE_QUIZ_LOG,
+    TABLE_QUIZ_WRONG_INDEX,
 )
-
 # 建表之后可能新增的列（存量库升级用）。列名 → 列定义。
 FUNCTION_EXTRA_COLUMNS = {
     "book_page": "TEXT NOT NULL DEFAULT ''",
@@ -424,6 +549,420 @@ def path_progress(path: dict, functions_by_code: dict, progress: dict) -> dict:
 
 
 # ======================================================================
+# 自测出题（纯函数，测试直接打这里）
+# ======================================================================
+def strip_emphasis(text) -> str:
+    """剥掉种子正文里的 ``**强调**`` 标记。
+
+    种子里的 ``**`` 是留给 Markdown 导出用的；而 Tk 的 ``Label`` 不支持富文本，
+    直接贴上去会显示出字面的两个星号。**出题会把正文抄进题干，所以这一步
+    必须在数据层做** —— 挂在界面层的话，同一段文字就有了两条清理路径，
+    迟早会有一边忘掉。
+    """
+    return EMPHASIS_RE.sub(r"\1", str(text or ""))
+
+
+def scenario_sentences(text, *, limit=None) -> list[str]:
+    """把 ``use_cases`` 这种「；分隔的场景串」拆成一句一句。"""
+    parts = [strip_emphasis(part).strip()
+             for part in SCENARIO_SPLIT_RE.split(str(text or ""))]
+    parts = [part for part in parts if part]
+    if limit is not None:
+        parts = parts[: max(0, int(limit))]
+    return parts
+
+
+def mask_code(text, code) -> str:
+    """把题干里出现的函数名换成「这个函数」。
+
+    不做这一步的话，有些函数的 ``description`` 里就写着它自己的名字，
+    等于把答案印在题面上。用前后 lookaround 而不是 ``\\b``：``IF``
+    不该在 ``IFERROR`` 里被替换掉。
+    """
+    token = str(code or "").strip()
+    if not token:
+        return str(text or "")
+    pattern = rf"(?i)(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])"
+    return re.sub(pattern, "这个函数", str(text or ""))
+
+
+def quiz_prompt(target: dict, *, quiz_type: str) -> str:
+    """把一条函数摊成题干。**只出题，不给答案。**
+
+    ``quiz_type`` 决定要不要给函数名打码：选择题必须打（不然答案就印在题面上），
+    写公式题本来就告诉了你用哪个函数，打了反而变出「这个函数 的通用写法」
+    这种别扭话。
+    """
+    code = target.get("code", "")
+    hide = quiz_type == QUIZ_CHOICE
+    blocks: list[str] = []
+    headline = strip_emphasis(target.get("description", "")).strip()
+    if hide:
+        headline = mask_code(headline, code)
+    if headline:
+        blocks.append(headline)
+    for sentence in scenario_sentences(target.get("use_cases", ""), limit=2):
+        masked = mask_code(sentence, code) if hide else sentence
+        if masked:
+            blocks.append("· " + masked)
+    if quiz_type == QUIZ_FORMULA and str(target.get("syntax", "")).strip():
+        blocks.append("语法原型：" + str(target["syntax"]).strip())
+    return "\n".join(blocks).strip()
+
+
+def _question_payload(target: dict, quiz_type: str, prompt: str,
+                      options=None, answer: str = "") -> dict:
+    """题干 + 「答完之后才揭晓」的那些字段。
+
+    揭晓字段在**答题前界面不许用** —— 界面只在判完分后渲染它们。
+    这样就不用为答案另建一张表：答案本来就在函数里。
+    """
+    return {
+        "function_id": int(target.get("id") or 0),
+        "code": str(target.get("code", "")).strip(),
+        "name_cn": target.get("name_cn", ""),
+        "category": target.get("category", ""),
+        "quiz_type": quiz_type,
+        "prompt": prompt,
+        "options": list(options or []),
+        "answer": answer,
+        "syntax": str(target.get("syntax", "")).strip(),
+        "reveal_formula": strip_emphasis(target.get("example_formula", "")).strip(),
+        "reveal_result": strip_emphasis(target.get("example_result", "")).strip(),
+        "reveal_pitfalls": strip_emphasis(target.get("pitfalls", "")).strip(),
+    }
+
+
+def build_choice_question(target: dict, pool, *, rng=None) -> dict | None:
+    """出一道选择题：给场景，四选一认函数。
+
+    干扰项**优先取同分类**（「VLOOKUP 还是 XLOOKUP」才考得出东西），
+    同分类不够再从全库补。题干里出现过的函数名一律不当干扰项，
+    否则题面在暗示答案。凑不满选项数时返回 None，调用方跳过这题。
+    """
+    rng = rng or random.Random()
+    code = str(target.get("code", "")).strip()
+    if not code:
+        return None
+    prompt = quiz_prompt(target, quiz_type=QUIZ_CHOICE)
+    if not prompt:
+        return None
+
+    candidates = []
+    for item in pool or []:
+        other = str(item.get("code", "")).strip()
+        if not other or other == code or other in prompt:
+            continue
+        candidates.append(item)
+    same = [item for item in candidates if item.get("category") == target.get("category")]
+    rest = [item for item in candidates if item.get("category") != target.get("category")]
+    rng.shuffle(same)
+    rng.shuffle(rest)
+
+    distractors: list[str] = []
+    for item in same + rest:
+        other = str(item["code"]).strip()
+        if other not in distractors:
+            distractors.append(other)
+        if len(distractors) >= QUIZ_OPTION_COUNT - 1:
+            break
+    if len(distractors) < QUIZ_OPTION_COUNT - 1:
+        return None
+    options = [code, *distractors]
+    rng.shuffle(options)
+    return _question_payload(target, QUIZ_CHOICE, prompt, options=options, answer=code)
+
+
+def build_formula_question(target: dict, *, rng=None) -> dict | None:
+    """出一道「写公式」题：给场景，你自己写，写完自评。
+
+    为什么是自评而不是机器判：Excel 里等价写法太多（``INDEX+MATCH`` 换个写法
+    照样对），判错的代价比不判大得多。这道题的价值在**把答案写一遍** ——
+    写不出来时看一眼示例，那一下才叫学到了。没有示例公式的函数出不了这题。
+    """
+    code = str(target.get("code", "")).strip()
+    formula = strip_emphasis(target.get("example_formula", "")).strip()
+    if not code or not formula:
+        return None
+    body = quiz_prompt(target, quiz_type=QUIZ_FORMULA)
+    if not body:
+        return None
+    name_cn = str(target.get("name_cn", "")).strip()
+    who = f"{code}（{name_cn}）" if name_cn else code
+    prompt = f"用 {who} 写一条公式，解决这件事：\n{body}"
+    return _question_payload(target, QUIZ_FORMULA, prompt, answer=formula)
+
+
+def build_quiz_questions(functions, *, count=QUIZ_BATCH, mode=QUIZ_MODE_MIXED,
+                         rng=None, pool=None) -> list[dict]:
+    """凑一轮题。
+
+    **优先出还不熟的**（掌握度 ≤ 一般）：练已经会的是浪费时间，
+    「生疏」那一堆才是真正该反复过的。不熟的不够数才拿熟练的补。
+    抽题走传入的 ``rng``，所以同一个种子必然凑出同一套题（测试靠这个）。
+
+    ``functions`` 是**抽题范围**，``pool`` 是**干扰项来源**（缺省同前者）。
+    分开是为了「只练错题」：那时抽题范围可能只剩一两个函数，但四选一
+    照样得凑出三个不相干的选项 —— 干扰项跟目标不必同出一源。
+    """
+    rng = rng or random.Random()
+    candidates = [dict(item) for item in (functions or [])]
+    if not candidates:
+        return []
+    distractor_pool = [dict(item) for item in (pool if pool is not None
+                                               else functions or [])]
+    weak = [item for item in candidates
+            if int(item.get("mastery", 0) or 0) <= MASTERY_FAIR]
+    strong = [item for item in candidates
+              if int(item.get("mastery", 0) or 0) > MASTERY_FAIR]
+    rng.shuffle(weak)
+    rng.shuffle(strong)
+    targets = (weak + strong)[: max(1, int(count))]
+
+    questions: list[dict] = []
+    for index, target in enumerate(targets):
+        if mode == QUIZ_CHOICE:
+            wanted = QUIZ_CHOICE
+        elif mode == QUIZ_FORMULA:
+            wanted = QUIZ_FORMULA
+        else:
+            wanted = QUIZ_CHOICE if index % 2 == 0 else QUIZ_FORMULA
+        attempt = [wanted]
+        if mode == QUIZ_MODE_MIXED and wanted == QUIZ_FORMULA:
+            attempt.append(QUIZ_CHOICE)     # 缺示例公式的题降级成选择题
+        for quiz_type in attempt:
+            question = (build_choice_question(target, distractor_pool, rng=rng)
+                        if quiz_type == QUIZ_CHOICE
+                        else build_formula_question(target, rng=rng))
+            if question:
+                questions.append(question)
+                break
+    return questions
+
+
+# ======================================================================
+# CSV / Excel 批量导入（纯函数，测试直接打这里）
+# ======================================================================
+def import_template_headers() -> list[str]:
+    """模板列头：必填列前面加 ``*``（Excel 里一眼能看出哪几列不能空）。"""
+    return [f"*{name}" if required else name for name, required in IMPORT_COLUMNS]
+
+
+def import_template_rows() -> list[list[str]]:
+    """模板里的两行示例。
+
+    函数名故意起成 ``MYFUNC1`` / ``MYFUNC2``：**导入前你会改成自己的**。
+    万一没改就导进去了，库里也只是多两条一眼看得出的自建函数，删掉即可 ——
+    比让你对着一片空白猜格式友好。
+    """
+    return [
+        ["MYFUNC1", "我的函数一", "查找与引用",
+         "MYFUNC1(查找值, 区域)",
+         "照书上抄下来的冷门函数，一句话说明它干什么",
+         "查找值：要去找的东西\n区域：去哪里找", "返回找到的那一行",
+         "=MYFUNC1(A2,$D$2:$F$99)", "示例里 A2 能取到「张三」", "参数顺序容易记反",
+         "书上有、内置库里没有的那类需求", "VLOOKUP|INDEX", "照书补录", "Excel 2019",
+         "常用", "核心", "412", "我自己的理解"],
+        ["MYFUNC2", "我的函数二", "数学与三角函数",
+         "MYFUNC2(数值, [位数])", "第二条示例，导入前删掉这一行也可以",
+         "数值：要处理的数\n位数：可选", "返回处理后的数值",
+         "=MYFUNC2(3.14159,2)", "返回 3.14", "", "算数取整", "", "", "",
+         "入门", "了解", "", ""],
+    ]
+
+
+def import_template_csv() -> str:
+    """模板 CSV 全文（落盘时用 ``utf-8-sig``，Excel 双击打开不乱码）。"""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(import_template_headers())
+    for row in import_template_rows():
+        writer.writerow(row)
+    return buffer.getvalue()
+
+
+def normalize_import_header(name) -> str | None:
+    """把表头认成内部字段名；认不出来返回 None（那一列会被忽略）。"""
+    text = str("" if name is None else name).strip().lstrip("*").strip().lower()
+    text = re.sub(r"\s+", "", text)
+    if not text:
+        return None
+    for field, aliases in IMPORT_HEADER_ALIASES.items():
+        if text in aliases:
+            return field
+    return None
+
+
+def normalize_import_value(value) -> str:
+    """单元格值归一化成字符串：``None`` 空串、整数去掉 ``.0``、日期转 ISO。"""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def parse_level(value, mapping, fallback: int) -> int:
+    """解析「难度 / 重要度」列：认数字，也认中文（入门 / 核心）。"""
+    text = normalize_import_value(value)
+    if not text:
+        return fallback
+    if text.isdigit():
+        number = int(text)
+        return number if number in mapping else fallback
+    for number, label in mapping.items():
+        if label == text:
+            return number
+    return fallback
+
+
+def normalize_import_row(raw: dict) -> dict:
+    """一行「表头 → 单元格」整理成入库字段字典。
+
+    **幂等**：已经归一化过的行再跑一遍结果不变（界面拿它做预览、
+    ``import_functions`` 里再跑一遍，两处都不会走样）。
+    """
+    row = {field: "" for field, _required in IMPORT_COLUMNS}
+    for header, value in (raw or {}).items():
+        field = normalize_import_header(header)
+        if field is None:
+            continue
+        row[field] = normalize_import_value(value)
+    row["code"] = re.sub(r"\s+", "", row["code"]).upper()
+    row["category"] = row["category"] or "逻辑"
+    row["difficulty"] = parse_level(row["difficulty"], DIFFICULTY_LABELS, 2)
+    row["importance"] = parse_level(row["importance"], IMPORTANCE_LABELS, 2)
+    return row
+
+
+def validate_import_row(row: dict) -> list[str]:
+    """必填与格式校验。返回问题列表，空列表 = 这一行能入库。"""
+    problems: list[str] = []
+    for field, required in IMPORT_COLUMNS:
+        if required and not str(row.get(field, "") or "").strip():
+            problems.append(f"{field} 不能为空")
+    code = str(row.get("code", "") or "").strip()
+    if len(code) > 32:
+        problems.append("函数名最长 32 个字符")
+    if re.search(r"\s", code):
+        problems.append("函数名里不能有空格")
+    for field, mapping in (("difficulty", DIFFICULTY_LABELS),
+                           ("importance", IMPORTANCE_LABELS)):
+        value = row.get(field)
+        if value in ("", None):
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = None
+        if number not in mapping:
+            problems.append(f"{field} 只能填 {min(mapping)}-{max(mapping)} 或对应的中文")
+    return problems
+
+
+def read_import_text(path) -> str:
+    """按 UTF-8(含 BOM) → GBK 的顺序试解码。
+
+    Excel「另存为 CSV」在中文 Windows 上默认是 GBK，而自己用编辑器存的
+    多半是 UTF-8。两个都认，省得让你先去猜该存哪种编码。
+    """
+    raw = Path(path).read_bytes()
+    for encoding in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def import_rows_from_table(rows) -> list[dict]:
+    """「列表的列表」→ 「表头 → 单元格」行字典（第一行是表头，空行丢掉）。"""
+    table = [list(row) for row in (rows or []) if row is not None]
+    table = [row for row in table
+             if any(str("" if cell is None else cell).strip() for cell in row)]
+    if not table:
+        return []
+    headers = [normalize_import_header(cell) or str(cell or "").strip()
+               for cell in table[0]]
+    result: list[dict] = []
+    for row in table[1:]:
+        result.append({headers[index]: (row[index] if index < len(row) else "")
+                       for index in range(len(headers))})
+    return result
+
+
+def parse_import_csv_text(text) -> list[dict]:
+    """CSV / TSV 文本 → 行字典列表。**纯函数，测试直接打这里。**
+
+    分隔符不靠 ``csv.Sniffer`` 一锤定音：它在小样本上会挑错（实测把分号、
+    制表符的文件都判成逗号），代价是整行变成一个单元格、表头全认不出来、
+    每一行都进 errors —— 用户看到的是「照模板填的，一导全错」还不报异常。
+    所以改成**试一遍再比**：按候选分隔符各解析一次，谁认出来的字段名多谁赢。
+    判据从「猜字符频率」换成「表头认不认得出来」，与后面的导入逻辑同一个口径。
+    """
+    body = str(text or "")
+    order: list[str] = []
+    sample = body[:8192]
+    if sample:
+        try:
+            order.append(csv.Sniffer().sniff(sample, delimiters=",;\t").delimiter)
+        except csv.Error:
+            pass
+    for delimiter in (",", ";", "\t"):
+        if delimiter not in order:
+            order.append(delimiter)
+
+    best: list[dict] = []
+    best_hits = -1
+    for delimiter in order:
+        rows = import_rows_from_table(
+            [row for row in csv.reader(io.StringIO(body), delimiter=delimiter)]
+        )
+        if not rows:
+            continue
+        hits = sum(1 for key in rows[0] if normalize_import_header(key))
+        if hits > best_hits:
+            best, best_hits = rows, hits
+        if best_hits >= 5:              # 认出 5 个字段已经不可能再是别的分隔符
+            break
+    return best
+
+
+def parse_import_xlsx(path) -> list[dict]:
+    """读 xlsx 的第一个工作表。
+
+    ``openpyxl`` **按需导入**：纯数据层测试与日常启动都不该为它买单
+    （与项目里其他按需导入的地方同一个口径）。
+    """
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:                # pragma: no cover - 取决于环境
+        raise ValueError("读取 Excel 文件需要 openpyxl，先 pip install openpyxl") from exc
+    book = load_workbook(filename=str(path), read_only=True, data_only=True)
+    try:
+        rows = [list(row) for row in book.worksheets[0].iter_rows(values_only=True)]
+    finally:
+        book.close()
+    return import_rows_from_table(rows)
+
+
+def parse_import_file(path) -> list[dict]:
+    """按后缀解析导入文件，统一成「行字典列表」。"""
+    target = Path(path)
+    if not target.exists():
+        raise ValueError(f"找不到文件：{target}")
+    if target.suffix.lower() in IMPORT_EXCEL_SUFFIXES:
+        return parse_import_xlsx(target)
+    return parse_import_csv_text(read_import_text(target))
+
+
+# ======================================================================
 # 建表 / 迁移 / 种子
 # ======================================================================
 def ensure_columns(conn: sqlite3.Connection, table: str, spec: dict) -> list[str]:
@@ -651,9 +1190,122 @@ class ExcelDB:
         if item["is_builtin"]:
             raise ValueError("内置函数不能删除，只能标记掌握度或写笔记。")
         self.conn.execute("DELETE FROM excel_progress WHERE function_id = ?", (int(function_id),))
+        # 答题流水也要清：``quiz_wrong_items`` 是 LEFT JOIN 出来的，
+        # 留着孤儿行会在错题本里显示成一条没有函数名的空条目。
+        self.conn.execute("DELETE FROM excel_quiz_log WHERE function_id = ?", (int(function_id),))
         self.conn.execute("DELETE FROM excel_functions WHERE id = ?", (int(function_id),))
         self.conn.commit()
         return True
+
+    # -- 批量导入 ------------------------------------------------------
+    def import_functions(self, rows, *, overwrite_builtin: bool = False,
+                         dry_run: bool = False) -> dict:
+        """把「行字典列表」批量写进函数库。
+
+        三条去向（都体现在返回值里，界面照着报数）：
+          新增 —— 库里没有这个函数名，入成**自建**（``is_builtin=0``，所以可删）
+          更新 —— 库里已有且是自建的；或你显式勾了「覆盖内置」
+          跳过 —— 库里已有且是**内置**的，而你没勾覆盖
+
+        覆盖时**只写文件里非空的字段**：空单元格的意思是「这列我没填」，
+        不是「把它清空」，所以你的书页码与心得不会被一次导入抹掉。
+
+        ``dry_run=True`` 时只走分类、**一个字都不写**，界面拿它做「导之前先报
+        规模」—— 这样预览和真写是同一段判定逻辑，不会出现「预览说 3 条、
+        实际写了 5 条」。
+        """
+        added: list[str] = []
+        updated: list[str] = []
+        skipped: list[dict] = []
+        errors: list[dict] = []
+        warnings: list[dict] = []
+        seen: set[str] = set()
+
+        for offset, raw in enumerate(list(rows or []), start=2):   # 表头算第 1 行
+            row = normalize_import_row(raw)
+            code = str(row.get("code", "") or "").strip()
+            problems = validate_import_row(row)
+            if problems:
+                errors.append({"row": offset, "code": code,
+                               "message": "；".join(problems)})
+                continue
+            if code in seen:
+                errors.append({"row": offset, "code": code,
+                               "message": "同一个文件里这个函数名出现了两次"})
+                continue
+            seen.add(code)
+            if row["category"] not in CATEGORY_NAMES:
+                warnings.append({"row": offset, "code": code,
+                                 "message": f"分类「{row['category']}」不在官方 12 类里，"
+                                            "会以自定义分类入库"})
+            existing = self.get_function_by_code(code)
+            try:
+                if existing is None:
+                    if not dry_run:
+                        self.add_custom_function(row)
+                    added.append(code)
+                elif not int(existing.get("is_builtin", 0) or 0) or overwrite_builtin:
+                    if not dry_run:
+                        self.update_function_content(existing["id"], row)
+                    updated.append(code)
+                else:
+                    skipped.append({"row": offset, "code": code,
+                                    "message": "库里已有同名内置函数"
+                                               "（勾上「覆盖内置」可以强制改写）"})
+            except (ValueError, sqlite3.Error) as exc:
+                errors.append({"row": offset, "code": code, "message": str(exc)})
+        return {
+            "added": added,
+            "updated": updated,
+            "skipped": skipped,
+            "errors": errors,
+            "warnings": warnings,
+            "total": len(added) + len(updated),
+        }
+
+    def update_function_content(self, function_id, row: dict) -> None:
+        """按导入行改写函数内容。
+
+        **只写非空字段**，也不碰 ``is_builtin``（决定这条能不能删）与
+        ``sort_order``（课程顺序）—— 列名全部来自白名单常量，不存在拼接注入。
+        """
+        payload: dict = {}
+        for field in IMPORT_WRITABLE_FIELDS:
+            if field not in row:
+                continue
+            value = row[field]
+            if isinstance(value, str) and not value.strip():
+                continue
+            payload[field] = value
+        if not payload:
+            return
+        payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        assignments = ", ".join(f"{key} = ?" for key in payload)
+        self.conn.execute(
+            f"UPDATE excel_functions SET {assignments} WHERE id = ?",
+            (*payload.values(), int(function_id)),
+        )
+        self.conn.commit()
+
+    def export_functions_csv(self, path) -> int:
+        """把整库导成 CSV（列头与导入模板一致，可以「导出 → 改 → 再导回来」）。"""
+        headers = [name for name, _required in IMPORT_COLUMNS]
+        buffer = io.StringIO()
+        writer = csv.writer(buffer, lineterminator="\r\n")
+        writer.writerow(headers)
+        count = 0
+        for item in self.all_functions():
+            writer.writerow([item.get(name, "") for name in headers])
+            count += 1
+        Path(path).write_bytes(buffer.getvalue().encode("utf-8-sig"))
+        return count
+
+    def write_import_template(self, path) -> str:
+        """把导入模板写到 ``path``（UTF-8 带 BOM，Excel 双击打开不乱码）。"""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(import_template_csv().encode("utf-8-sig"))
+        return str(target)
 
     # -- 掌握度与复习 ---------------------------------------------------
     def progress_map(self) -> dict[int, dict]:
@@ -904,6 +1556,139 @@ class ExcelDB:
     def note_count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS n FROM excel_notes").fetchone()
         return int(row["n"]) if row else 0
+
+    # -- 自测出题 ------------------------------------------------------
+    def quiz_questions(self, *, count=QUIZ_BATCH, category=None,
+                       mode=QUIZ_MODE_MIXED, only_wrong=False,
+                       seed=None) -> list[dict]:
+        """凑一轮题。``category=None`` 全库抽；``only_wrong=True`` 只出错题本里的。"""
+        pool = self.list_functions(category=category)
+        if not pool:
+            return []
+        if only_wrong:
+            wrong_ids = {int(row["function_id"] or 0)
+                         for row in self.quiz_wrong_items(category=category, limit=None)}
+            narrowed = [item for item in pool if int(item["id"]) in wrong_ids]
+            if narrowed:
+                # 抽题范围缩到错题本，但干扰项仍从全库出 —— 否则错题本只剩
+                # 一两条时，四选一凑不出选项，页面会是一片空白。
+                return build_quiz_questions(narrowed, count=count, mode=mode,
+                                            rng=random.Random(seed), pool=pool)
+        return build_quiz_questions(pool, count=count, mode=mode,
+                                    rng=random.Random(seed))
+
+    def record_quiz_result(self, *, function_id, quiz_type, prompt="", answer="",
+                           user_answer="", is_correct, category="",
+                           feed_progress=True, today=None) -> dict:
+        """记一次作答，并把结果**回灌到同一条遗忘曲线**上。
+
+        对 → 按「熟练」回灌（掌握度 +1、间隔往后跳一档）；
+        错 → 按「忘了」回灌（掌握度 −1、明天再来），同时进错题本。
+        这样自测就不是一次孤立的测验，而是复习的一种形式 —— 曲线认得它，
+        不会出现「今天复习了 20 个，自测又做对 10 个，进度却纹丝不动」。
+        """
+        now = datetime.now().isoformat(timespec="seconds")
+        cursor = self.conn.execute(
+            "INSERT INTO excel_quiz_log (function_id, quiz_type, prompt, answer, "
+            "user_answer, is_correct, category, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (int(function_id or 0), str(quiz_type or QUIZ_CHOICE), str(prompt or ""),
+             str(answer or ""), str(user_answer or ""), 1 if is_correct else 0,
+             str(category or ""), now),
+        )
+        self.conn.commit()
+        state: dict = {}
+        if feed_progress and function_id:
+            feedback = FEEDBACK_KNOWN if is_correct else FEEDBACK_FORGOT
+            state = self.record_review(int(function_id), feedback, today=today)
+        return {"id": int(cursor.lastrowid), "is_correct": bool(is_correct), **state}
+
+    def quiz_wrong_items(self, *, category=None, limit=QUIZ_WRONG_LIMIT) -> list[dict]:
+        """错题本：**每个函数只留最近一次做错的那条**，订正过的不再出现。
+
+        为什么按函数去重而不是列出每一次错：同一道题连错三次不该在清单里占三行 ——
+        那是流水，不是待办。定的是「哪些还没弄明白」，不是「错了几次」。
+        """
+        rows = self.conn.execute(
+            "SELECT q.*, f.code AS code, f.name_cn AS name_cn, "
+            "       f.category AS fn_category, f.syntax AS syntax, "
+            "       f.example_formula AS example_formula, "
+            "       f.example_result AS example_result "
+            "FROM excel_quiz_log AS q "
+            "LEFT JOIN excel_functions AS f ON f.id = q.function_id "
+            "WHERE q.is_correct = 0 AND q.retried = 0 "
+            "ORDER BY q.id DESC"
+        ).fetchall()
+        result: list[dict] = []
+        seen: set[int] = set()
+        for row in rows:
+            item = dict(row)
+            key = int(item.get("function_id") or 0)
+            if key in seen:
+                continue
+            seen.add(key)
+            item["category"] = item.get("fn_category") or item.get("category") or ""
+            item["code"] = item.get("code") or ""
+            item["name_cn"] = item.get("name_cn") or ""
+            if category and item["category"] != category:
+                continue
+            result.append(item)
+            if limit is not None and len(result) >= int(limit):
+                break
+        return result
+
+    def mark_quiz_retried(self, quiz_id, *, correct=True, today=None) -> bool:
+        """把一道错题标成「订正过」；``correct=True`` 时顺手按「熟练」回灌一次。
+
+        **按函数销账，不是按这一行销账。** 同一个函数可能错了好几次，
+        错题本只显示最新那条（那是故意的）；要是只把这一行标成已订正，
+        下次刷新就会从旧流水里把同一个函数捞回来 —— 用户看到的是
+        「点了订正它还在」，跟按钮坏了没区别。错题本问的是「哪些还没弄明白」，
+        那么「订正」自然就该等于「这个函数弄明白了」。
+        """
+        row = self.conn.execute(
+            "SELECT * FROM excel_quiz_log WHERE id = ?", (int(quiz_id),)
+        ).fetchone()
+        if not row:
+            return False
+        record = dict(row)
+        self.conn.execute(
+            "UPDATE excel_quiz_log SET retried = 1, retried_at = ? "
+            "WHERE id = ? OR (function_id = ? AND function_id > 0 "
+            "                 AND is_correct = 0 AND retried = 0)",
+            (datetime.now().isoformat(timespec="seconds"), int(quiz_id),
+             int(record.get("function_id") or 0)),
+        )
+        self.conn.commit()
+        if correct and record.get("function_id"):
+            self.record_review(int(record["function_id"]), FEEDBACK_KNOWN, today=today)
+        return True
+
+    def quiz_stats(self) -> dict:
+        """自测汇总：答了多少次、对了几次、错题本还挂着几条。"""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS attempts, COALESCE(SUM(is_correct), 0) AS correct "
+            "FROM excel_quiz_log"
+        ).fetchone()
+        attempts = int(row["attempts"] or 0)
+        correct = int(row["correct"] or 0)
+        return {
+            "attempts": attempts,
+            "correct": correct,
+            "wrong": attempts - correct,
+            "pending": len(self.quiz_wrong_items(limit=None)),
+            "accuracy": round(correct * 100 / attempts) if attempts else 0,
+        }
+
+    def clear_quiz_log(self, *, wrong_only=True) -> int:
+        """清空错题本；``wrong_only=False`` 时连答对的流水一起清（统计随之归零）。"""
+        if wrong_only:
+            cursor = self.conn.execute(
+                "DELETE FROM excel_quiz_log WHERE is_correct = 0")
+        else:
+            cursor = self.conn.execute("DELETE FROM excel_quiz_log")
+        self.conn.commit()
+        return int(cursor.rowcount or 0)
 
     # -- 打卡 ----------------------------------------------------------
     def upsert_checkin(self, *, check_date=None, minutes=None, reviewed=None,
