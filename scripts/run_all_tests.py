@@ -48,6 +48,7 @@ SUITES = [
     "test_process",
     "test_process_ui",
     "test_excel",
+    "test_excel_note",
     "test_excel_ui",
 ]
 SMOKE = "runtime_smoke"

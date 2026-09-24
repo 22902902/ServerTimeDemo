@@ -34,6 +34,17 @@ except Exception:
     pass
 
 import main  # noqa: E402
+import study_notes_window as snw  # noqa: E402
+from markdown_view import (  # noqa: E402
+    FONT_FAMILY,
+    GEN_BAR_CHAR,
+    GEN_BG,
+    GEN_CODE_BG,
+    GEN_FONT_CANDIDATES,
+    GEN_INDENT,
+    GEN_PREFIX,
+)
+from study_notes_db import GEN_END, GEN_START  # noqa: E402
 from study_notes_window import (  # noqa: E402
     MONO_FAMILY,
     NoteEditorDialog,
@@ -102,6 +113,16 @@ LABEL_CLASSES = ("Label", "TLabel")
 def label_texts(widget) -> list[str]:
     return [str(w.cget("text")) for w in walk(widget)
             if w.winfo_class() in LABEL_CLASSES and str(w.cget("text")) != ""]
+
+
+def tree_nodes(tree, parent="", out=None) -> list:
+    """递归收集分类树 / 笔记树的全部 iid（含各级子节点）。"""
+    if out is None:
+        out = []
+    for iid in tree.get_children(parent):
+        out.append(iid)
+        tree_nodes(tree, iid, out)
+    return out
 
 
 def main_test():
@@ -262,6 +283,115 @@ def main_test():
           any(t.startswith("Markdown 编辑区") for t in dlg_texts),
           f"实际 {dlg_texts}")
 
+    # ---------------------------------------------------------------- 9
+    print("\n[9] 生成区：标记行不渲染 + 颜色/字体/排版三处与正文不同")
+    # 生成区的样式是「让用户一眼分出哪段是机器写的」——改回正文样式程序也不
+    # 报错，只有肉眼才发现。所以三项差异各留一条断言。
+    gen_note = (
+        f"{GEN_START}\n"
+        "> **自动生成** · 2026-09-24 10:29 · 来自「Excel 宝典 › 自测出题」\n"
+        "> 这一段重新生成时会整段覆盖；想留的东西写在下面「我的补充」。\n"
+        "\n"
+        "## SUM｜求和\n"
+        "\n"
+        "分类：数学统计 · 掌握度：生疏\n"
+        "\n"
+        "**一句话**\n"
+        "\n"
+        "把一批数字加起来，含 `=SUM(A1:A10)` 这样的行内代码。\n"
+        "\n"
+        "```python\n"
+        "print(1)\n"
+        "```\n"
+        f"{GEN_END}\n"
+        "\n"
+        "## 我的补充\n"
+        "\n"
+        "我自己写的一段话，样式应该跟上面完全不同。\n"
+    )
+    dlg.text_area.delete("1.0", "end")
+    dlg.text_area.insert("1.0", gen_note)
+    dlg._render_preview()
+    dlg.update_idletasks()
+
+    shown = p.get("1.0", "end-1c")
+    check("★ 两个标记行都不出现在预览里",
+          GEN_START not in shown and GEN_END not in shown
+          and "gen:start" not in shown and "gen:end" not in shown,
+          repr([ln for ln in shown.splitlines() if "gen:" in ln]))
+
+    # 生成区 = 带任意 gen_ 前缀 tag 的那些行
+    total_rows = int(p.index("end-1c").split(".")[0])
+    gen_rows = [r for r in range(1, total_rows + 1)
+                if any(str(t).startswith(GEN_PREFIX)
+                       for t in p.tag_names(f"{r}.0"))]
+    check("★ 认出了生成区（标签家族生效）", bool(gen_rows),
+          f"总行数 {total_rows}，gen 行 {gen_rows}")
+    check("gen_zone 元素 tag 已挂上",
+          any("gen_zone" in p.tag_names(f"{r}.0") for r in gen_rows))
+
+    # 分界线：用户自己那段以「我的补充」开头
+    my_row = next((r for r in range(1, total_rows + 1)
+                   if p.get(f"{r}.0", f"{r}.end").strip() == "我的补充"), 0)
+    check("找到了「我的补充」那一行（防假绿）", my_row > 0, my_row)
+    user_rows = list(range(my_row, total_rows + 1)) if my_row else []
+    stray = [r for r in user_rows
+             if any(str(t).startswith(GEN_PREFIX) for t in p.tag_names(f"{r}.0"))]
+    check("★ 用户自己的那一段一个 gen_ tag 都没有", not stray, f"串到 {stray}")
+
+    # 排版：整块左缩进；生成区每行首带书脊线，用户那段没有
+    check(f"生成区整块左缩进 ≥ {GEN_INDENT}px（排版不同）",
+          int(p.tag_cget("gen_bar", "lmargin1")) >= GEN_INDENT,
+          p.tag_cget("gen_bar", "lmargin1"))
+    gen_bars = sum(1 for r in gen_rows[:my_row - 1]
+                   if GEN_BAR_CHAR in p.get(f"{r}.0", f"{r}.end"))
+    check("生成区非空行都带书脊线", gen_bars > 0, gen_bars)
+    check("用户那一段没有书脊线",
+          not any(GEN_BAR_CHAR in p.get(f"{r}.0", f"{r}.end") for r in user_rows))
+
+    # 颜色：正文底色 / 字色 / 代码底色三处都不一样
+    check("gen_zone 底色 = GEN_BG（颜色不同）",
+          str(p.tag_cget("gen_zone", "background")).lower() == GEN_BG.lower(),
+          p.tag_cget("gen_zone", "background"))
+    check("gen_p 字色与正文 p 不同",
+          tag_color(p, "gen_p").lower() != tag_color(p, "p").lower(),
+          f"gen_p={tag_color(p, 'gen_p')} p={tag_color(p, 'p')}")
+    check("gen_code 底色 = GEN_CODE_BG",
+          str(p.tag_cget("gen_code", "background")).lower() == GEN_CODE_BG.lower(),
+          p.tag_cget("gen_code", "background"))
+
+    # 字体：生成区用衬线中文字（候选里挑一个系统真有的），且与正文不同
+    fam_of = lambda tag: str(tkfont.Font(font=p.tag_cget(tag, "font")).cget("family"))
+    gen_family = fam_of("gen_p")
+    body_family = fam_of("p")
+    check("gen_p 有独立字体族", bool(gen_family), gen_family)
+    check("★ 生成区字体与正文不同",
+          gen_family != body_family, f"{gen_family} vs {body_family}")
+    check("生成区字体取自衬线候选（不是随便落在一个默认字体上）",
+          gen_family in GEN_FONT_CANDIDATES or gen_family != FONT_FAMILY,
+          f"实际 {gen_family}")
+    check("生成区代码仍是等宽字体（衬线只作用于正文）",
+          fam_of("gen_code") == MONO_FAMILY, fam_of("gen_code"))
+
+    # 浏览器预览：同一套差异也要在 HTML 里
+    html_gen = dlg._build_html_preview(gen_note)
+    check("HTML 里生成区有独立容器 class", 'class="genzone"' in html_gen)
+    check("HTML 里生成区底色已写入", GEN_BG in html_gen)
+    check("HTML 里标记行不渲染",
+          GEN_START not in html_gen and GEN_END not in html_gen)
+    html_plain = dlg._build_html_preview("## 普通笔记\n\n没有标记。\n")
+    check("普通笔记的 HTML 里没有生成区容器",
+          'class="genzone"' not in html_plain)
+
+    # 反向：一篇没有标记的普通笔记，预览里不许出现 gen_ tag
+    dlg.text_area.delete("1.0", "end")
+    dlg.text_area.insert("1.0", "## 普通笔记\n\n就是普通正文。\n")
+    dlg._render_preview()
+    dlg.update_idletasks()
+    plain_rows = [r for r in range(1, int(p.index("end-1c").split(".")[0]) + 1)
+                  if any(str(t).startswith(GEN_PREFIX) for t in p.tag_names(f"{r}.0"))]
+    check("★ 没有标记的普通笔记一个 gen_ tag 都没有", not plain_rows, plain_rows)
+
     dlg.destroy()
 
     # ---------------------------------------------------------------- 8
@@ -299,6 +429,65 @@ def main_test():
         check("分类面板/工具栏不再有彩色 emoji", not leftover, f"残留 {leftover}")
         check("分类面板标题为「笔记分类」", "笔记分类" in texts,
               f"实际标签 {texts}")
+
+        # ------------------------------------------------------------ 10
+        print("\n[10] 锁定分类：看得见「（系统）」，改不了也删不掉")
+        locked_code = app.study_notes_db.ensure_locked_category(
+            source_key="excel", name="Excel 宝典")
+        check("数据层建出了锁定分类", bool(locked_code), locked_code)
+        pg.reload()
+        pg.update_idletasks()
+        nodes = {iid: str(pg.cat_tree.item(iid, "text"))
+                 for iid in tree_nodes(pg.cat_tree)}
+        hit = [iid for iid, text in nodes.items() if "Excel 宝典" in text]
+        check("★ 分类树里能看到锁定分类", bool(hit), list(nodes.values())[:8])
+        node = hit[0] if hit else ""
+        check("树上带「（系统）」后缀（明显区别于普通分类）",
+              bool(node) and nodes[node].endswith("（系统）"), nodes.get(node))
+        check("该节点打了 locked 标记",
+              bool(node) and "locked" in pg.cat_tree.item(node, "tags"),
+              pg.cat_tree.item(node, "tags") if node else None)
+        check("locked 标记配了弱化字色",
+              str(pg.cat_tree.tag_configure("locked", "foreground")) != "",
+              pg.cat_tree.tag_configure("locked", "foreground"))
+
+        said: list = []
+        orig_info = snw.messagebox.showinfo
+        snw.messagebox.showinfo = lambda *a, **k: said.append(a)
+        try:
+            pg.cat_tree.selection_set(node)
+            pg.edit_category()
+            check("★ 选中锁定分类点「编辑分类」被挡下（不弹编辑框）",
+                  len(said) == 1, said)
+            check("提示说明它是系统分类、不能改名",
+                  bool(said) and "系统分类" in str(said[0])
+                  and "不能改名" in str(said[0]), said)
+            said.clear()
+            pg.delete_category()
+            check("★ 选中锁定分类点「删除分类」也被挡下", len(said) == 1, said)
+            check("提示说明不能删除",
+                  bool(said) and "不能删除" in str(said[0]), said)
+        finally:
+            snw.messagebox.showinfo = orig_info
+        check("★ 折腾一圈之后分类还在、还锁着",
+              bool(node) and app.study_notes_db.get_category(int(node)).locked == 1)
+
+        # 只约束它自己：树上的普通分类照旧，一个都没被误打系统标记。
+        # ★ 这一段**只读**：绝不能为了测「用户能建自己的分类」就往库里塞一条
+        # —— 这个夹具是开发库，每跑一次测试就留一条垃圾分类（本轮踩过：
+        # 探针脚本建了两条「我自己的分类」，得手工清掉）。
+        locked_nodes = [iid for iid in nodes
+                        if "locked" in pg.cat_tree.item(iid, "tags")]
+        check("★ 树上只有锁定分类一个被打 locked 标记",
+              locked_nodes == ([node] if node else []),
+              [nodes[i] for i in locked_nodes])
+        plain = {iid: text for iid, text in nodes.items() if "（系统）" not in text}
+        check("普通分类照旧显示（锁定机制不波及它们）", len(plain) >= 5,
+              len(plain))
+        check("★ 普通分类没有一个被误打 locked 标记",
+              not any("locked" in pg.cat_tree.item(iid, "tags") for iid in plain))
+        check("锁定分类混在普通分类里、不是唯一一项",
+              len(plain) + 1 == len(nodes), f"{len(plain)} + 1 vs {len(nodes)}")
 
     app.destroy()
 

@@ -45,6 +45,9 @@ N. 批量导入   「更多」菜单四个入口 / 模板与导出真的落盘 /
                  撞内置会先问 / 点「否」一个字都不写
 O. 待办按钮   打开页面不会自动建 / 点一下才调一次桥 / 未注入时只提示
 P. 雷达图     定宽 Canvas / 12 个分类名与官方一致 / 12 轴顶点 / 排在条形图之前
+Q. 笔记联动   结算卡与「更多」两个入口 / 没作答时一个字都不写 / 确认框口径与
+                 真跑一致 / 再点一次是更新不是又建两篇 / 点「否」不写 /
+                 待办备注带上笔记指纹
 
 用法::
 
@@ -87,6 +90,9 @@ from excel_page import (  # noqa: E402
     ExcelLearningPage,
 )
 from excel_seed import CATEGORIES  # noqa: E402
+from excel_note_bridge import NOTE_AREA_LABEL, ExcelNoteBridge  # noqa: E402
+from excel_todo_bridge import review_todo_payload  # noqa: E402
+from study_notes_db import StudyNotesDB  # noqa: E402
 from ui_theme import MAIN_PALETTE  # noqa: E402
 
 PASSED = 0
@@ -159,6 +165,46 @@ def count_widgets(widget) -> int:
     for child in widget.winfo_children():
         total += 1 + count_widgets(child)
     return total
+
+
+def find_menu_buttons(widget, out=None) -> list:
+    """递归找「挂着 .menu 的按钮」—— create_menu_button 把菜单留在 .menu 上。
+
+    菜单项标题只能从 tk.Menu 里逐条 ``entrycget`` 读（分隔线会抛错，跳过）。
+    """
+    if out is None:
+        out = []
+    try:
+        children = widget.winfo_children()
+    except tk.TclError:
+        return out
+    for child in children:
+        if hasattr(child, "menu"):
+            out.append(child)
+        find_menu_buttons(child, out)
+    return out
+
+
+def menu_labels(page) -> list:
+    labels = []
+    for button in find_menu_buttons(page):
+        menu = getattr(button, "menu", None)
+        if menu is None:
+            continue
+        try:
+            last = menu.index("end")
+        except tk.TclError:
+            continue
+        if last is None:
+            continue
+        for i in range(int(last) + 1):
+            try:
+                label = str(menu.entrycget(i, "label"))
+            except tk.TclError:
+                continue        # 分隔线没有 label
+            if label:
+                labels.append(label)
+    return labels
 
 
 def make_db(name: str, tmpdir: Path) -> ExcelDB:
@@ -1128,6 +1174,163 @@ def test_todo_button(root, page, db) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Q. 自测 → 生成学习笔记
+# ══════════════════════════════════════════════════════════════════════════
+def test_note_link(root, page, db, tmpdir) -> None:
+    section("[Q] 自测 → 生成学习笔记（按钮 + 干跑确认框 + 只在点击时写）")
+    import excel_page as ep
+
+    saved = {
+        "notes": page.notes,
+        "session": list(page.quiz_session),
+        "questions": list(page.quiz_questions),
+        "correct": page.quiz_correct,
+        "wrong": page.quiz_wrong,
+        "recent": page.db.recent_quiz_answers,
+    }
+    asked: list = []
+    shown: list = []
+    orig_yesno = ep.messagebox.askyesno
+    orig_info = ep.messagebox.showinfo
+    host = tk.Frame(root)
+    host.pack(fill="both", expand=True)
+    notes_path = Path(tmpdir) / "notes_ui.db"
+    study_db = StudyNotesDB(notes_path)
+    bridge = ExcelNoteBridge(study_db)
+
+    try:
+        # ── Q1 没注入桥时只提示 ──
+        page.notes = None
+        page.quiz_session = []
+        page.generate_study_notes()
+        settle(root)
+        check("没注入笔记桥时只给提示不报错",
+              "笔记桥" in page.status_var.get(), page.status_var.get())
+
+        # ── Q2 有桥但这一轮没作答 → 不写，给一句「先去做一轮」 ──
+        page.notes = bridge
+        page.db.recent_quiz_answers = lambda **kw: []
+        ep.messagebox.showinfo = lambda *a, **k: shown.append(a)
+        page.generate_study_notes()
+        settle(root)
+        check("没有自测记录时弹一句提示", len(shown) == 1, len(shown))
+        check("★ 没有自测记录时一个字都不写", bridge.count_notes() == 0,
+              bridge.count_notes())
+        check("也没顺手建出分类（只读接口不建）",
+              bridge.existing_category_code() == "",
+              bridge.existing_category_code())
+
+        # ── Q3 本轮作答：错题优先；结算卡上出现按钮 ──
+        entries = [
+            {"function_id": 1, "code": "SUM", "name_cn": "求和", "category": "数学统计",
+             "is_correct": 0, "user_answer": "AVERAGE", "answer": "SUM",
+             "prompt": "把 A1:A10 加起来用哪个？", "quiz_type": "choice",
+             "created_at": "2026-09-24T10:00:00"},
+            {"function_id": 2, "code": "IF", "name_cn": "条件判断", "category": "逻辑判断",
+             "is_correct": 1, "user_answer": "IF", "answer": "IF",
+             "prompt": "?", "quiz_type": "choice",
+             "created_at": "2026-09-24T10:01:00"},
+        ]
+        page.quiz_session = [dict(item) for item in entries]
+        page.quiz_questions = [dict(item) for item in entries]
+        page.quiz_correct, page.quiz_wrong = 1, 1
+        items = page._note_source_items()
+        check("★ 本轮作答按「错题优先」整理",
+              [i["code"] for i in items] == ["SUM", "IF"],
+              [i["code"] for i in items])
+
+        card = page._quiz_summary(host)
+        settle(root)
+        card_text = " ".join(texts_of(card))
+        check("★ 自测结算卡上出现「生成学习笔记（2）」按钮",
+              "生成学习笔记（2）" in card_text, card_text)
+        check("结算卡原有按钮没被挤掉",
+              all(t in card_text for t in ("再来一轮", "去做今日复习")), card_text)
+
+        labels = menu_labels(page)
+        check("「更多」菜单里也有同一个入口",
+              any("生成学习笔记" in t for t in labels), labels)
+        check("「更多」菜单原有的导出入口还在",
+              any("导出学习进度" in t for t in labels), labels)
+
+        # ── Q4 确认框文案：落点 / 条数 / 我的补充不会被覆盖 ──
+        plan = bridge.plan_notes(items, generated_at="2026-09-24 10:30")
+        text = page._note_confirm_text(plan)
+        check("确认框写明落点", NOTE_AREA_LABEL in text, text)
+        check("首次生成会说明要自动建分类", "首次" in text, text)
+        check("确认框列出会新建 2 篇", "新建（2 篇）" in text, text)
+        check("确认框说明「我的补充」原样保留", "我的补充" in text, text)
+        check("★ 与真跑口径一致：算出来就是新建 2 篇",
+              plan["created"] == 2 and plan["updated"] == 0, plan)
+
+        second = bridge.plan_notes(items, generated_at="2026-09-24 11:00")
+        text2 = page._note_confirm_text(second)
+        check("★ 还没写过时第二次干跑仍算「首次」（只读接口不建分类）",
+              second["first_run"] is True and "首次" in text2, second)
+
+        # ── Q5 真跑：点一次才写一次 ──
+        ep.messagebox.askyesno = lambda *a, **k: (asked.append(a), True)[1]
+        page.generate_study_notes()
+        settle(root)
+        check("★ 点一下才写（新建 2 篇）", bridge.count_notes() == 2,
+              bridge.count_notes())
+        check("确实先问了一句", len(asked) == 1, len(asked))
+        status = page.status_var.get()
+        check("状态栏报出「新建 2 篇」与落点",
+              "新建 2 篇" in status and NOTE_AREA_LABEL in status, status)
+
+        # ── Q5b 写完之后再来一轮：确认框该说「更新」，真跑也只更新 ──
+        third = bridge.plan_notes(items, generated_at="2026-09-24 12:00")
+        text3 = page._note_confirm_text(third)
+        check("★ 写过之后再干跑就算「更新」了",
+              third["updated"] == 2 and third["created"] == 0, third)
+        check("更新那一段写明只换自动生成区",
+              "更新（只换自动生成那一段" in text3, text3)
+        check("更新时列出的是这两篇",
+              "Excel 函数 SUM" in text3 and "Excel 函数 IF" in text3, text3)
+        check("★ 更新时不再说「首次会建分类」", "首次" not in text3, text3)
+
+        page.generate_study_notes()
+        settle(root)
+        status2 = page.status_var.get()
+        check("★ 再点一次是「更新 2 篇」，不会越攒越多",
+              "更新 2 篇" in status2 and bridge.count_notes() == 2, status2)
+
+        # ── Q6 点「否」一个字都不写 ──
+        ep.messagebox.askyesno = lambda *a, **k: False
+        before = bridge.count_notes()
+        page.generate_study_notes()
+        settle(root)
+        check("★ 点「否」之后篇数不变", bridge.count_notes() == before,
+              f"{before} → {bridge.count_notes()}")
+
+        # ── Q7 待办备注里的笔记指纹 ──
+        page.review_todo_title = "复习 Excel 函数 3 个"
+        hint = page._note_pointer_text()
+        check("笔记指针报出落点与篇数",
+              NOTE_AREA_LABEL in hint and "2 篇" in hint, hint)
+        with_hint = review_todo_payload(due_count=3, today=today_str(),
+                                        extra_wrong=1, note_hint=hint)
+        check("★ 待办备注里带上了笔记指纹", hint in with_hint["notes"],
+              with_hint["notes"])
+    finally:
+        ep.messagebox.askyesno = orig_yesno
+        ep.messagebox.showinfo = orig_info
+        page.notes = saved["notes"]
+        page.quiz_session = saved["session"]
+        page.quiz_questions = saved["questions"]
+        page.quiz_correct = saved["correct"]
+        page.quiz_wrong = saved["wrong"]
+        page.db.recent_quiz_answers = saved["recent"]
+        page.review_todo_title = ""
+        try:
+            host.destroy()
+        except tk.TclError:
+            pass
+        study_db.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # P. 分类掌握雷达图
 # ══════════════════════════════════════════════════════════════════════════
 def test_radar(root, page, db) -> None:
@@ -1204,6 +1407,7 @@ def main_test() -> None:
         test_import_ui(root, page, db, tmpdir)
         test_todo_button(root, page, db)
         test_radar(root, page, db)
+        test_note_link(root, page, db, tmpdir)
     finally:
         if db is not None:
             db.close()
