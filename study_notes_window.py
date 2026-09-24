@@ -1341,6 +1341,9 @@ class StudyNotesPage(ttk.Frame):
             selectmode="browse",  # 单选
             height=999,        # 填满可用高度
         )
+        # 系统锁定分类（如「Excel 宝典」）用灰字标出来。它不能改名 / 删除，
+        # 得让用户一眼看出「这个不是我能动的」，否则会以为是程序坏了。
+        self.cat_tree.tag_configure("locked", foreground=PALETTE.text_secondary)
         cat_vbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.cat_tree.yview)
         self.cat_tree.configure(yscrollcommand=cat_vbar.set)
         self.cat_tree.pack(side="left", fill="both", expand=True)
@@ -1487,11 +1490,18 @@ class StudyNotesPage(ttk.Frame):
             """递归插入单个分类节点及其所有子节点。"""
             note_count = self.db.count_notes_by_category(cat.code)
             label = f"{cat.code} {cat.name}"
+            # 「（系统）」后缀 + 灰字：锁定分类要一眼看得出为什么改不动。
+            # 不用 🔒 这类彩色 emoji —— 它在 Tk 里是彩色的，而且字体缺字时
+            # 会变成一个方块（本项目为此撤过图标，见 UI_NOTES）。
+            if cat.locked:
+                label += "（系统）"
             if note_count > 0:
                 label = f"{label}  ({note_count})"
             iid = str(cat.id)
             # values 存 code 和 level（隐藏列，供后续逻辑读取）
-            self.cat_tree.insert(parent_iid, "end", iid=iid, text=label, values=(cat.code, cat.level))
+            self.cat_tree.insert(parent_iid, "end", iid=iid, text=label,
+                                 values=(cat.code, cat.level),
+                                 tags=("locked",) if cat.locked else ())
             # 递归插入子节点
             for child in children_map.get(cat.code, []):
                 insert_node(iid, child)
@@ -1519,16 +1529,29 @@ class StudyNotesPage(ttk.Frame):
     def _on_cat_right_click(self, event):
         """
         分类树右键菜单：弹出操作菜单。
+
+        锁定分类（locked=1）里「编辑 / 删除」两项直接禁用，并补一句说明 ——
+        比让用户点了再弹一个「不能改」的提示友好：菜单本身就把事情说清楚了。
         """
         item = self.cat_tree.identify_row(event.y)
         if not item:
             return
         self.cat_tree.selection_set(item)
+        code = self.cat_tree.item(item, "values")[0]
+        cat = self.db.get_category_by_code(code)
+        locked = bool(cat and cat.locked)
+
         menu = tk.Menu(self, tearoff=0)
         menu.add_command(label="新增子分类", command=self.add_category)
-        menu.add_command(label="编辑分类",   command=self.edit_category)
-        menu.add_separator()
-        menu.add_command(label="删除分类",   command=self.delete_category)
+        if locked:
+            menu.add_separator()
+            menu.add_command(
+                label=f"「{cat.name}」由系统占用，不能改名 / 删除",
+                state="disabled")
+        else:
+            menu.add_command(label="编辑分类", command=self.edit_category)
+            menu.add_separator()
+            menu.add_command(label="删除分类", command=self.delete_category)
         menu.tk_popup(event.x_root, event.y_root)
 
     def add_category(self):
@@ -1578,7 +1601,7 @@ class StudyNotesPage(ttk.Frame):
         self.refresh_tree()
 
     def edit_category(self):
-        """编辑选中分类的名称和排序号。"""
+        """编辑选中分类的名称和排序号。锁定分类会被挡下（附原因）。"""
         sel = self.cat_tree.selection()
         if not sel:
             messagebox.showinfo("分类管理", "请先选择要编辑的分类。", parent=self)
@@ -1586,6 +1609,14 @@ class StudyNotesPage(ttk.Frame):
         cat_id = int(sel[0])
         cat = self.db.get_category(cat_id)
         if not cat:
+            return
+        if cat.locked:
+            messagebox.showinfo(
+                "分类管理",
+                f"「{cat.name}」是系统分类（别的模块的笔记会写到这里），"
+                "不能改名。\n\n"
+                "你可以在它下面新增子分类，也可以照常在自己的分类里增删改。",
+                parent=self)
             return
 
         dlg = CategoryEditDialog(
@@ -1604,6 +1635,8 @@ class StudyNotesPage(ttk.Frame):
         影响范围：
           - 笔记：移至"未分类"（不删除）
           - 子分类：一并删除
+
+        锁定分类不删（数据层也拦了一道）：删了另一头就找不到落点了。
         """
         sel = self.cat_tree.selection()
         if not sel:
@@ -1612,6 +1645,14 @@ class StudyNotesPage(ttk.Frame):
         cat_id = int(sel[0])
         cat = self.db.get_category(cat_id)
         if not cat:
+            return
+        if cat.locked:
+            messagebox.showinfo(
+                "分类管理",
+                f"「{cat.name}」是系统分类（别的模块的笔记会写到这里），"
+                "不能删除。\n\n"
+                "里面已有的笔记可以照常打开、编辑、删除。",
+                parent=self)
             return
 
         note_count = self.db.count_notes_by_category(cat.code)
@@ -1834,6 +1875,19 @@ class StudyNotesPage(ttk.Frame):
     # ==========================================================================
     # 外部入口
     # ==========================================================================
+
+    def reload(self):
+        """
+        重新拉一遍分类树和笔记列表。
+
+        给别的模块用：「Excel 宝典」把一轮自测整理成笔记，是**直接写库**的，
+        本页要是已经建好在那儿放着，切回来时分类树和列表都还是旧的 ——
+        新笔记得等下一次操作才冒出来，看着像没生成成功。
+        所以在 main.py 里把本方法注册成 study_notes 页的 on_show，每次切到
+        这一页都重画一遍（两个 refresh 都很轻，是几条本地 SQL）。
+        """
+        self.refresh_tree()
+        self.refresh_notes()
 
     def open_baidu_disk(self):
         """
