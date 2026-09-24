@@ -118,6 +118,13 @@ QUIZ_OPTION_COUNT = 4
 # 错题本一次最多列多少条，再多就该靠分类筛了
 QUIZ_WRONG_LIMIT = 50
 
+# 「最近一轮」的分界：相邻两次作答隔了这么久就算换了一轮。
+# 45 分钟是按真实节奏估的 —— 一轮 10 题顺手做完几分钟，中途去开会、
+# 吃个饭回来就不该算同一轮了。宽松一点没关系，宁可多带上一两道。
+QUIZ_ROUND_GAP_MINUTES = 45
+# 从流水里捞「最近一轮」时最多往回读多少行（防呆上限，不是业务阈值）
+QUIZ_LOOKBACK = 80
+
 # ----------------------------------------------------------------------
 # CSV / Excel 批量导入（P1）
 # ----------------------------------------------------------------------
@@ -738,6 +745,59 @@ def build_quiz_questions(functions, *, count=QUIZ_BATCH, mode=QUIZ_MODE_MIXED,
                 questions.append(question)
                 break
     return questions
+
+
+def group_quiz_round(rows, *, gap_minutes: int = QUIZ_ROUND_GAP_MINUTES) -> list[dict]:
+    """把按时间**倒序**的作答流水切成「最近一轮」，并顺手做两件事：
+
+    ① **每个函数只留最近那条**。同一轮里同一个函数可能被连问两次
+       （错题本重做、连着抽到），整理笔记时不该出现两页；
+    ② **答错的排前面**。「学完生成笔记」是为了记住不会的，
+       会的不着急看。
+
+    时间分界：从最新一条往回走，遇到「与上一条相隔超过 ``gap_minutes``」
+    就停。时间戳解析不出来时**不切**（宁可多带几条，也不要少带）。
+
+    返回的每一条都被补上 ``quiz_id``，界面拿它做「重做这一道」的入口。
+    """
+    if not rows:
+        return []
+
+    def stamp(value):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+    anchor = stamp(rows[0].get("created_at"))
+    picked: list[dict] = []
+    previous = anchor
+    for row in rows:
+        current = stamp(row.get("created_at"))
+        if (anchor is not None and current is not None and previous is not None
+                and (previous - current).total_seconds() > int(gap_minutes) * 60):
+            break
+        picked.append(dict(row))
+        if current is not None:
+            previous = current
+
+    # ① 按函数去重：流水是倒序的，先见到的那条就是最新的
+    seen: set[int] = set()
+    unique: list[dict] = []
+    for item in picked:
+        key = int(item.get("function_id") or 0)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        unique.append(item)
+
+    # ② 答错的排前面（稳定排序，同一组里保持原来的时间序）
+    unique.sort(key=lambda item: 1 if int(item.get("is_correct") or 0) else 0)
+    return unique
 
 
 # ======================================================================
@@ -1558,6 +1618,38 @@ class ExcelDB:
         return int(row["n"]) if row else 0
 
     # -- 自测出题 ------------------------------------------------------
+    def recent_quiz_answers(self, *, limit=QUIZ_LOOKBACK) -> list[dict]:
+        """最近的自测流水（**倒序**），每条带上函数正文 —— 「生成学习笔记」的原料。
+
+        ★ 三个 LEFT JOIN 都是必须的：
+        * ``excel_functions`` —— 函数被删过后流水还在（错题本遇到过这个坑），
+          内连接会让「删过一个自测过的函数」直接把这一轮少几条；
+        * ``excel_progress`` —— 进度行是**懒创建**的，没标过掌握度的函数
+          一行都没有（今日复习那次已经踩过：INNER JOIN 让新用户看到空页面）。
+          这里要的正是「掌握度」这一栏，用内连接就会把新学的全滤掉 ——
+          而新学的恰恰最该记笔记。
+
+        ``f.category`` 显式取别名：``q.category`` 是**作答当时**的分类，
+        函数改过分类后两者会不一样，笔记里要的是函数现在的归属。
+        """
+        rows = self.conn.execute(
+            "SELECT q.id AS quiz_id, q.function_id, q.quiz_type, q.prompt, "
+            "       q.answer, q.user_answer, q.is_correct, q.created_at, "
+            "       f.code AS code, f.name_cn AS name_cn, "
+            "       f.category AS category, f.syntax AS syntax, "
+            "       f.example_formula AS example_formula, "
+            "       f.example_result AS example_result, f.pitfalls AS pitfalls, "
+            "       f.description AS description, f.use_cases AS use_cases, "
+            "       f.book_page AS book_page, "
+            "       p.mastery AS mastery, p.next_review_at AS next_review_at "
+            "FROM excel_quiz_log AS q "
+            "LEFT JOIN excel_functions AS f ON f.id = q.function_id "
+            "LEFT JOIN excel_progress AS p ON p.function_id = q.function_id "
+            "ORDER BY q.id DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+        return self._rows_to_dicts(rows)
+
     def quiz_questions(self, *, count=QUIZ_BATCH, category=None,
                        mode=QUIZ_MODE_MIXED, only_wrong=False,
                        seed=None) -> list[dict]:
