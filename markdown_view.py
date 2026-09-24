@@ -262,10 +262,17 @@ def _setup_gen_tags(text_widget, *, base: int) -> None:
     h_sizes = {1: base + 9, 2: base + 6, 3: base + 3,
                4: base + 1, 5: base, 6: base - 1}
     for lvl in range(1, 7):
+        # 段前段后间距**照抄基础标题 tag**（直接读回来，而不是再抄一份数字 ——
+        # 不然以后有人调基础标题的行距，生成区的标题就悄悄对不上了）。
+        # ★ 这一条以前漏了：生成区的标题会死死贴在上一段上。它只有「真开窗口
+        #   量一遍行盒高度」才看得出来，静态检查与肉眼扫一眼都发现不了 ——
+        #   机理见 _apply_gen_theme 里「行首字符与 spacing」那段说明。
         w.tag_configure(GEN_PREFIX + f"h{lvl}",
                         font=(family, h_sizes[lvl], "bold"),
                         foreground=GEN_FG if lvl <= 4 else GEN_ACCENT,
-                        background=GEN_BG)
+                        background=GEN_BG,
+                        spacing1=w.tag_cget(f"h{lvl}", "spacing1") or 0,
+                        spacing3=w.tag_cget(f"h{lvl}", "spacing3") or 0)
 
     # 3) 生成区的行内 tag（最后建，压住上面的容器）
     w.tag_configure(GEN_PREFIX + "bold", font=(family, base - 1, "bold"))
@@ -288,6 +295,13 @@ def _setup_gen_tags(text_widget, *, base: int) -> None:
     #    「行首字符身上优先级最高的那个 lmargin」定这一行的缩进的 —— 只给
     #    gen_zone 设、不给 gen_bar 设，整块生成区就会集体贴到最左边，
     #    底色还在、缩进没了（实测就是这么回事）。
+    #
+    #    ★★ 同理，**spacing1 / spacing3 也看行首字符**。所以光靠这个 tag 还不够：
+    #    插进去的竖线把段前段后的间距一起吃掉了，生成区里所有段落挤成一坨
+    #    （实测正文两段相隔 31px，生成区里只剩 12px = 一整行行高）。修法是插入时
+    #    **把这一行自己的 gen_ 类型 tag 一起带上**（见 _apply_gen_theme）—— 间距
+    #    就落回 gen_p / h2 / li 基础 tag，而 lmargin / 字体 / 底色仍归 gen_bar
+    #    （它创建得最晚、优先级最高）。
     w.tag_configure("gen_bar", font=(family, base - 1),
                     foreground=GEN_BAR, background=GEN_BG,
                     lmargin1=GEN_INDENT, lmargin2=GEN_INDENT + 12)
@@ -432,12 +446,24 @@ def _apply_gen_theme(text_widget, start: str, end: str) -> None:
     for row in range(last, first - 1, -1):
         if not w.get(f"{row}.0", f"{row}.end"):
             continue                    # 空行不插，否则色块里会飘一条孤线
-        tags = set(w.tag_names(f"{row}.0"))
+        names = w.tag_names(f"{row}.0")
+        tags = set(names)
         # 标题下那根浅横线本身就是装饰；引用行自带一条 «▎» 书脊线，
         # 再叠一条会变成「▎ ▎」——看着像坏了。
         if "hrule" in tags or "quote_bar" in tags:
             continue
-        w.insert(f"{row}.0", GEN_BAR_CHAR + " ", "gen_bar")
+        # ★ 插进去的字符**不会继承这一行原有的 tag**，于是它成了行首字符，而 Tk
+        #   的 spacing1 / spacing3 正是取自「行首字符上优先级最高的 tag」。只打
+        #   gen_bar 的话，生成区里所有段间距都会被吃掉，段落挤成一坨（实测：正文
+        #   两段相隔 31px，生成区里只剩 12px = 一整行行高，肉眼看着就是「糊在一块」）。
+        #   所以把这一行原有的 gen_ tag **整套**都带上：间距就落回 gen_p / h2 / li
+        #   基础 tag。lmargin、字体、底色仍归 gen_bar（创建最晚、优先级最高），
+        #   所以缩进与竖线的一致性不受影响。
+        #   注意要带**整套**而不是「最具体的那个」：一行可能同时带 gen_p 与 gen_bold
+        #   （整段加粗的那种行），而 gen_bold 自己不设间距 —— 只带它的话间距照样丢。
+        kind_tags = [name for name in names
+                     if name.startswith(GEN_PREFIX) and name != "gen_zone"]
+        w.insert(f"{row}.0", GEN_BAR_CHAR + " ", ("gen_bar", *kind_tags))
 
     # 空行的底色**不用另外补**：Tk 会把段前段后的 spacing 也一起涂上背景，
     # 而渲染器本来就不为 Markdown 空行产出空行（空行只是「结束上一段」），
