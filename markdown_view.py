@@ -33,6 +33,20 @@ tk.Text 的能力缺口（只能近似，别当成 bug 去"修"）
 颜色一律取 ui_theme 的 token，不搬 Typora 的蓝色链接 —— 全站的强调色只有近黑
 一个，让笔记页成为唯一的彩色区域不划算（取舍理由见 UI_NOTES.md）。
 
+「生成区」是这条单色规矩上唯一开的口子
+------------------------------------------------------------------------------
+笔记正文里可以用一对 HTML 注释圈出「系统自动生成」的一段（标记常量的唯一定义
+在 study_notes_db：GEN_START / GEN_END；「Excel 宝典」把一轮自测整理成笔记模板
+就靠它）。圈内的文字换上另一套样式：
+
+    颜色  正文冷灰蓝、底色淡蓝、行首一条浅蓝竖线
+    字体  宋体（系统里没有宋体时自动退回全站字体）
+    排版  整块缩进，字号小一号
+
+开这个口子的理由：**生成区是机器产物，长得像机器输出本身就是功能** ——
+一眼看得出「这段不是我写的」，改起来才有分寸。颜色仍然只从 ui_theme 取
+（强调色就是 palette.link），没有引入第二个色相。
+
 作者：代可行
 日期：2026-09-20
 ================================================================================
@@ -43,6 +57,7 @@ import re
 import tkinter.font as tkfont
 from pathlib import Path
 
+from study_notes_db import GEN_END, GEN_START
 from ui_theme import MAIN_PALETTE as PALETTE
 
 
@@ -52,6 +67,41 @@ MONO_FAMILY = "Consolas"
 
 # 正文基准字号（pt）。两处预览都用它，保证同一篇笔记在哪看都一个样。
 BASE_SIZE = 10
+
+
+# =============================================================================
+# 生成区主题
+# =============================================================================
+# 生成区（见模块头）要跟「自己写的」一眼分得开，所以**颜色 / 字体 / 排版**三样
+# 都得动，不是加一层底色那么简单：
+#
+#   颜色  正文 GEN_FG、底色 GEN_BG、行首竖线 GEN_BAR、强调色沿用一个 palette token
+#   字体  宋体（Windows 中文环境标配；真没有就退回 FONT_FAMILY，见 _gen_family）
+#   排版  整块缩进 GEN_INDENT、字号减 1pt、每行行首一条竖线
+#
+# 底色挑冷调：#f7f7f7（surface_alt）是代码块在用的**暖灰**，再用一个中性灰
+# 就分不出「这是代码」还是「这是生成区」了。
+GEN_PREFIX = "gen_"          # 生成区 tag 统一前缀，一套影子 tag 家族
+GEN_BG = "#eef3f9"
+GEN_CODE_BG = "#e3ebf4"      # 生成区里的代码：比底色再深一档，才分得出「这是代码」
+GEN_FG = "#33475b"
+GEN_BAR = "#b9c9db"
+GEN_ACCENT = PALETTE.link    # 不引入第二个色相：全站唯一的「墨蓝」就是它
+# 生成区的字体。★ 必须给一串候选，不能只写 "SimSun"：中文版 Windows 上
+# Tk 报出来的族名是**本地化**的（'宋体' / '新宋体' / '楷体'），英文名
+# SimSun 常常查不到（实测这台机器 234 个族里只有 '宋体'，没有 'SimSun'）。
+# 只写英文名的话 _gen_family 会一路退回雅黑 ——「字体有区别」这条要求
+# 就悄悄失效了，而且界面上看不出哪里不对。
+GEN_FONT_CANDIDATES = ("宋体", "SimSun", "新宋体", "NSimSun", "楷体", "KaiTi")
+GEN_INDENT = 14              # 整块左缩进（像素）
+GEN_BAR_CHAR = "▎"
+# gen_ 家族覆盖哪些基础 tag。hr / hrule / empty 是「版面装饰」，不参与主题 ——
+# 生成区里出现的分隔线仍然是一条普通分隔线（换色反而像坏掉了）。
+GEN_TAG_NAMES = (
+    "text", "p", "li", "quote", "quote_bar", "codeblock", "codeblock_lang",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "bold", "italic", "strike", "code", "image", "link",
+)
 
 # ── 行内语法 ────────────────────────────────────────────────────────────────
 # **分支顺序即优先级**：先认行内代码，再认图片 / 链接，然后是删除线、加粗，
@@ -161,6 +211,104 @@ def setup_tags(text_widget, *, base: int = BASE_SIZE) -> None:
     w.tag_configure("image", font=(FONT_FAMILY, base, "italic"), foreground=PALETTE.link)
     w.tag_configure("link", font=(FONT_FAMILY, base, "underline"), foreground=PALETTE.link)
 
+    # ── 生成区（gen_ 影子家族）────────────────────────────────────────────
+    _setup_gen_tags(w, base=base)
+
+
+def _setup_gen_tags(text_widget, *, base: int) -> None:
+    """配置生成区那一套 tag（见模块头与 GEN_* 常量）。
+
+    ★ 建 tag 的**顺序**就是优先级，动它之前先想清楚：
+
+      1. ``gen_zone`` 只定底色与缩进，但必须建在**基础 tag 之后** ——
+         它靠「后建的盖先建的」去压掉 p / li / quote 各自的缩进，
+         整块生成区才会缩进一致；
+      2. ``gen_zone`` 又要建在 gen_ 家族**之前**：底色由 gen_p / gen_code
+         这些自己声明，于是代码块能在生成区里保住自己那份略深的底，
+         不会整块糊成一个颜色；
+      3. ``gen_`` 行内 tag 必须建在 gen_ 容器之后 —— 否则生成区里的行内
+         代码会被 gen_p 的字体盖掉，等宽就没了（基础 tag 那边同一个坑）。
+
+    字体一律换成宋体：这是「字体有区别」这条要求的落点，也是最省事的一种
+    区分方式 —— 换字号只是排版，换字体是一眼就能看出来的另一种字。
+    """
+    w = text_widget
+    family = _gen_family(w)
+    mono = (MONO_FAMILY, base - 2)
+
+    # 1) 整块：底色 + 缩进
+    w.tag_configure("gen_zone", background=GEN_BG,
+                    lmargin1=GEN_INDENT, lmargin2=GEN_INDENT + 12)
+
+    # 2) 生成区的容器 tag
+    w.tag_configure(GEN_PREFIX + "text", font=(family, base - 1),
+                    foreground=GEN_FG, background=GEN_BG)
+    w.tag_configure(GEN_PREFIX + "p", font=(family, base - 1),
+                    foreground=GEN_FG, background=GEN_BG,
+                    spacing1=3, spacing2=5, spacing3=9)
+    w.tag_configure(GEN_PREFIX + "li", font=(family, base - 1),
+                    foreground=GEN_FG, background=GEN_BG,
+                    spacing2=5, spacing3=6)
+    w.tag_configure(GEN_PREFIX + "quote", font=(family, base - 1),
+                    foreground=GEN_ACCENT, background=GEN_BG,
+                    spacing1=6, spacing3=6)
+    w.tag_configure(GEN_PREFIX + "quote_bar", font=(family, base - 1),
+                    foreground=GEN_BAR, background=GEN_BG,
+                    spacing1=6, spacing3=6)
+    w.tag_configure(GEN_PREFIX + "codeblock", font=mono, background=GEN_CODE_BG,
+                    foreground=GEN_FG, spacing1=9, spacing3=9)
+    w.tag_configure(GEN_PREFIX + "codeblock_lang", font=(MONO_FAMILY, base - 3),
+                    foreground=GEN_ACCENT, background=GEN_CODE_BG, spacing1=9)
+    h_sizes = {1: base + 9, 2: base + 6, 3: base + 3,
+               4: base + 1, 5: base, 6: base - 1}
+    for lvl in range(1, 7):
+        w.tag_configure(GEN_PREFIX + f"h{lvl}",
+                        font=(family, h_sizes[lvl], "bold"),
+                        foreground=GEN_FG if lvl <= 4 else GEN_ACCENT,
+                        background=GEN_BG)
+
+    # 3) 生成区的行内 tag（最后建，压住上面的容器）
+    w.tag_configure(GEN_PREFIX + "bold", font=(family, base - 1, "bold"))
+    w.tag_configure(GEN_PREFIX + "italic", font=(family, base - 1, "italic"))
+    w.tag_configure(GEN_PREFIX + "strike", font=(family, base - 1, "overstrike"),
+                    foreground=GEN_ACCENT)
+    w.tag_configure(GEN_PREFIX + "code", font=mono, background=GEN_CODE_BG,
+                    foreground=GEN_FG)
+    w.tag_configure(GEN_PREFIX + "image", font=(family, base - 1, "italic"),
+                    foreground=GEN_ACCENT)
+    w.tag_configure(GEN_PREFIX + "link", font=(family, base - 1, "underline"),
+                    foreground=GEN_ACCENT)
+
+    # 4) 行首竖线。自带底色**和缩进** —— 它可能落在标题 / 列表 / 引用的行首，
+    #    那几种的底色都一样，所以竖线不会在色块里露出接缝。
+    #
+    #    ★ 缩进必须自带：竖线是在 gen_zone 打完之后才插进去的，插进去的字符
+    #    会**把 gen_zone 的区间切成一段一段**（Tk 不给插入的文字继承区间起点
+    #    上的 tag），于是每个生成行的行首那个字符身上只有 gen_bar。Tk 是按
+    #    「行首字符身上优先级最高的那个 lmargin」定这一行的缩进的 —— 只给
+    #    gen_zone 设、不给 gen_bar 设，整块生成区就会集体贴到最左边，
+    #    底色还在、缩进没了（实测就是这么回事）。
+    w.tag_configure("gen_bar", font=(family, base - 1),
+                    foreground=GEN_BAR, background=GEN_BG,
+                    lmargin1=GEN_INDENT, lmargin2=GEN_INDENT + 12)
+
+
+def _gen_family(widget) -> str:
+    """挑一个系统里真有的衬线中文字体给生成区用；一个都没有才退回全站字体。
+
+    盲目指定一个不存在的族，Tk 会静默换成某个默认字体 —— 观感不可控，
+    而且「字体有区别」这条要求会悄悄失效（界面上还看不出哪里不对）。
+    所以先查一次系统字体表，按 ``GEN_FONT_CANDIDATES`` 的顺序挑第一个命中的。
+    """
+    try:
+        available = set(tkfont.families(widget))
+    except Exception:
+        return FONT_FAMILY
+    for name in GEN_FONT_CANDIDATES:
+        if name in available:
+            return name
+    return FONT_FAMILY
+
 
 # =============================================================================
 # 渲染
@@ -218,12 +366,95 @@ def insert_inline(text_widget, text: str, base_tag: str) -> None:
         text_widget.insert("end", text[pos:], base_tag)
 
 
+def split_by_markers(content: str) -> list:
+    """
+    按生成区标记把正文切成 ``[(是否生成区, 文本), …]``。
+
+    标记行**本身不参与渲染** —— 它们只是给机器看的边界。只认「整行就是一个
+    标记」的写法：正文里恰好在句子中间引用了这几个字（比如一篇讲这个格式的
+    笔记）不该把渲染切成两半。
+    """
+    text = (content or "").replace("\r\n", "\n").replace("\r", "\n")
+    segments: list = []
+    buf: list = []
+    in_gen = False
+
+    def flush():
+        if buf:
+            segments.append((in_gen, "\n".join(buf)))
+            buf.clear()
+
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped == GEN_START:
+            flush()                 # 标记之前那段归「自己写的」
+            in_gen = True
+            continue
+        if stripped == GEN_END:
+            flush()                 # 标记之内那段归「生成的」
+            in_gen = False
+            continue
+        buf.append(line)
+    flush()
+    return segments
+
+
+def _apply_gen_theme(text_widget, start: str, end: str) -> None:
+    """
+    给 ``[start, end)`` 这一段换上生成区的样式（见模块头）。
+
+    做法是**渲染完再换 tag**：先把这一段当普通 Markdown 渲染出来，然后
+
+      ① 每个基础 tag 落在区间内的范围，原样再打一份带 ``gen_`` 前缀的；
+      ② 整段打一个 ``gen_zone``（底色 + 缩进）；
+      ③ 逐行在最前面插一条竖线。
+
+    为什么不在渲染时直接选 gen_ tag：渲染循环里有四十来处 tag 字面量，挨个改
+    是纯粹的体力活 + 大面积出错面。而「生成区 = 普通渲染 + 换 tag」这条规则
+    一句话说得清，优先级交给 `_setup_gen_tags` 的创建顺序去保证。
+    """
+    w = text_widget
+    if w.compare(start, "==", end):
+        return
+
+    for name in GEN_TAG_NAMES:
+        ranges = w.tag_ranges(name)
+        for index in range(0, len(ranges), 2):
+            lo, hi = str(ranges[index]), str(ranges[index + 1])
+            if w.compare(lo, ">=", start) and w.compare(hi, "<=", end):
+                w.tag_add(GEN_PREFIX + name, lo, hi)
+    w.tag_add("gen_zone", start, end)
+
+    # 竖线**从后往前**插：每插一次后面的下标就整体右移。正着插的话，第一行
+    # 插完第二行就不是原来那一行了 —— 这是本文件里最容易被写错的一处。
+    first = int(str(start).split(".")[0])
+    last = int(str(end).split(".")[0])
+    for row in range(last, first - 1, -1):
+        if not w.get(f"{row}.0", f"{row}.end"):
+            continue                    # 空行不插，否则色块里会飘一条孤线
+        tags = set(w.tag_names(f"{row}.0"))
+        # 标题下那根浅横线本身就是装饰；引用行自带一条 «▎» 书脊线，
+        # 再叠一条会变成「▎ ▎」——看着像坏了。
+        if "hrule" in tags or "quote_bar" in tags:
+            continue
+        w.insert(f"{row}.0", GEN_BAR_CHAR + " ", "gen_bar")
+
+    # 空行的底色**不用另外补**：Tk 会把段前段后的 spacing 也一起涂上背景，
+    # 而渲染器本来就不为 Markdown 空行产出空行（空行只是「结束上一段」），
+    # 所以整块底色天然是连着的（量过像素：整段一直是 GEN_BG，没有白道）。
+    # 早先这里给空行的换行符补过一道 tag，结果那个换行符**会跟着后面的插入
+    # 一路漂到文末**（tag 粘的是字符不是位置），把「我的补充」后面也染上了 ——
+    # 所以这里必须什么都不做，别再加回来。
+
+
 def render(text_widget, content: str, *, empty_hint: str = "（笔记内容为空）") -> None:
     """
     把一段 Markdown 渲染进 Text（只读控件会被临时解锁后再锁回）。
 
     支持：围栏代码块（含未闭合的，编辑到一半很常见）、H1~H6、引用、无序 /
-    有序 / 任务列表、分隔线、以及粗体 / 斜体 / 删除线 / 行内代码 / 链接 / 图片。
+    有序 / 任务列表、分隔线、粗体 / 斜体 / 删除线 / 行内代码 / 链接 / 图片，
+    以及**生成区**（一对 HTML 注释圈起来的那段，见模块头）—— 生成区会换成
+    另一套颜色 / 字体 / 排版，标记行自己不显示。
 
     参数:
         text_widget - 目标 tk.Text
@@ -243,7 +474,34 @@ def render(text_widget, content: str, *, empty_hint: str = "（笔记内容为�
             w.configure(state="disabled")
         return
 
-    text = content.replace("\r\n", "\n").replace("\r", "\n")
+    # 一段一段渲染：生成区那几段渲染完再换 tag。
+    #
+    # ★ 段边界必须用 ``index("end-1c")``，**不能用** ``index("end")``。
+    #   Tk 的 Text 永远自带一个收尾换行，``end`` 指的是它**后面**那一行；
+    #   拿它当段起点，整段就往前错一行 —— 实测的表现是：生成区第一行没拿到
+    #   竖线，而多出来的那一行把「我的补充」也染上了底色。
+    #   ``end-1c`` 正落在那个收尾换行上，也就是下一次 ``insert("end", …)``
+    #   真正落笔的位置。
+    for is_gen, chunk in split_by_markers(content):
+        if not chunk.strip():
+            continue
+        start = w.index("end-1c")
+        _render_markdown(w, chunk)
+        if is_gen:
+            _apply_gen_theme(w, start, w.index("end-1c"))
+
+    if was_disabled:
+        w.configure(state="disabled")
+
+
+def _render_markdown(text_widget, text: str) -> None:
+    """
+    把一段**已经规范化过行尾**的 Markdown 渲染到控件末尾。
+
+    从 render() 里拆出来只为一件事：生成区要「先按普通样式渲染、再整段换
+    tag」，那就得能一段一段地渲染。除签名外，这里一个字节的行为都没变。
+    """
+    w = text_widget
     lines = text.split("\n")
 
     para_buf: list = []        # 连续普通行攒成一段（Typora 里软换行属同段）
@@ -367,9 +625,6 @@ def render(text_widget, content: str, *, empty_hint: str = "（笔记内容为�
     # 收尾：未闭合的代码块就让它保持打开状态（编辑到一半的常态）
     flush_all()
 
-    if was_disabled:
-        w.configure(state="disabled")
-
 
 # =============================================================================
 # 浏览器预览用的 HTML（这条路径才能真正 100% 还原 Typora）
@@ -382,10 +637,38 @@ def build_html(content: str, *, base_dir=None, title: str = "笔记预览") -> s
     为什么还要 HTML 版：tk.Text 画不出 border / 圆角 / 行高，这里的 CSS 反而能
     1:1 还原 Typora 的排版。所以「浏览器预览」不是重复功能，是完整版。
 
+    生成区（见模块头）在这条路径上包一层 ``.genzone``，用 CSS 做冷底 + 左侧
+    色条 —— 真正画得出竖线的地方，就不用像 tk.Text 那边拿「▎」硬凑。
+
     参数:
         content  - Markdown 原文
         base_dir - 相对图片路径的解析基准（通常是数据库所在目录）
         title    - <title> 文案
+    """
+    parts: list = []
+    for is_gen, chunk in split_by_markers(content):
+        if not chunk.strip():
+            continue
+        fragment = _markdown_fragment(chunk, base_dir=base_dir)
+        if is_gen:
+            fragment = f'<div class="genzone">\n{fragment}\n</div>'
+        parts.append(fragment)
+    return _HTML_SHELL.format(
+        title=_html.escape(title), body="".join(parts),
+        # 生成区的几个色值也走 format，别在 CSS 里再硬编码一遍 ——
+        # 两处各写一份，改的时候必然漏一处。
+        gen_bg=GEN_BG, gen_code_bg=GEN_CODE_BG, gen_fg=GEN_FG,
+        gen_bar=GEN_BAR, gen_accent=GEN_ACCENT,
+    )
+
+
+def _markdown_fragment(content: str, *, base_dir=None) -> str:
+    """
+    单段 Markdown → HTML 片段（不含 <html> 外壳）。
+
+    ★ 所有替换都在 ``_html.escape`` **之后**做，认的是转义后的实体
+    （``&gt;`` ``&quot;`` …）。生成区的标记行在这里已经由 `split_by_markers`
+    摘掉了，所以不用再操心注释会被转义成 ``&lt;!--``。
     """
     h = _html.escape(content.replace("\r\n", "\n").replace("\r", "\n"))
 
@@ -436,7 +719,7 @@ def build_html(content: str, *, base_dir=None, title: str = "笔记预览") -> s
     h = f"<p>{h}</p>"
     h = re.sub(r"<p>\s*</p>", "", h)
 
-    return _HTML_SHELL.format(title=_html.escape(title), body=h)
+    return h
 
 
 # Typora 默认主题的排版比例：正文 16px / 行高 1.6 / h1 2.25em 带下边框 /
@@ -500,6 +783,34 @@ _HTML_SHELL = """<!DOCTYPE html>
   table {{ border-collapse: collapse; margin: 1em 0 }}
   th, td {{ border: 1px solid #e6e6e6; padding: 6px 13px }}
   th {{ background: #f8f8f8; font-weight: 600 }}
+  /* 生成区：冷底 + 左侧色条 + 宋体 + 小一号。三个维度都跟正文拉开，
+     一眼就能看出「这段不是我写的」（与 tk.Text 那边同一套取舍）。 */
+  .genzone {{
+    background: {gen_bg};
+    border-left: 3px solid {gen_bar};
+    border-radius: 3px;
+    padding: 2px 18px;
+    margin: 1.2em 0;
+    font-family: "SimSun", "宋体", "新宋体", "Microsoft YaHei UI", serif;
+    font-size: 15px;
+    color: {gen_fg};
+  }}
+  .genzone > p:first-child {{ margin-top: .7em }}
+  .genzone > p:last-child {{ margin-bottom: .7em }}
+  .genzone h1, .genzone h2, .genzone h3, .genzone h4 {{
+    color: {gen_fg}; border-bottom-color: {gen_bar};
+  }}
+  .genzone h5, .genzone h6 {{ color: {gen_accent} }}
+  .genzone a {{ color: {gen_accent} }}
+  .genzone blockquote {{
+    border-left-color: {gen_bar};
+    background: rgba(255, 255, 255, .55);
+    color: {gen_accent};
+  }}
+  .genzone code {{ background: {gen_code_bg}; color: {gen_fg} }}
+  .genzone pre {{ background: {gen_code_bg} }}
+  .genzone hr {{ border-top-color: {gen_bar} }}
+  .genzone del {{ color: {gen_accent} }}
 </style>
 </head>
 <body>
