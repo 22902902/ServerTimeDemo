@@ -22,6 +22,7 @@ solid，程序都不报错，只有肉眼能发现。这里把定稿规则固化
 """
 
 import sys
+import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
 
@@ -34,6 +35,7 @@ except Exception:
     pass
 
 import main  # noqa: E402
+import markdown_view as mv  # noqa: E402
 import study_notes_window as snw  # noqa: E402
 from markdown_view import (  # noqa: E402
     FONT_FAMILY,
@@ -348,6 +350,75 @@ def main_test():
     check("生成区非空行都带书脊线", gen_bars > 0, gen_bars)
     check("用户那一段没有书脊线",
           not any(GEN_BAR_CHAR in p.get(f"{r}.0", f"{r}.end") for r in user_rows))
+
+    # ★ 竖线是「往行首插一个字符」插进去的，而插进去的字符**不会继承这一行原有的
+    #   tag** —— 于是它成了这一行的行首字符。Tk 的 spacing1 / spacing3 正是取自
+    #   「行首字符上优先级最高的 tag」，只给 gen_bar 的话，生成区里所有段间距都会
+    #   被吃掉，段落挤成一坨（实测：正文两段相隔 31px，生成区里只剩 12px = 一整行
+    #   行高，肉眼看着就是「糊在一块」）。修法是插入时把这一行原有的 gen_ tag 整套
+    #   也带上。下面用「结构 + 量行盒高度」两条把它钉住 —— 只断言「有书脊线」是
+    #   抓不到这个的（竖线本来就插上了，只是间距没了）。
+    def row_of(widget, needle: str, *, hi: int = 0) -> int:
+        hi = hi or int(widget.index("end-1c").split(".")[0])
+        for r in range(1, hi + 1):
+            if needle in widget.get(f"{r}.0", f"{r}.end"):
+                return r
+        return 0
+
+    def box_height(widget, row_index: int) -> int:
+        """行盒高度（含段前段后间距）。**未映射的控件量不到** —— 返回 None。"""
+        info = widget.dlineinfo(f"{row_index}.0") if row_index else None
+        return int(info[3]) if info else -1
+
+    para_row = row_of(p, "分类：数学统计")
+    heading_row = row_of(p, "SUM｜求和")
+    check("定位到生成区里的正文行与标题行（防假绿）",
+          para_row > 0 and heading_row > 0, (para_row, heading_row))
+    if para_row and heading_row:
+        para_tags = p.tag_names(f"{para_row}.0")
+        check("★ 正文行的行首字符带着这一行的 gen_p（不只是 gen_bar）",
+              "gen_p" in para_tags, para_tags)
+        heading_tags = p.tag_names(f"{heading_row}.0")
+        check("★ 标题行的行首字符带着 gen_h2",
+              "gen_h2" in heading_tags, heading_tags)
+
+    for lvl in (1, 2, 3):
+        gap = str(p.tag_cget(f"gen_h{lvl}", "spacing1"))
+        check(f"gen_h{lvl} 的段前间距照抄了基础标题（> 0）",
+              gap.isdigit() and int(gap) > 0, gap)
+
+    # 行盒高度只有在**真的映射出来**的控件上量得到：这个对话框是 withdraw 过的，
+    # `dlineinfo` 一律返回 None（本轮踩到，断言全变成 -1）。所以另开一个真窗口量。
+    probe = tk.Toplevel(app)
+    probe.geometry("760x620+40+40")
+    probe.update_idletasks()
+    probe_text = tk.Text(probe, wrap="word", padx=14, pady=10)
+    probe_text.pack(fill="both", expand=True)
+    mv.setup_tags(probe_text)
+    mv.render(probe_text, gen_note)
+    probe.update_idletasks()
+    probe.update()
+    check("量尺窗口真的映射出来了（否则下面全是 -1）",
+          probe_text.winfo_ismapped() and probe_text.winfo_height() > 1,
+          (probe_text.winfo_ismapped(), probe_text.winfo_height()))
+    probe_para = row_of(probe_text, "分类：数学统计")
+    probe_head = row_of(probe_text, "SUM｜求和")
+    user_para = row_of(probe_text, "我自己写的一段话")
+    check("量尺里定位到三类行（防假绿）",
+          probe_para > 0 and probe_head > 0 and user_para > 0,
+          (probe_para, probe_head, user_para))
+    gen_para_h = box_height(probe_text, probe_para)
+    gen_head_h = box_height(probe_text, probe_head)
+    user_para_h = box_height(probe_text, user_para)
+    check("★ 段间距没被竖线吃掉（生成区正文的行盒明显高于一行字）",
+          gen_para_h >= 22, gen_para_h)
+    check("★ 生成区的标题仍有段前间距（不会死死贴在上文上）",
+          gen_head_h >= 35, gen_head_h)
+    check("生成区正文的行盒与正文段落同量级（差的是字号，不是间距）",
+          gen_para_h > 0 and user_para_h > 0
+          and abs(user_para_h - gen_para_h) <= 12,
+          (gen_para_h, user_para_h))
+    probe.destroy()
 
     # 颜色：正文底色 / 字色 / 代码底色三处都不一样
     check("gen_zone 底色 = GEN_BG（颜色不同）",
