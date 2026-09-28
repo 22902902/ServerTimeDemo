@@ -16,6 +16,9 @@
 * **危险命令识别**：宁可漏报也不能大量误报，否则红标就没人看了；同时
   ``rm -rf`` 与 ``rm -r`` 必须区别对待（后者是日常操作）。
 * **拼脚本**：只输出「有命令的步骤」，把说明型步骤跳过。
+* **截图回收**：删步骤 / 删流程以前只删行、文件留在磁盘上 → 孤儿图无限增长，
+  而磁盘上看不出哪张还有用。这里锁死的是「**共用同一张图的步骤不能被误删**」：
+  判断必须在删行**之前**做，而且要先扣掉「还有别的步骤引用着」的路径。
 
 另一类被锁死的是「有意设计」：
 * ``rm -rf`` 标红但**不阻断**（运维本来就要用）
@@ -32,6 +35,7 @@ F. 流程 CRUD   增删改查 / 收藏 / 变量落库 / 排序
 G. 步骤 CRUD   增删改查 / 序号 / 上下移动 / 重排 / 危险标记
 H. 搜索        命中流程字段与步骤内容 / 不重复出行 / 命中步骤 id 集合
 I. 执行留痕    开跑 / 勾选 / 计数 / 结束 / 历史 / 快照 / 级联
+J. 截图回收    拆路径四种存法 / **共用的图不误删** / 跨流程共用 / 顺序不变量
 
 用法：
     python scripts/test_process.py
@@ -76,6 +80,7 @@ from process_db import (  # noqa: E402
     parse_variables,
     render_template,
     serialize_variables,
+    split_screenshot_paths,
     step_kind_label,
 )
 
@@ -783,6 +788,99 @@ def test_runs() -> None:
           host2.conn.execute("SELECT COUNT(*) FROM process_runs").fetchone()[0] == 0)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# J. 截图回收（P1-11 隐患 2）
+# ══════════════════════════════════════════════════════════════════════════
+def test_screenshot_reclaim() -> None:
+    section("[J] 截图回收：拆路径 / 共用图不误删 / 跨流程共用 / 顺序不变量")
+
+    # -- 1. split_screenshot_paths：四种存法都要认 ------------------------
+    check("单路径", split_screenshot_paths("a/1.png") == ["a/1.png"])
+    check("JSON 字符串数组",
+          split_screenshot_paths('["a/1.png", "a/2.png"]') == ["a/1.png", "a/2.png"])
+    check("JSON 对象数组（path / image_path / value 三种键都认）",
+          split_screenshot_paths(
+              '[{"path": "a/1.png"}, {"image_path": "a/2.png"}, {"value": "a/3.png"}]'
+          ) == ["a/1.png", "a/2.png", "a/3.png"])
+    check("对象带 label 也只取路径",
+          split_screenshot_paths('[{"path": "a/1.png", "label": "第一张"}]') == ["a/1.png"])
+    check("竖线 / 换行分隔", split_screenshot_paths("a/1.png | a/2.png") == ["a/1.png", "a/2.png"]
+          and split_screenshot_paths("a/1.png\na/2.png") == ["a/1.png", "a/2.png"])
+    check("同一张写两遍只算一次",
+          split_screenshot_paths('["a/1.png", "a/1.png"]') == ["a/1.png"])
+    check("空 / None / 全空白 → []",
+          split_screenshot_paths("") == [] and split_screenshot_paths(None) == []
+          and split_screenshot_paths("   ") == [])
+    check("坏 JSON 不抛异常（降级成单路径）",
+          split_screenshot_paths("[不是 json") == ["[不是 json"])
+
+    # -- 2. 共用图不误删（这条是本节存在的理由） --------------------------
+    host = fresh("reclaim")
+    fid = host.add_process_flow({"title": "回收用例", "category": "运维"})
+    shared = "account_images/process_flows/shared.png"
+    solo = "account_images/process_flows/solo.png"
+    s1 = host.add_process_step(fid, {"step_no": 1, "title": "共用一",
+                                     "screenshot_path": shared})
+    s2 = host.add_process_step(fid, {"step_no": 2, "title": "共用二",
+                                     "screenshot_path": shared})
+    s3 = host.add_process_step(fid, {"step_no": 3, "title": "独占",
+                                     "screenshot_path": solo})
+    s4 = host.add_process_step(fid, {"step_no": 4, "title": "没图"})
+
+    check("删步骤1：shared 还被步骤2引用 → 不算孤儿",
+          host.collect_orphan_screenshots([s1]) == [])
+    check("删步骤3：solo 无人引用 → 是孤儿",
+          host.collect_orphan_screenshots([s3]) == [solo])
+    check("两条共用的步骤一起删：shared 才算孤儿（去重后与 solo 并列）",
+          sorted(host.collect_orphan_screenshots([s1, s2, s3])) == sorted([shared, solo]))
+    check("没图的步骤 / 空列表 / None → []",
+          host.collect_orphan_screenshots([s4]) == []
+          and host.collect_orphan_screenshots([]) == []
+          and host.collect_orphan_screenshots(None) == [])
+    check("不存在的 id 不会误伤别人（返回空）",
+          host.collect_orphan_screenshots([99999]) == [])
+
+    multi = host.add_process_step(fid, {
+        "step_no": 5, "title": "多图",
+        "screenshot_path": '["account_images/process_flows/m1.png", '
+                           '"account_images/process_flows/m2.png"]'})
+    host.add_process_step(fid, {"step_no": 6, "title": "引用m2",
+                                "screenshot_path": "account_images/process_flows/m2.png"})
+    check("多图步骤：只回收没人引用的那一张",
+          host.collect_orphan_screenshots([multi])
+          == ["account_images/process_flows/m1.png"])
+
+    # -- 3. 跨流程共用也不误删 -------------------------------------------
+    host2 = fresh("reclaim_cross")
+    keep_flow = host2.add_process_flow({"title": "要删的", "category": "运维"})
+    other_flow = host2.add_process_flow({"title": "别的流程", "category": "运维"})
+    host2.add_process_step(keep_flow, {"step_no": 1, "title": "一",
+                                       "screenshot_path": "account_images/process_flows/f1.png"})
+    host2.add_process_step(keep_flow, {"step_no": 2, "title": "二",
+                                       "screenshot_path": "account_images/process_flows/f2.png"})
+    host2.add_process_step(other_flow, {"step_no": 1, "title": "引用f2",
+                                        "screenshot_path": "account_images/process_flows/f2.png"})
+    check("整条流程删除：跨流程还有人引用的那张不算孤儿",
+          host2.collect_flow_orphan_screenshots(keep_flow)
+          == ["account_images/process_flows/f1.png"])
+    empty_flow = host2.add_process_flow({"title": "空流程", "category": "运维"})
+    check("空流程 → []", host2.collect_flow_orphan_screenshots(empty_flow) == [])
+
+    # -- 4. 顺序不变量：必须在删行之前调 ---------------------------------
+    # 反过来（先删行）就永远算不出孤儿 —— 这是「莫名不生效」的典型形态。
+    host3 = fresh("reclaim_order")
+    fid3 = host3.add_process_flow({"title": "顺序", "category": "运维"})
+    only = host3.add_process_step(fid3, {
+        "step_no": 1, "title": "唯一",
+        "screenshot_path": "account_images/process_flows/only.png"})
+    before = host3.collect_orphan_screenshots([only])
+    host3.delete_process_step(only)
+    after = host3.collect_orphan_screenshots([only])
+    check("删行之前调得到孤儿",
+          before == ["account_images/process_flows/only.png"], before)
+    check("删行之后再调同一个 id 什么都算不出来（顺序不能反）", after == [], after)
+
+
 def main_test() -> None:
     print("=" * 78)
     print("流程中心回归测试：数据层 + 脚本生成 + 建表迁移")
@@ -796,6 +894,7 @@ def main_test() -> None:
     test_step_crud()
     test_search()
     test_runs()
+    test_screenshot_reclaim()
 
 
 if __name__ == "__main__":

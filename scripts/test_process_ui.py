@@ -37,6 +37,7 @@ F. 变量栏      有变量时列出键与值；无变量时给提示
 G. 空状态      没有流程时的提示文案
 H. 搜索        关键词过滤行数；清空恢复
 I. 滚动        重排后卡片流回到顶部（内容变矮时旧 yOrigin 不会自己夹回来）
+J. 截图回收    真删文件 / 缺失不报错 / **共用的那张始终不动**
 
 用法::
 
@@ -480,6 +481,76 @@ def test_scroll_reset(page, db):
           abs(offset) <= 24, f"offset={offset}")
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# J. 截图回收（真删文件）
+# ══════════════════════════════════════════════════════════════════════════
+class FakeImages:
+    """只实现 ``resolve_paths``。
+
+    为什么把真适配器换掉：真适配器以 ``app.BASE_DIR``（开发库）为根，而本项目的
+    纪律是**测试对真实数据目录只读**。删文件的逻辑本身不受影响 —— 它只用
+    ``resolve_paths`` 把存储值变成绝对路径。
+    """
+
+    def __init__(self, base):
+        self.base = Path(base)
+
+    def resolve_paths(self, value):
+        if not value:
+            return []
+        path = Path(value)
+        return [path if path.is_absolute() else self.base / path]
+
+
+def test_screenshot_reclaim(page, db, tmproot):
+    section("J. 截图回收：真删文件 / 缺失不报错 / 共用的那张始终不动")
+
+    check("页面真的拿到了图片能力（真适配器上有 resolve_paths）",
+          callable(getattr(page.images, "resolve_paths", None)))
+
+    saved = page.images
+    page.images = FakeImages(tmproot)
+    try:
+        rel_dir = Path("account_images") / "process_flows"
+        (tmproot / rel_dir).mkdir(parents=True, exist_ok=True)
+        shared = (rel_dir / "j_shared.png").as_posix()
+        solo = (rel_dir / "j_solo.png").as_posix()
+        (tmproot / rel_dir / "j_shared.png").write_bytes(b"x")
+        (tmproot / rel_dir / "j_solo.png").write_bytes(b"y")
+
+        flow = db.add_process_flow({"title": "回收用例", "category": "运维"})
+        t1 = db.add_process_step(flow, {"step_no": 1, "title": "共用",
+                                        "screenshot_path": shared})
+        db.add_process_step(flow, {"step_no": 2, "title": "也共用",
+                                   "screenshot_path": shared})
+        t3 = db.add_process_step(flow, {"step_no": 3, "title": "独占",
+                                        "screenshot_path": solo})
+
+        # 顺序刻意写成「先 collect、再删行、最后删文件」—— 与页面里的调用一致
+        reclaim = db.collect_orphan_screenshots([t1])
+        db.delete_process_step(t1)
+        n1 = page._reclaim_screenshots(reclaim)
+        check("删共用步骤：回收 0 张（另一条步骤还引用着）", n1 == 0, n1)
+        check("共用图还在磁盘上", (tmproot / shared).exists())
+
+        reclaim = db.collect_orphan_screenshots([t3])
+        db.delete_process_step(t3)
+        n2 = page._reclaim_screenshots(reclaim)
+        check("删独占步骤：回收 1 张", n2 == 1, n2)
+        check("独占图真的被删掉了", not (tmproot / solo).exists())
+        check("共用图自始至终没被动过", (tmproot / shared).exists())
+
+        check("文件不存在时不报错也不计数",
+              page._reclaim_screenshots([(rel_dir / "没这张.png").as_posix()]) == 0)
+        check("空 / None → 0",
+              page._reclaim_screenshots([]) == 0
+              and page._reclaim_screenshots(None) == 0)
+
+        db.delete_process_flow(flow)
+    finally:
+        page.images = saved
+
+
 def main_test() -> None:
     tmpdir = Path(tempfile.mkdtemp(prefix="process_ui_"))
     try:
@@ -506,6 +577,7 @@ def main_test() -> None:
             test_empty_state(root, tmpdir)
             test_search(page, db)
             test_scroll_reset(page, db)
+            test_screenshot_reclaim(page, db, tmpdir)
         finally:
             db.close()
             root.destroy()
