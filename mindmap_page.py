@@ -48,6 +48,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 import mindmap_db
 import speech
 import mindmap_layout as ml
+import mindmap_memory_bridge
 import training_core as tc
 from dialog_form_style import (apply_dialog_form_style, create_form_entry,
                                create_form_label)
@@ -400,8 +401,8 @@ class MindMapPage(ttk.Frame):
     """思维导图页面。由 ``main`` 建一次，之后靠 pack / pack_forget 切换。"""
 
     def __init__(self, master, db, *, app_title="个人系统", on_status=None,
-                 todo_hook=None, markdown=None, palette=MAIN_PALETTE,
-                 typography=TYPOGRAPHY):
+                 todo_hook=None, markdown=None, convert_hook=None,
+                 palette=MAIN_PALETTE, typography=TYPOGRAPHY):
         super().__init__(master)
         self.db = db
         self.app_title = app_title
@@ -410,6 +411,8 @@ class MindMapPage(ttk.Frame):
         self.todo_hook = todo_hook
         # markdown_view 模块，用来渲染模板预览；没注入就退化成纯文本
         self.markdown = markdown
+        # 「转成记忆宫殿」的落库动作由 main 注入 —— 本模块不认识 memory_db
+        self.convert_hook = convert_hook
         self.palette = palette
         self.typography = typography
 
@@ -476,6 +479,7 @@ class MindMapPage(ttk.Frame):
             ("生成今日训练待办", self.make_today_todo),
             ("手动打卡", self.checkin_today),
             "---",
+            ("把当前导图转成记忆宫殿", self.convert_to_palace),
             ("删除当前导图", self.delete_current_map),
         ])
 
@@ -1716,6 +1720,53 @@ class MindMapPage(ttk.Frame):
         self._status(f"已打卡：盲画 {record['maps_reviewed']} 张、"
                      f"新画 {record['maps_new']} 张。")
         self.refresh()
+
+    def convert_to_palace(self):
+        """把当前这张导图转成一座记忆宫殿。
+
+        转换本身在 ``mindmap_memory_bridge`` 里（那里不认识 Tk），这里只负责
+        问一句、再把结果说清楚。**转不了的时候必须说出为什么**：弹一个
+        「转换完成：0 条」等于什么都没告诉用户。
+        """
+        map_id = self.current_map_id
+        if map_id is None:
+            messagebox.showinfo(self.app_title, "先在左栏选一张导图。", parent=self)
+            return
+        if self.convert_hook is None:
+            messagebox.showinfo(self.app_title, "没有接上记忆宫殿，转不了。",
+                                parent=self)
+            return
+        info = mindmap_memory_bridge.plan(self.db, map_id)
+        if not info["ok"]:
+            messagebox.showwarning(self.app_title, info["reason"], parent=self)
+            return
+        if not messagebox.askyesno(
+                self.app_title,
+                f"把「{info['palace']}」转成一座记忆宫殿：\n\n"
+                f"· 一级分支 {info['branches']} 个 -> 地点桩（路线上的站）\n"
+                f"· 更深层 {info['items']} 个 -> 记忆项\n\n"
+                "转过的图再转一次只会补上新增的部分，\n"
+                "不会覆盖你后来手工加的桩和条目。",
+                parent=self):
+            return
+        result = self.convert_hook(map_id)
+        if not result.get("ok"):
+            messagebox.showwarning(self.app_title,
+                                   result.get("reason") or "转换失败。",
+                                   parent=self)
+            return
+        fresh = ""
+        if result["loci"] or result["items"]:
+            fresh = f"（本次新建 {result['loci']} 个桩 / {result['items']} 条）"
+        else:
+            fresh = "（这一张已经转过了，没有新增）"
+        self._status(f"已转成记忆宫殿「{info['palace']}」："
+                     f"{result['total_loci']} 个桩 / {result['total_items']} 条记忆项")
+        messagebox.showinfo(
+            self.app_title,
+            f"转换完成：{result['total_loci']} 个地点桩、"
+            f"{result['total_items']} 条记忆项{fresh}\n\n"
+            "去「记忆宫殿」页就能按路线走了。", parent=self)
 
     def make_today_todo(self):
         if self.todo_hook is None:

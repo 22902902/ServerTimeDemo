@@ -168,7 +168,8 @@ from excel_page import ExcelImageTools, ExcelLearningPage  # Excel 学习中心�
 from memory_db import MemoryPalaceDB  # 记忆宫殿：地点桩 + 记忆项 + 间隔重复
 from memory_page import MemoryImageTools, MemoryPalacePage  # 记忆宫殿页面（六视图 + 走一遍 + 实景图）
 from mindmap_db import MindmapDB  # 思维导图：大纲节点 + 盲画间隔重复
-from mindmap_page import MindMapPage  # 思维导图页面（五视图 + 自动布局画布）
+from mindmap_page import MindMapPage
+import mindmap_memory_bridge  # 导图 -> 记忆宫殿：一键转换  # 思维导图页面（五视图 + 自动布局画布）
 from training_todo_bridge import TrainingTodoBridge  # 训练模块 → 待办的写入胶水
 from excel_todo_bridge import ExcelTodoBridge  # Excel 宝典 → 待办：把「今日复习」变成一条待办
 from excel_note_bridge import ExcelNoteBridge  # Excel 宝典 → 学习笔记：把自测整理成一套模板
@@ -4067,12 +4068,25 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             on_status=self.log_status,
             todo_hook=self.training_todo_bridge.make_hook("mindmap"),
             markdown=markdown_view,
+            convert_hook=self.convert_map_to_palace,
         )
         self.mindmap_view.pack(fill="both", expand=True)
 
     def mindmap_page_refresh(self):
         """页面切换垫片：拉一次最新进度，再重画当前视图。"""
         self.mindmap_view.refresh()
+
+
+    def convert_map_to_palace(self, map_id) -> dict:
+        """导图 -> 记忆宫殿。转换写在 bridge 里，这里只负责把两个库配到一起。"""
+        result = mindmap_memory_bridge.convert(
+            self.memory_db, self.mindmap_db, map_id)
+        if result.get("ok"):
+            # 记忆宫殿页可能还没建（用户没点开过），刷之前先看看在不在
+            view = getattr(self, "memory_view", None)
+            if view is not None:
+                view.refresh()
+        return result
 
     def _build_study_demo_page(self):
         """构建 Python 学习辅助模块页面"""

@@ -51,6 +51,7 @@ M. 页面契约      页面用到的每个 db 入口与 ml 函数都存在、行
 N. 待办桥        盲画措辞 / 不被顺延 / 当天幂等 / 与记忆宫殿互不干扰
 O. 游戏训练包    数独 / CS2 / 象棋 三张知识树：分类 / 分支数 / 往返一致 / 能建图
 P. SRS 三算法    与记忆宫殿同款内核（同串间隔）/ 各存各的设置 / FSRS 同量级
+Q. 导图转宫殿    中心主题->宫殿 / 一级分支->桩 / 更深层->记忆项 / 幂等追加 / 不抹手工劳动
 
 用法：
     python scripts/test_mindmap.py
@@ -72,6 +73,7 @@ except Exception:
     pass
 
 import mindmap_db  # noqa: E402
+import mindmap_memory_bridge as mmb  # noqa: E402
 import mindmap_layout as ml  # noqa: E402
 import mindmap_seed  # noqa: E402
 import todo_db  # noqa: E402
@@ -1458,6 +1460,114 @@ def test_srs_algorithms() -> None:
           "train_settings" in tables, sorted(tables))
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# Q. 导图 -> 记忆宫殿（mindmap_memory_bridge）
+# ══════════════════════════════════════════════════════════════════════════
+_OUTLINE = ("水果\n"
+            "- 苹果\n"
+            "  - 红富士\n"
+            "  - 嘎啦果\n"
+            "- 香蕉\n"
+            "  - 小米蕉\n")
+
+
+def _bridge_pair(name: str):
+    """两个独立的临时库：一个导图库、一个记忆宫殿库（跟线上一样是两摊数据）。"""
+    d = Path(tempfile.mkdtemp(prefix="mm_bridge_"))
+    _TMP.append(d)
+    return MemoryPalaceDB(d / f"{name}_palace.db"), MindmapDB(d / f"{name}_map.db")
+
+
+def test_map_to_palace() -> None:
+    section("[Q] 导图 -> 记忆宫殿（转换口径 / 幂等 / 不抹手工劳动）")
+    palace_db, map_db = _bridge_pair("b1")
+    map_id = map_db.add_map("水果")
+    map_db.save_outline(map_id, ml.parse_outline(_OUTLINE))
+
+    # -- 1. plan 只算不写 ----------------------------------------------
+    info = mmb.plan(map_db, map_id)
+    check("plan 认出中心主题就是宫殿名", info["palace"] == "水果", info)
+    check("一级分支数 = 地点桩数", info["branches"] == 2, info)
+    check("更深层节点数 = 记忆项数", info["items"] == 3, info)
+    check("**plan 一个字都不写**（确认框之前不该动库）",
+          not palace_db.list_palaces() and source_key_of(palace_db, map_id) is None)
+
+    # -- 2. convert 的口径 ---------------------------------------------
+    result = mmb.convert(palace_db, map_db, map_id)
+    check("转出来了（ok + 新建宫殿）",
+          result["ok"] and result["created"] and result["palace_id"] > 0, result)
+    palace = palace_db.get_palace(result["palace_id"])
+    check("宫殿名 = 中心主题", palace["name"] == "水果", palace["name"])
+    check("宫殿带 source_key（靠它认「这张图已经转过」）",
+          palace["source_key"] == mmb.source_key(map_id), palace["source_key"])
+    loci = palace_db.list_loci(result["palace_id"])
+    check("一级分支 == 地点桩（一个不多一个不少）",
+          [x["name"] for x in loci] == ["苹果", "香蕉"], [x["name"] for x in loci])
+    items = palace_db.list_items(palace_id=result["palace_id"])
+    check("更深层 == 记忆项", sorted(x["front"] for x in items)
+          == ["嘎啦果", "小米蕉", "红富士"], sorted(x["front"] for x in items))
+    check("**每条都挂在自己那条分支的桩上**",
+          all(int(x["locus_id"]) in {int(l["id"]) for l in loci} for x in items),
+          [(x["front"], x["locus_id"]) for x in items])
+    # 答案写完整路径：光一个节点名没有上下文，回忆时要能顺着绳子摸回去
+    by_front = {x["front"]: x["back"] for x in items}
+    check("答案是从根到父的完整路径（不是只写一个节点名）",
+          by_front["红富士"] == "水果 > 苹果"
+          and by_front["小米蕉"] == "水果 > 香蕉", by_front)
+
+    # 走一遍的顺序 = 桩的 seq —— 这条错了，宫殿就退化成随机抽背
+    order = palace_db.walk_order(result["palace_id"])
+    check("走一遍的顺序 = 桩的顺序（路线的顺序不能乱）",
+          [r["station"] for r in order] == [1, 1, 2],
+          [r["station"] for r in order])
+
+    # -- 3. 幂等：转第二次不翻倍 ----------------------------------------
+    total_before = len(palace_db.list_items(palace_id=result["palace_id"]))
+    second = mmb.convert(palace_db, map_db, map_id)
+    total_after = len(palace_db.list_items(palace_id=result["palace_id"]))
+    check("第二次转：认出已经转过（created=False）",
+          second["ok"] and second["created"] is False, second)
+    check("第二次转：一条都没多出来（不是翻倍）",
+          total_after == total_before == 3, (total_before, total_after))
+    check("第二次转：桩也没多出来",
+          len(palace_db.list_loci(result["palace_id"])) == 2)
+
+    # -- 4. 转不了的时候要说为什么 --------------------------------------
+    bare_id = map_db.add_map("只有一个主题")
+    why = mmb.plan(map_db, bare_id)
+    check("只有中心主题的图：plan 直接说转不了",
+          why["ok"] is False and str(why["reason"]).strip() != "", why)
+    check("只有中心主题的图：convert 也不许硬转",
+          mmb.convert(palace_db, map_db, bare_id)["ok"] is False)
+
+    # -- 5. 手工劳动不被抹掉 -------------------------------------------
+    palace_db.add_locus(result["palace_id"], "手工加的桩")
+    palace_db.add_item(front="手工加的项", palace_id=result["palace_id"])
+    again = mmb.convert(palace_db, map_db, map_id)
+    names = [x["name"] for x in palace_db.list_loci(result["palace_id"])]
+    fronts = [x["front"] for x in palace_db.list_items(palace_id=result["palace_id"])]
+    check("再转一次：手工加的桩还在（转换不许删用户自己的东西）",
+          "手工加的桩" in names, names)
+    check("再转一次：手工加的条目还在", "手工加的项" in fronts, fronts)
+    check("再转一次：只补缺的，已有的不重建",
+          again["loci"] == 0 and again["items"] == 0, again)
+
+    # -- 6. 页面接线（扫源码，不 import Tk） ---------------------------
+    page_src = (ROOT / "mindmap_page.py").read_text(encoding="utf-8")
+    main_src = (ROOT / "main.py").read_text(encoding="utf-8")
+    check("mindmap_page 有「转成记忆宫殿」入口",
+          "def convert_to_palace" in page_src
+          and "把当前导图转成记忆宫殿" in page_src)
+    check("main 把两个库配到了一起（convert_hook 真的接上）",
+          "convert_hook=self.convert_map_to_palace" in main_src
+          and "def convert_map_to_palace" in main_src)
+
+
+def source_key_of(palace_db, map_id):
+    """按 source_key 找宫殿。**没有就返回 None**（不是抛异常）。"""
+    return palace_db.get_palace_by_source(mmb.source_key(map_id))
+
+
 def main_test() -> None:
     test_srs_parity()
     test_seed()
@@ -1473,6 +1583,7 @@ def main_test() -> None:
     test_collapse()
     test_game_maps()
     test_srs_algorithms()
+    test_map_to_palace()
     test_page_contracts()
     test_todo_bridge()
 
