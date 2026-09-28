@@ -41,7 +41,7 @@ EXPECTED = {
         "TodoAlertDialog", "ALERT_WIDTH", "snooze_all", "complete_all",
         "_place_bottom_right",
     ],
-    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.18.0"],
+    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.18.1"],
     "training_core": [
         "SRS_INTERVALS", "review_next_state", "streak_from_dates",
         "checkin_grid", "MASTERY_GOOD", "FEEDBACK_FORGOT",
