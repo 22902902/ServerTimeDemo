@@ -9,7 +9,8 @@
 * ``TEACHING_CARDS`` —— 方法论文（联想六法、桩位选取、复习时机…），每张卡带一个练习动作
 * ``PALACE_TEMPLATES`` —— 开箱可用的宫殿（我的住宅 / 通勤路线 / 身体桩）
 * ``NUMBER_PEGS`` —— 00–99 一百个固定图像，数字桩的地基
-* ``BANKS`` —— 题库（三十六计 / 化学元素 / 历史朝代 / 省份简称 / 圆周率）
+* ``BANKS`` —— 题库（三十六计 / 化学元素 / 历史朝代 / 省份简称 / 圆周率 /
+  数独技巧 / 象棋杀法 / CS2 七张现役比赛图的点位与用途）
 
 装载自检
 ------------------------------------------------------------------------------
@@ -18,6 +19,8 @@
 """
 
 from __future__ import annotations
+
+import cs2_seed  # CS2 点位的原始资料：7 张现役比赛图 × 20 个点位
 
 # ======================================================================
 # 一、教学卡（联想六法 + 方法论）
@@ -817,6 +820,68 @@ SEED_TEACHING_CARDS = TEACHING_CARDS
 SEED_PALACE_TEMPLATES = PALACE_TEMPLATES
 SEED_NUMBER_PEGS = NUMBER_PEGS
 SEED_BANKS = BANKS
+
+# ======================================================================
+# 二·补、CS2 点位（现役 7 张比赛图）
+# ======================================================================
+# Mirage 是手写的（上面 PALACE_TEMPLATES / BANKS 里那两条）；其余 6 张由
+# ``cs2_seed`` 的**同一张表同时生成**宫殿与题库 —— 桩名与题面同源，
+# 「第 N 题挂第 N 桩」的 1:1 配对由构造保证，不靠人工对齐两份清单。
+def _cs2_palace(map_data: dict) -> dict:
+    """点位宫：桩名 = 点位名，桩提示 = 位置与四周（走一遍时先给的就是它）。"""
+    loci = [(name.replace("（", " ").replace("）", "").strip(), place)
+            for name, _use, _hook, place in map_data["callouts"]]
+    return {
+        "code": map_data["pc"],
+        "name": f"CS2 · {map_data['name']} 点位宫（20 桩）",
+        "kind": "虚拟",
+        "description": map_data["intro"],
+        "route_note": map_data["route"],
+        "loci": loci,
+    }
+
+
+def _cs2_bank(map_data: dict) -> dict:
+    """点位题库：题目 = 点位名，答案 = 用途，钩子 = 记忆钩子，详情 = 位置与四周。"""
+    items = [
+        {"seq": seq, "question": name, "answer": use, "hint": hook, "detail": place}
+        for seq, (name, use, hook, place) in enumerate(map_data["callouts"], start=1)
+    ]
+    name = map_data["name"]
+    return {
+        "code": map_data["bc"],
+        "name": f"CS2 · {name} 点位与用途",
+        "description": (
+            f"{name} 20 个常用点位的作用。**背点位不是为了报点好听，"
+            f"是为了「听到报点立刻知道该看哪儿」。** 配「CS2 · {name} 点位宫（20 桩）」"
+            f"使用：第 N 题挂第 N 桩，走一遍就是走一遍地图。\n\n"
+            f"双击某一条可以看全「位置与四周」的详情，也可以把自己在游戏里截的图贴上去。"
+        ),
+        "items": items,
+    }
+
+
+PALACE_TEMPLATES.extend(_cs2_palace(m) for m in cs2_seed.MAPS)
+BANKS.extend(_cs2_bank(m) for m in cs2_seed.MAPS)
+
+# Mirage 的题干 / 答案 / 钩子已手写在上面，这里只把「位置与四周」补进它的条目。
+# ``seed_banks`` 会把文本字段 upsert 进老库（**images 不动**），所以老库也能补上详情。
+for _bank in BANKS:
+    if _bank["code"] != "BANK_CS2_MIRAGE":
+        continue
+    for _item in _bank["items"]:
+        _detail = cs2_seed.MIRAGE_DETAILS.get(int(_item["seq"]))
+        if _detail:
+            _item["detail"] = _detail
+
+# 自检：7 张图的题库都要齐，而且每条都要有「位置与四周」（少一条就是内容丢了）
+for _code in ["BANK_CS2_MIRAGE"] + [m["bc"] for m in cs2_seed.MAPS]:
+    _found = next((b for b in BANKS if b["code"] == _code), None)
+    assert _found is not None, f"CS2 题库缺失：{_code}"
+    assert len(_found["items"]) >= cs2_seed.MIN_CALLOUTS, f"{_code} 条目不足"
+    _missing = [i["seq"] for i in _found["items"]
+                if not str(i.get("detail", "")).strip()]
+    assert not _missing, f"{_code} 这些条目缺「位置与四周」：{_missing}"
 
 # 数量底线（设计文档第六节）—— 低于这个数就是内容丢了，直接报错
 MIN_CARDS = 8
