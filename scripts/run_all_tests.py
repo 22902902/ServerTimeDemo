@@ -52,6 +52,10 @@ SUITES = [
     "test_excel",
     "test_excel_note",
     "test_excel_ui",
+    "test_memory",
+    "test_mindmap",
+    "test_memory_ui",
+    "test_mindmap_ui",
 ]
 SMOKE = "runtime_smoke"
 SUMMARY_RE = re.compile(r"通过\s*(\d+)\s*项[，,]\s*失败\s*(\d+)\s*项")
