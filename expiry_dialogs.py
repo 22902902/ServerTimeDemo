@@ -70,6 +70,10 @@ class AssetDialog(simpledialog.Dialog):
 class SettingsDialog(simpledialog.Dialog):
     """应用设置对话框。"""
 
+    # 说明文字的换行宽度（像素）。tk.Label 只给 width、不给 wraplength 会被直接
+    # 截断（这个仓库里踩过的老坑）；给一个确定的像素宽，长路径也能整段看见。
+    NOTE_WRAP_PX = 460
+
     def __init__(
         self,
         parent,
@@ -79,6 +83,8 @@ class SettingsDialog(simpledialog.Dialog):
         app_title: str,
         displayable_columns,
         column_meta,
+        autostart: bool = False,
+        autostart_note: str = "",
     ):
         self.visible_columns = visible_columns
         self.close_behavior = close_behavior
@@ -86,6 +92,11 @@ class SettingsDialog(simpledialog.Dialog):
         self.app_title = app_title
         self.displayable_columns = list(displayable_columns)
         self.column_meta = column_meta
+        # 「开机自启动」的初始值与说明文字都由调用方（主窗口）给：这个对话框只
+        # 负责收集用户意愿，**自己不碰注册表** —— 真实状态要读注册表，那件事留在
+        # 主窗口里做，这里连相关模块都不需要导入。
+        self.autostart = autostart
+        self.autostart_note = autostart_note
         super().__init__(parent, "面板设置")
 
     def body(self, master):
@@ -112,6 +123,34 @@ class SettingsDialog(simpledialog.Dialog):
             create_form_radiobutton(close_box, text=label, value=value, variable=self.close_behavior_var, palette=MAIN_PALETTE).grid(
                 row=0, column=index, sticky="w", padx=8, pady=4
             )
+        # 开机自启动：勾上就是「登录 Windows 时自动把本程序拉起来」。
+        # 说明里的「当前记录」是主窗口从注册表读到的**真实**内容 —— 条目可能指着
+        # 老位置（程序搬过目录）或者已被别的东西改写，光看一个勾完全看不出来，
+        # 所以把命令原文摆出来，别让人对着一个「已开启」猜为什么开机没动静。
+        boot_box = ttk.LabelFrame(master, text="开机自启动", padding=8, style="MainDialog.TLabelframe")
+        boot_box.pack(fill="x", padx=8, pady=(0, 8))
+        self.autostart_var = tk.BooleanVar(value=self.autostart)
+        create_form_checkbutton(
+            boot_box,
+            text="开机时自动启动（静默运行到系统托盘）",
+            variable=self.autostart_var,
+            palette=MAIN_PALETTE,
+        ).pack(anchor="w", padx=4, pady=(2, 4))
+        create_form_label(
+            boot_box,
+            "只对当前用户生效，不动系统级设置。想静默登录需先勾「记住密码」。",
+            palette=MAIN_PALETTE,
+            wraplength=self.NOTE_WRAP_PX,
+        ).pack(anchor="w", padx=4)
+        if self.autostart_note:
+            create_form_label(
+                boot_box,
+                self.autostart_note,
+                palette=MAIN_PALETTE,
+                muted=True,
+                wraplength=self.NOTE_WRAP_PX,
+            ).pack(anchor="w", padx=4, pady=(2, 0))
+
         return box
 
     def validate(self):
@@ -125,6 +164,7 @@ class SettingsDialog(simpledialog.Dialog):
         self.result = {
             "visible_columns": [column for column in self.displayable_columns if self.vars[column].get()],
             "close_behavior": self.close_behavior_var.get(),
+            "autostart": bool(self.autostart_var.get()),
         }
 
 

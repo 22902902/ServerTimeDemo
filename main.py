@@ -167,6 +167,15 @@ from excel_db import ExcelDB  # Excel 学习中心数据库（200 个内置函�
 from excel_page import ExcelImageTools, ExcelLearningPage  # Excel 学习中心页面
 from excel_todo_bridge import ExcelTodoBridge  # Excel 宝典 → 待办：把「今日复习」变成一条待办
 from excel_note_bridge import ExcelNoteBridge  # Excel 宝典 → 学习笔记：把自测整理成一套模板
+from startup_manager import (  # 开机自启动：只写 HKCU 的 Run 键，当前用户级、不用提权
+    REMEMBER_FILE_NAME,
+    STATE_COMMAND_KEY,
+    STATE_INTENT_KEY,
+    StartupManager,
+    is_autostart_launch,
+    load_remember_file,
+    read_remembered_credentials,
+)
 
 
 # =============================================================================
@@ -2502,21 +2511,14 @@ class LoginDialog(tk.Toplevel):
         self.after(100, self.center_on_parent)
 
     def _load_remembered(self) -> dict:
-        """加载记住的用户名和密码。"""
-        try:
-            if self.REMEMBER_FILE.exists():
-                with open(self.REMEMBER_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # 简单 base64 解码（非加密，只是混淆）
-                    if data.get("remember"):
-                        return {
-                            "username": base64.b64decode(data.get("username", "")).decode("utf-8") if data.get("username") else "",
-                            "password": base64.b64decode(data.get("password", "")).decode("utf-8") if data.get("password") else "",
-                            "remember": True,
-                        }
-        except Exception:
-            pass
-        return {}
+        """加载记住的用户名和密码。
+
+        解析交给 startup_manager.load_remember_file —— 开机自启动的静默登录走的是同一个
+        函数，两处对文件格式的理解必须一致，否则哪天格式变一下，手动登录能用、
+        静默登录就哑了。返回值口径与从前完全一样（勾了记住就回三个字段，字段可能是
+        空串），所以登录框的预填行为没变。
+        """
+        return load_remember_file(self.REMEMBER_FILE)
 
     def _save_remembered(self, username: str, password: str):
         """保存记住的用户名和密码（base64 混淆）。"""
@@ -2776,8 +2778,12 @@ class TrayController:
         draw.text((18, 19), "到", fill="white")
 
         menu = pystray.Menu(
-            pystray.MenuItem("显示窗口", self.on_show),
+            # default=True -> 双击托盘图标就是「显示窗口」，不用右键再点一次
+            pystray.MenuItem("显示窗口", self.on_show, default=True),
             pystray.MenuItem("立即检查提醒", self.on_check),
+            # 勾的状态每次展开菜单时现算：设置对话框里也能改这个开关，缓存必然对不上
+            pystray.MenuItem("开机自启动", self.on_toggle_autostart,
+                             checked=self.autostart_checked),
             pystray.MenuItem("退出程序", self.on_exit),
         )
         self.icon = pystray.Icon("expiry_manager", image, APP_TITLE, menu)
@@ -2794,6 +2800,27 @@ class TrayController:
 
     def on_exit(self, icon, item):
         self.app.after(0, self.app.exit_app)
+
+    def autostart_checked(self, item) -> bool:
+        """托盘菜单里那个勾的状态：直接问注册表，不缓存。"""
+        try:
+            return bool(self.app.startup_manager.is_enabled())
+        except Exception:
+            return False
+
+    def on_toggle_autostart(self, icon, item):
+        # 托盘回调跑在 pystray 自己的线程里，注册表读写和界面更新都得回到 Tk 主线程
+        # 做（与 on_show / on_exit 同一套手法）
+        self.app.after(0, self.app.toggle_autostart_from_tray)
+
+    def refresh_menu(self):
+        """改完自启动后让菜单重画，否则勾还停在旧状态。"""
+        if not self.icon:
+            return
+        try:
+            self.icon.update_menu()
+        except Exception:
+            logger.exception("刷新托盘菜单失败")
 
     def stop(self):
         if self.icon:
@@ -2900,6 +2927,14 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         self.minsize(1240, 720)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        # ★ 开机自启动的这次进程：先把窗口藏起来，别在开机时糊一脸。
+        #   位置很关键 —— 窗口一旦进 mainloop 就会自己映射出来，晚了就晚了。
+        #   往后的 prompt_login 走静默分支，**永远不会** deiconify；只有静默登录
+        #   失败（没记住密码 / 凭据失效）才退回弹登录框，那时它自己会 deiconify。
+        self.autostart_silent = is_autostart_launch()
+        if self.autostart_silent:
+            self.withdraw()
+
         # ★ 关键：锁定 ttk 主题与基础控件样式
         # 防止打开 Toplevel 子窗口后，主窗口 ttk 按钮/标签/输入框的样式
         # （底色、边框、字体）被系统默认主题覆盖，出现"按钮变小变样"问题。
@@ -2946,6 +2981,9 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         # 落点是一个**锁定分类**（见 study_notes_db.ensure_locked_category）：
         # 它在笔记模块里改不了名、删不掉，但完全不挡用户自己的笔记与分类。
         self.excel_note_bridge = ExcelNoteBridge(self.study_notes_db)
+        # 开机自启动的注册表读写。script 只在源码版用得上（打包版直接拉 exe 自己）。
+        # 这个对象**不碰界面**，所以主窗口、托盘菜单、设置对话框都能直接调它。
+        self.startup_manager = StartupManager(script=Path(__file__).resolve())
         self.tray = TrayController(self)
         self.shutdown_manager = AppShutdownManager(self)
         self.search_var = tk.StringVar()
@@ -3512,6 +3550,11 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         return removed_count, failed_files
 
     def prompt_login(self):
+        # 开机自启动走静默路径：不弹登录框、不抢焦点，直接进托盘。
+        # 拿不到可用的「记住密码」时它会返回 False，自然退回下面的弹窗 ——
+        # 宁可多弹一次，也不能把登录这道门常开着。
+        if self.autostart_silent and self.try_silent_login():
+            return
         self.deiconify()
         self.state("normal")
         self.lift()
@@ -3528,6 +3571,124 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         if not self.startup_completed:
             self.startup_completed = True
             self.after(CHECK_INTERVAL_MS, self.periodic_reminder_check)
+
+    def try_silent_login(self) -> bool:
+        """开机自启动的静默登录：只用「记住密码」里的凭据，不弹任何窗口。
+
+        三道闸都要过：有凭据、凭据能过 verify_user、账号不需要强制改密码。任何一道
+        不过就返回 False，让调用方走正常登录弹窗 —— 静默是为了省事，不是为了绕开认证。
+
+        凭据解析走 startup_manager.read_remembered_credentials，而登录框走的是同一个
+        load_remember_file，所以两处对文件格式的理解永远一致。
+        """
+        candidates = [LoginDialog.REMEMBER_FILE, DATA_DIR / REMEMBER_FILE_NAME]
+        credentials = read_remembered_credentials(candidates)
+        if not credentials:
+            self.log_status("开机自启动：没有可用的「记住密码」凭据，改为显示登录窗口。")
+            return False
+        username, password = credentials
+        if not self.db.verify_user(username, password):
+            self.log_status("开机自启动：记住的凭据已失效，改为显示登录窗口。")
+            return False
+        if self.db.get_must_change_password(username):
+            self.log_status("开机自启动：该账号需要先修改密码，改为显示登录窗口。")
+            return False
+        self.current_user_var.set(f"当前用户：{username}")
+        self.select_default_module()
+        # ★ 这里**不调** show_window()：窗口保持 withdraw，只把托盘和巡检拉起来。
+        self.startup_sequence(silent=True)
+        if not self.startup_completed:
+            self.startup_completed = True
+            self.after(CHECK_INTERVAL_MS, self.periodic_reminder_check)
+        self.log_status("已静默启动并常驻托盘，双击托盘图标可打开窗口。")
+        return True
+
+    # ------------------------------------------------------------------
+    # 开机自启动：开关落地 + 启动自检
+    # ------------------------------------------------------------------
+    def autostart_note(self) -> str:
+        """设置对话框里那行「当前记录」——显示注册表里的**真实**内容。
+
+        为什么要把命令原文摆出来：条目可能指着老位置（程序搬过目录）或者被别的东西
+        改过，那时界面上一个勾说什么都没用，得让用户看见原文。
+        """
+        state = self.startup_manager.state()
+        if not state["command"]:
+            return "当前记录：未设置"
+        if state["enabled"]:
+            return f"当前记录：{state['command']}"
+        return f"当前记录（指向别处，勾选后会覆盖）：{state['command']}"
+
+    def apply_autostart(self, desired: bool) -> tuple:
+        """把「开机自启动」落成或撤销，返回 (是否成功, 给用户看的话, 是否真的改了)。
+
+        注册表与 app_state 一起动。app_state 里那份「意图 + 当时写入的命令」只服务
+        一个场景：程序搬了目录后认得出「条目还在但指着老位置」并修回去（见
+        sync_autostart_on_startup）。**已经是要的那个状态就不写注册表**，免得每点一次
+        「确定」都朝 HKCU 写一遍。
+        """
+        manager = self.startup_manager
+        if desired:
+            if manager.is_enabled():
+                return True, "开机自启动已经是开启状态。", False
+            ok, detail = manager.enable()
+            if not ok:
+                return False, f"开启开机自启动失败：{detail}", False
+            self.db.set_state(STATE_INTENT_KEY, "1")
+            self.db.set_state(STATE_COMMAND_KEY, detail)
+            return True, "已开启开机自启动：下次登录 Windows 会自动启动并静默到托盘。", True
+        if not manager.read_command():
+            return True, "开机自启动已经是关闭状态。", False
+        ok, detail = manager.disable()
+        if not ok:
+            return False, f"关闭开机自启动失败：{detail}", False
+        self.db.set_state(STATE_INTENT_KEY, "0")
+        self.db.set_state(STATE_COMMAND_KEY, "")
+        return True, "已关闭开机自启动。", True
+
+    def sync_autostart_on_startup(self) -> None:
+        """启动时对一次注册表：程序被搬过目录就把自启动条目改到新位置。
+
+        只在「我们自己开的、而且内容没被别人改过」时才动手（口径见
+        StartupManager.repair_drift）。任何异常都只记日志 —— 这只是个便利功能，
+        不该拖垮启动。
+        """
+        try:
+            if self.db.get_state(STATE_INTENT_KEY, "") != "1":
+                return
+            remembered = self.db.get_state(STATE_COMMAND_KEY, "")
+            if not remembered:
+                return
+            result = self.startup_manager.repair_drift(remembered)
+        except Exception:
+            logger.exception("开机自启动条目自检失败")
+            return
+        if result.get("repaired"):
+            self.db.set_state(STATE_COMMAND_KEY, self.startup_manager.expected_command())
+        if result.get("message"):
+            self.log_status(result["message"])
+
+    def toggle_autostart_from_tray(self) -> None:
+        """托盘菜单里点「开机自启动」：翻转当前状态。
+
+        失败时要弹个框说清楚 —— 托盘菜单点完自己就消失了，只写状态栏等于没反馈。
+        """
+        ok, message, _changed = self.apply_autostart(not self.startup_manager.is_enabled())
+        self.log_status(message)
+        if not ok:
+            messagebox.showwarning(APP_TITLE, message, parent=self)
+        self.tray.refresh_menu()
+
+    def toggle_autostart_from_settings(self, desired: bool) -> None:
+        """设置对话框点「确定」之后落地。
+
+        直接调 apply_autostart 就行：它自己判断「本来就已是这个状态」从而不写注册表。
+        """
+        ok, message, changed = self.apply_autostart(desired)
+        if changed or not ok:
+            self.log_status(message)
+        if not ok:
+            messagebox.showwarning(APP_TITLE, message, parent=self)
 
     def select_default_module(self):
         self.switch_module("module_ops_expiry")
@@ -4022,6 +4183,10 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             app_title=APP_TITLE,
             displayable_columns=DISPLAYABLE_COLUMNS,
             column_meta=COLUMN_META,
+            # 勾的初值是注册表里的**真实**状态；说明那行把命令原文摆出来，
+            # 免得「条目指着老位置」时用户对着一个勾猜为什么开机没动静。
+            autostart=self.startup_manager.is_enabled(),
+            autostart_note=self.autostart_note(),
         )
         if dialog.result:
             self.visible_columns = dialog.result["visible_columns"]
@@ -4030,23 +4195,37 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             self.save_close_behavior()
             self.apply_visible_columns()
             self.refresh_table()
-            self.log_status("已更新面板与关闭行为设置。")
+            self.toggle_autostart_from_settings(dialog.result["autostart"])
+            self.log_status("已更新面板、关闭行为与开机自启动设置。")
 
-    def startup_sequence(self):
+    def startup_sequence(self, silent: bool = False):
+        """登录成功后的启动动作。
+
+        ``silent=True`` 是「开机自启动」那条路：**一个模态框都不许弹** —— 开机时糊
+        一脸窗口是最招人烦的。所以到期汇总降级成托盘气泡，「找不到默认 Excel」也只
+        写状态栏。
+
+        为什么用显式参数、而不是去读 self.autostart_silent：调用点就登录那两处，
+        显式传参比到处猜一个隐式状态好读，也好测。
+        """
         self.tray.start()
+        # 顺手对一次自启动条目：程序搬过目录就改到新位置（不常发生，一次注册表读）
+        self.sync_autostart_on_startup()
         if not self.db.fetch_assets():
             if DEFAULT_IMPORT_FILE.exists():
-                self.import_excel(DEFAULT_IMPORT_FILE, silent=False)
+                self.import_excel(DEFAULT_IMPORT_FILE, silent=silent)
             else:
                 self.log_status(f"未找到默认 Excel：{DEFAULT_IMPORT_FILE}")
-                messagebox.showwarning(
-                    APP_TITLE,
-                    "未找到默认 Excel 文件，请将文件放到程序根目录后重试，或点击“导入 Excel”手动选择。\n\n"
-                    f"默认文件名：{DEFAULT_IMPORT_FILE.name}\n"
-                    f"当前查找路径：{DEFAULT_IMPORT_FILE}",
-                    parent=self,
-                )
-        self.show_reminder_popup()
+                if not silent:
+                    messagebox.showwarning(
+                        APP_TITLE,
+                        "未找到默认 Excel 文件，请将文件放到程序根目录后重试，或点击“导入 Excel”手动选择。\n\n"
+                        f"默认文件名：{DEFAULT_IMPORT_FILE.name}\n"
+                        f"当前查找路径：{DEFAULT_IMPORT_FILE}",
+                        parent=self,
+                    )
+        if not silent:
+            self.show_reminder_popup()
         self.trigger_daily_tray_reminder(force=False)
         # 推迟到 2.5s：登录提示在 100ms 弹出，别让两个模态框打架
         self.after(2500, self.todo_daily_maintenance)
