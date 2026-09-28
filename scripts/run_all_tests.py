@@ -38,6 +38,8 @@ SUITES = [
     "test_notes_markdown",
     "test_notes_editor",
     "test_shell_ui",
+    "test_startup",
+    "test_startup_ui",
     "test_tools_launcher",
     "test_log_setup",
     "test_expiry_table",

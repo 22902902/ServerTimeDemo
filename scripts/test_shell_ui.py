@@ -31,6 +31,7 @@ except Exception:
 import app_icons  # noqa: E402
 import main  # noqa: E402
 from nav_sidebar import NAV_MODEL, SidebarNav  # noqa: E402
+from startup_manager import StartupManager  # noqa: E402
 from ui_theme import MAIN_PALETTE  # noqa: E402
 
 
@@ -71,6 +72,15 @@ def main_test():
     main.ExpiryManagerApp.poll_external_commands = lambda self: None
 
     app = main.ExpiryManagerApp()
+
+    # 开机自启动：本进程**没有** --autostart，所以不许自作静默、更不许自己隐藏窗口。
+    # （带 --autostart 的那条路由 scripts/test_startup_ui.py 覆盖。）
+    check("普通启动（无 --autostart）不自作静默",
+          getattr(app, "autostart_silent", None) is False and app.state() == "normal",
+          f"autostart_silent={getattr(app, 'autostart_silent', None)!r} state={app.state()}")
+    check("自启动管理器已就绪",
+          isinstance(getattr(app, "startup_manager", None), StartupManager))
+
     app.withdraw()
     app.update_idletasks()
 
