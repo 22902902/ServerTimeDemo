@@ -41,7 +41,7 @@ EXPECTED = {
         "TodoAlertDialog", "ALERT_WIDTH", "snooze_all", "complete_all",
         "_place_bottom_right",
     ],
-    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.16.0"],
+    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.17.0"],
     "training_core": [
         "SRS_INTERVALS", "review_next_state", "streak_from_dates",
         "checkin_grid", "MASTERY_GOOD", "FEEDBACK_FORGOT",
@@ -53,6 +53,10 @@ EXPECTED = {
     "memory_seed": [
         "SEED_NUMBER_PEGS", "SEED_PALACE_TEMPLATES", "TEACHING_CARDS",
         "MIN_CARDS", "validate",
+        # v1.17.0 三套游戏训练包（桩名嵌在 loci 的元组里，靠 _collect 递归才看得见）
+        "TPL_SUDOKU", "TPL_CS2_MIRAGE", "TPL_XIANGQI",
+        "BANK_SUDOKU", "BANK_CS2_MIRAGE", "BANK_XIANGQI",
+        "唯一余数 Naked Single", "马后炮", "T 出生点 T Spawn",
     ],
     "memory_page": [
         "WalkSession", "VIEW_WORKBENCH", "VIEW_LIBRARY", "PalaceDialog",
@@ -64,6 +68,8 @@ EXPECTED = {
     ],
     "mindmap_seed": [
         "TEMPLATES", "TEACHING_CARDS", "validate", "template_categories",
+        # v1.17.0 三张知识树（大纲是整块字符串常量，直接可见）
+        "TPL_MM_SUDOKU", "TPL_MM_CS2", "TPL_MM_XIANGQI", "游戏训练",
     ],
     "mindmap_page": [
         "BlindSession", "VIEW_EDITOR", "VIEW_WALL", "TREE_MAP",
@@ -93,23 +99,38 @@ DATA_PATHS = [
 ]
 
 
+def _collect(obj, acc: set) -> None:
+    """递归收集标识符与常量字符串。
+
+    ★ **必须递归进 tuple / list / frozenset。** 地点桩是 ``loci`` 列表里的二元组，
+    字节码里整个元组列表是模块的**一个常量**（``BUILD_LIST`` 拿元组常量建列表），
+    所以「桩名」是嵌在元组里面的字符串。只认 ``co_consts`` 里的直接字符串，
+    就会一个桩名都收集不到 —— 然后得出「内容没打进包」的**错误结论**（本轮实测）。
+    """
+    if isinstance(obj, (bytes, bytearray)):
+        try:
+            obj = marshal.loads(obj)
+        except Exception:                        # noqa: BLE001
+            return
+    if isinstance(obj, types.CodeType):
+        acc.update(obj.co_names)
+        acc.update(obj.co_varnames)
+        for const in obj.co_consts:
+            _collect(const, acc)
+    elif isinstance(obj, str):
+        acc.add(obj)
+    elif isinstance(obj, (tuple, list, frozenset, set)):
+        for item in obj:
+            _collect(item, acc)
+
+
 def symbols(code, acc: set) -> set:
     """递归收集 code object 里的标识符与常量字符串。
 
     ``repr(code)`` 只给出 ``<code object f at 0x...>`` —— 函数名在
     ``co_names`` 与 ``co_consts`` 里，必须自己走一遍。
     """
-    if isinstance(code, (bytes, bytearray)):
-        code = marshal.loads(code)
-    if not isinstance(code, types.CodeType):
-        return acc
-    acc.update(code.co_names)
-    acc.update(code.co_varnames)
-    for const in code.co_consts:
-        if isinstance(const, str):
-            acc.add(const)
-        elif isinstance(const, types.CodeType):
-            symbols(const, acc)
+    _collect(code, acc)
     return acc
 
 
