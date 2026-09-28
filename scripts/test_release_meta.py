@@ -188,7 +188,10 @@ def test_wired_into_ui():
                 "startup_manager",
                 "excel_seed", "excel_seed_schema", "excel_seed_math",
                 "excel_seed_stat", "excel_seed_lookup", "excel_seed_text",
-                "excel_seed_date", "excel_seed_misc", "excel_seed_extra"]
+                "excel_seed_date", "excel_seed_misc", "excel_seed_extra",
+                "training_core", "training_todo_bridge", "memory_seed",
+                "memory_db", "memory_page", "mindmap_layout", "mindmap_seed",
+                "mindmap_db", "mindmap_page", "mindmap_image"]
         missing = [n for n in need if n not in spec_src]
         check("打包 spec 把新模块写进了 hiddenimports",
               not missing, f"漏了 {missing}（运行版会 ImportError）")

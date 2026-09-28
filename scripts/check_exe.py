@@ -41,12 +41,48 @@ EXPECTED = {
         "TodoAlertDialog", "ALERT_WIDTH", "snooze_all", "complete_all",
         "_place_bottom_right",
     ],
-    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.8.0"],
+    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.16.0"],
+    "training_core": [
+        "SRS_INTERVALS", "review_next_state", "streak_from_dates",
+        "checkin_grid", "MASTERY_GOOD", "FEEDBACK_FORGOT",
+    ],
+    "memory_db": [
+        "MemoryPalaceDB", "PALACE_KINDS", "DEFAULT_PALACE_NAME",
+        "format_item_line",
+    ],
+    "memory_seed": [
+        "SEED_NUMBER_PEGS", "SEED_PALACE_TEMPLATES", "TEACHING_CARDS",
+        "MIN_CARDS", "validate",
+    ],
+    "memory_page": [
+        "WalkSession", "VIEW_WORKBENCH", "VIEW_LIBRARY", "PalaceDialog",
+    ],
+    "mindmap_db": ["MindmapDB", "DEFAULT_MAP_TITLE", "format_map_line"],
+    "mindmap_layout": [
+        "blind_brief", "reveal_levels", "to_opml", "iter_nodes",
+        "build_tree", "DEPTH_COLORS",
+    ],
+    "mindmap_seed": [
+        "TEMPLATES", "TEACHING_CARDS", "validate", "template_categories",
+    ],
+    "mindmap_page": [
+        "BlindSession", "VIEW_EDITOR", "VIEW_WALL", "TREE_MAP",
+        "ZOOM_VALUES",
+    ],
+    "mindmap_image": [
+        "render_png", "available", "pick_font", "FONT_CANDIDATES",
+    ],
+    "training_todo_bridge": [
+        "TrainingTodoBridge", "review_payload", "KIND_MEMORY", "KIND_MINDMAP",
+    ],
     # main 是入口脚本，不在 PYZ 里，单独在 ENTRY_EXPECTED 核对
 }
 ENTRY_EXPECTED = [
     "todo_alert_check", "_run_todo_alerts", "show_todo_alert",
     "_close_todo_alert", "TODO_TICK_MS",
+    # v1.16.0 训练模块接线
+    "MemoryPalacePage", "MindMapPage", "TrainingTodoBridge",
+    "memory_page_refresh", "mindmap_page_refresh",
 ]
 
 # 运行时数据：打包脚本**绝不能**删掉它们

@@ -10,7 +10,7 @@ a = Analysis(
          'tkinterdnd2'),
         ('app.ico', '.'),  # 窗口图标
     ],
-    hiddenimports=['log_setup', 'tools_db', 'console_page', 'system_toolbox_page', 'adb_page', 'tools_page', 'app_version', 'markdown_view', 'todo_db', 'todo_page', 'todo_icons', 'process_db', 'process_page', 'credential_process_dialogs', 'image_clipboard', 'excel_db', 'excel_page', 'excel_todo_bridge', 'excel_note_bridge', 'startup_manager', 'excel_seed', 'excel_seed_schema', 'excel_seed_math', 'excel_seed_stat', 'excel_seed_lookup', 'excel_seed_text', 'excel_seed_date', 'excel_seed_misc', 'excel_seed_extra', 'tkinterdnd2', 'tkcalendar'],
+    hiddenimports=['log_setup', 'tools_db', 'console_page', 'system_toolbox_page', 'adb_page', 'tools_page', 'app_version', 'markdown_view', 'todo_db', 'todo_page', 'todo_icons', 'process_db', 'process_page', 'credential_process_dialogs', 'image_clipboard', 'excel_db', 'excel_page', 'excel_todo_bridge', 'excel_note_bridge', 'startup_manager', 'excel_seed', 'excel_seed_schema', 'excel_seed_math', 'excel_seed_stat', 'excel_seed_lookup', 'excel_seed_text', 'excel_seed_date', 'excel_seed_misc', 'excel_seed_extra', 'training_core', 'training_todo_bridge', 'memory_seed', 'memory_db', 'memory_page', 'mindmap_layout', 'mindmap_seed', 'mindmap_db', 'mindmap_page', 'mindmap_image', 'PIL', 'tkinterdnd2', 'tkcalendar'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
