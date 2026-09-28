@@ -107,6 +107,8 @@ class MemoryPalaceDB:
                     back       TEXT NOT NULL DEFAULT '',
                     imagery    TEXT NOT NULL DEFAULT '',
                     story      TEXT NOT NULL DEFAULT '',
+                    detail     TEXT NOT NULL DEFAULT '',
+                    images     TEXT NOT NULL DEFAULT '',
                     category   TEXT NOT NULL DEFAULT '',
                     tags       TEXT NOT NULL DEFAULT '',
                     source_key TEXT NOT NULL DEFAULT '',
@@ -179,17 +181,51 @@ class MemoryPalaceDB:
                     seq      INTEGER NOT NULL,
                     question TEXT NOT NULL,
                     answer   TEXT NOT NULL DEFAULT '',
-                    hint     TEXT NOT NULL DEFAULT ''
+                    hint     TEXT NOT NULL DEFAULT '',
+                    detail   TEXT NOT NULL DEFAULT '',
+                    images   TEXT NOT NULL DEFAULT ''
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_bank_items "
                          "ON memory_bank_items(bank_id, seq)")
 
+            # 老库没有的列在这里补上（新库建表时已经有了，这里是空操作）
+            self._ensure_memory_columns(conn)
+
+    def _ensure_memory_columns(self, conn) -> None:
+        """缺列就 ``ALTER TABLE ADD COLUMN``；**不动存量数据、不重建表**。
+
+        为什么需要它：``CREATE TABLE IF NOT EXISTS`` 只对新库生效 —— 开发机和
+        用户的 exe 里那份 db 早就建好了，新加的 ``detail`` / ``images``
+        不加这一步就会永远缺失，而且是**静默**缺失（读出来是 KeyError 或空串）。
+        """
+        wanted = {
+            "memory_items": (
+                ("detail", "TEXT NOT NULL DEFAULT ''"),
+                ("images", "TEXT NOT NULL DEFAULT ''"),
+            ),
+            "memory_bank_items": (
+                ("detail", "TEXT NOT NULL DEFAULT ''"),
+                ("images", "TEXT NOT NULL DEFAULT ''"),
+            ),
+        }
+        for table, columns in wanted.items():
+            have = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+            for column, ddl in columns:
+                if column in have:
+                    continue
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
     # ==================================================================
     # 题库（内置，安装时灌一遍；幂等）
     # ==================================================================
     def seed_banks(self) -> int:
-        """把 ``memory_seed.BANKS`` 灌进题库表。重跑不会重复插。"""
+        """把 ``memory_seed.BANKS`` 灌进题库表。**幂等**：重跑不重复插。
+
+        已存在的条目按「谁拥有这一栏」分别处理：题干 / 答案 / 提示以种子为准
+        （这样改正错字能推给老库），``detail`` 只在空着时补，``images`` 不动 ——
+        后两栏是用户自己写的位置笔记和游戏截图。
+        """
         inserted = 0
         with self._connect() as conn:
             for order, bank in enumerate(memory_seed.BANKS):
@@ -208,16 +244,28 @@ class MemoryPalaceDB:
                         (bank["code"], bank["name"], bank["description"], order))
                     bank_id = int(cur.lastrowid)
                     inserted += 1
-                exists = {int(r["seq"]) for r in conn.execute(
-                    "SELECT seq FROM memory_bank_items WHERE bank_id = ?", (bank_id,))}
+                exists = {int(r["seq"]): int(r["id"]) for r in conn.execute(
+                    "SELECT id, seq FROM memory_bank_items WHERE bank_id = ?", (bank_id,))}
                 for item in bank["items"]:
-                    if int(item["seq"]) in exists:
+                    seq = int(item["seq"])
+                    if seq in exists:
+                        # 题干 / 答案 / 提示是内置文案，种子才是权威（纠错、改措辞
+                        # 靠重灌推给老库）；**detail 只在还空着的时候补** —— 给老题库
+                        # 补「四周细节」靠的就是这一步，而用户自己在弹窗里写的笔记
+                        # 不能被冲掉（弹窗明说了「可以自己补充」）。images 同理，
+                        # 那是用户自己截的图，任何情况下都不覆盖。
+                        conn.execute(
+                            "UPDATE memory_bank_items SET question = ?, answer = ?, "
+                            "hint = ?, detail = CASE WHEN TRIM(detail) = '' "
+                            "THEN ? ELSE detail END WHERE id = ?",
+                            (item["question"], item["answer"], item.get("hint", ""),
+                             item.get("detail", ""), exists[seq]))
                         continue
                     conn.execute(
-                        "INSERT INTO memory_bank_items (bank_id, seq, question, answer, hint) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (bank_id, int(item["seq"]), item["question"],
-                         item["answer"], item.get("hint", "")))
+                        "INSERT INTO memory_bank_items (bank_id, seq, question, answer, "
+                        "hint, detail) VALUES (?, ?, ?, ?, ?, ?)",
+                        (bank_id, seq, item["question"], item["answer"],
+                         item.get("hint", ""), item.get("detail", "")))
         return inserted
 
     def list_banks(self) -> list[dict]:
@@ -248,6 +296,28 @@ class MemoryPalaceDB:
                 "SELECT * FROM memory_bank_items WHERE bank_id = ? ORDER BY seq",
                 (int(bank_id),)).fetchall()
         return [dict(r) for r in rows]
+
+    def get_bank_item(self, item_id) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM memory_bank_items WHERE id = ?",
+                               (int(item_id),)).fetchone()
+        return dict(row) if row else None
+
+    def update_bank_item(self, item_id, **fields) -> bool:
+        """改题库项。**只放行 ``detail`` / ``images`` 两个用户字段** ——
+        题干 / 答案 / 提示 / 序号都由内置种子决定，不允许就地改（会被下次
+        ``seed_banks`` 覆盖回去，用户会以为「改了没用」）。
+        """
+        allowed = ("detail", "images")
+        sets = [(k, fields[k]) for k in allowed if k in fields]
+        if not sets:
+            return False
+        clause = ", ".join(f"{k} = ?" for k, _ in sets)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE memory_bank_items SET {clause} WHERE id = ?",
+                [v for _, v in sets] + [int(item_id)])
+            return cur.rowcount > 0
 
     # ==================================================================
     # 宫殿
@@ -491,20 +561,22 @@ class MemoryPalaceDB:
     # 记忆项
     # ==================================================================
     def add_item(self, *, front, back="", palace_id=0, locus_id=0, imagery="",
-                 story="", category="", tags="", source_key="") -> int:
+                 story="", detail="", images="", category="", tags="",
+                 source_key="") -> int:
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO memory_items (palace_id, locus_id, front, back, imagery, "
-                "story, category, tags, source_key, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "story, detail, images, category, tags, source_key, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (int(palace_id or 0), int(locus_id or 0), str(front).strip(),
                  str(back or ""), str(imagery or ""), str(story or ""),
+                 str(detail or ""), str(images or ""),
                  str(category or ""), str(tags or ""), str(source_key or ""), _now()))
             return int(cur.lastrowid)
 
     def update_item(self, item_id, **fields) -> bool:
-        allowed = ("front", "back", "imagery", "story", "category", "tags",
-                   "palace_id", "locus_id")
+        allowed = ("front", "back", "imagery", "story", "detail", "images",
+                   "category", "tags", "palace_id", "locus_id")
         sets = [(k, fields[k]) for k in allowed if k in fields]
         if not sets:
             return False
@@ -921,6 +993,8 @@ class MemoryPalaceDB:
                 front=str(entry["question"]), back=str(entry["answer"]),
                 palace_id=int(palace_id or 0), locus_id=locus_id,
                 imagery=str(entry.get("hint", "")), category=label,
+                detail=str(entry.get("detail", "") or ""),
+                images=str(entry.get("images", "") or ""),
                 source_key=source_key)
             created += 1
         return {"created": created, "skipped": skipped, "total": len(items)}
