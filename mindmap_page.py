@@ -46,6 +46,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import mindmap_db
+import speech
 import mindmap_layout as ml
 import training_core as tc
 from dialog_form_style import (apply_dialog_form_style, create_form_entry,
@@ -250,6 +251,10 @@ class BlindSession(tk.Toplevel):
         self.reveal_button = create_flat_action_button(
             buttons, "显示结构（空格）", self.show_answer)
         self.reveal_button.pack(side="left")
+        # 朗读在「走一遍」里最用得上：眼睛盯着桩位，耳朵听答案
+        self.speech_button = create_flat_action_button(
+            buttons, "朗读：关", self.toggle_speech)
+        self.speech_button.pack(side="left", padx=(8, 0))
 
         self.grade_buttons: dict[str, tk.Widget] = {}
         for value, label in ((tc.FEEDBACK_KNOWN, "记得（3）"),
@@ -262,6 +267,29 @@ class BlindSession(tk.Toplevel):
             self.grade_buttons[value] = button
 
     # -- 渲染 -----------------------------------------------------------
+    # -- 朗读 -----------------------------------------------------------
+    def toggle_speech(self):
+        """开关朗读。**关掉时要把正在念的那句掐断**，不然会一路念到下一题。"""
+        on = speech.toggle()
+        self.speech_button.configure(text=f"朗读：{'开' if on else '关'}")
+        # 机器上不能念时 toggle() 还是 False，按钮就照着返回值显示 ——
+        # 用户不会看到「明明开了却没声音」。
+        if on:
+            self._speak_current()
+        else:
+            speech.stop()
+
+    def _speak_current(self):
+        """念当前进度：还没展开念提示，展开了念**最新露出来的那一层**（不重念）。"""
+        if not speech.enabled():
+            return
+        texts = [str(self.root_var.get()).strip()]
+        if self.revealed_count <= 0:
+            texts.append(str(self.hint_var.get()).strip())
+        else:
+            texts.append(str(self.level_vars[self.revealed_count - 1].get()).strip())
+        speech.speak("。".join(t for t in texts if t))
+
     def _render_current(self):
         brief = self.brief
         self.head_var.set("盲画 · 第 1 / 1 张")
@@ -286,6 +314,7 @@ class BlindSession(tk.Toplevel):
             self.reveal_button.configure(state="normal", text="显示结构（空格）")
             for button in self.grade_buttons.values():
                 button.configure(state="disabled")
+        self._speak_current()
 
     def _all_revealed(self) -> bool:
         return not self.levels or self.revealed_count >= len(self.levels)
@@ -302,6 +331,7 @@ class BlindSession(tk.Toplevel):
         if self.revealed_count == 0:
             self.answer_frame.pack(fill="x", padx=24, pady=(6, 10))
         self.revealed_count += 1
+        self._speak_current()
         if self._all_revealed():
             self.reveal_button.configure(state="disabled", text="已全部展开")
             for button in self.grade_buttons.values():
@@ -354,6 +384,7 @@ class BlindSession(tk.Toplevel):
             self.on_finish(data)
 
     def close(self):
+        speech.stop()   # 关了窗就别再念（PowerShell 进程活着就是在念）
         if self.on_close is not None:
             try:
                 self.on_close(self.summary())

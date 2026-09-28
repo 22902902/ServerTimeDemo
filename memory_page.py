@@ -35,6 +35,7 @@ from tkinter import messagebox, simpledialog, ttk
 
 import image_clipboard
 import memory_db
+import speech
 import training_core as tc
 from dialog_form_style import (apply_dialog_form_style, create_form_entry,
                                create_form_label)
@@ -583,6 +584,10 @@ class WalkSession(tk.Toplevel):
         self.reveal_button = create_flat_action_button(
             buttons, "显示答案（空格）", self.show_answer)
         self.reveal_button.pack(side="left")
+        # 朗读在「走一遍」里最用得上：眼睛盯着桩位，耳朵听答案
+        self.speech_button = create_flat_action_button(
+            buttons, "朗读：关", self.toggle_speech)
+        self.speech_button.pack(side="left", padx=(8, 0))
 
         self.grade_buttons: dict[str, tk.Widget] = {}
         for value, label in ((tc.FEEDBACK_KNOWN, "记得（3）"),
@@ -595,6 +600,27 @@ class WalkSession(tk.Toplevel):
             self.grade_buttons[value] = button
 
     # -- 渲染 -----------------------------------------------------------
+    # -- 朗读 -----------------------------------------------------------
+    def toggle_speech(self):
+        """开关朗读。**关掉时要把正在念的那句掐断**，不然会一路念到下一题。"""
+        on = speech.toggle()
+        self.speech_button.configure(text=f"朗读：{'开' if on else '关'}")
+        # 机器上不能念时 toggle() 还是 False，按钮就照着返回值显示 ——
+        # 用户不会看到「明明开了却没声音」。
+        if on:
+            self._speak_current()
+        else:
+            speech.stop()
+
+    def _speak_current(self):
+        """念当前这一站：**没揭示只念提示**，揭示了才连答案一起念（别剧透）。"""
+        if not speech.enabled():
+            return
+        parts = [self.station_var.get(), self.hint_var.get()]
+        if self.revealed:
+            parts += [self.front_var.get(), self.back_var.get()]
+        speech.speak("。".join(str(p).strip() for p in parts if str(p).strip()))
+
     def _render_current(self):
         if not self.items:
             self.head_var.set("没有可练的内容")
@@ -626,6 +652,7 @@ class WalkSession(tk.Toplevel):
         self.reveal_button.configure(state="normal", text="显示答案（空格）")
         for button in self.grade_buttons.values():
             button.configure(state="disabled")
+        self._speak_current()
 
     # -- 实景图 ---------------------------------------------------------
     def _clear_shots(self):
@@ -679,6 +706,7 @@ class WalkSession(tk.Toplevel):
         self.answer_frame.pack(fill="x", padx=24, pady=(6, 10))
         self.revealed = True
         self.reveal_button.configure(state="disabled")
+        self._speak_current()
         for button in self.grade_buttons.values():
             button.configure(state="normal")
 
@@ -732,6 +760,7 @@ class WalkSession(tk.Toplevel):
             self.on_finish(data)
 
     def close(self):
+        speech.stop()   # 关了窗就别再念（PowerShell 进程活着就是在念）
         if self.on_close is not None:
             try:
                 self.on_close(self.summary())

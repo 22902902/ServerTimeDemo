@@ -52,6 +52,7 @@ SUITES = [
     "test_excel",
     "test_excel_note",
     "test_excel_ui",
+    "test_speech",
     "test_memory",
     "test_mindmap",
     "test_memory_ui",
