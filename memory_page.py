@@ -20,14 +20,20 @@
 能力注入（与 Excel 宝典同一手法，本模块**不 import main、不 import todo_db**）
 ------------------------------------------------------------------------------
 ``session`` 只认 ``on_grade`` 回调；``todo_hook`` 是「生成今日训练待办」的落库动作；
-``markdown`` 是 ``markdown_view`` 模块（渲染教学卡）。三样都由 ``main`` 注入。
+``markdown`` 是 ``markdown_view`` 模块（渲染教学卡）；``images`` 是图片能力的注入包
+（``MemoryImageTools``），``image_preview_cls`` 是账号中心那套预览组件 ——
+**题库里每一条都能贴自己在游戏里截的图**。注意那套组件本身只做「显示 + 翻页」，
+上传 / 粘贴入口得由调用方补（见 ``create_image_actions``，两个弹窗共用）。都由
+``main`` 注入。
 """
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
+import image_clipboard
 import memory_db
 import training_core as tc
 from dialog_form_style import (apply_dialog_form_style, create_form_entry,
@@ -39,6 +45,110 @@ from ui_components import (ScrollArea, create_flat_action_button,
                            create_metric_card, create_section_frame,
                            create_ttk_section_header)
 from ui_theme import MAIN_PALETTE, TYPOGRAPHY
+
+try:                                   # 缩略图只是加分项：没有 PIL 就退化成文件名
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except ImportError:                    # pragma: no cover - 便携版没有 PIL
+    HAS_PIL = False
+
+# 实景图落在账号中心那套统一目录下（``ACCOUNT_IMAGE_DIR / memory_items``），
+# 与流程截图、笔记截图同一个存储协议，搬机器时一起跟着走。
+MEMORY_IMAGE_SUBDIR = "memory_items"
+
+_THUMB_CACHE: dict = {}
+
+
+def _load_thumbnail(path, size=(196, 128)):
+    """读图并缩到指定尺寸；读不出来返回 ``None``（调用方退化成显示文件名）。"""
+    if not HAS_PIL:
+        return None
+    key = (str(path), int(size[0]), int(size[1]))
+    if key in _THUMB_CACHE:
+        return _THUMB_CACHE[key]
+    try:
+        image = Image.open(str(path))
+        image.thumbnail(size)
+        photo = ImageTk.PhotoImage(image)
+    except Exception:
+        return None
+    _THUMB_CACHE[key] = photo
+    return photo
+
+
+def _open_with_system(path) -> None:
+    """用系统默认程序打开（双击缩略图 / 点「看大图」时用）。打不开就算了，不弹错。"""
+    try:
+        if hasattr(os, "startfile"):
+            os.startfile(str(path))      # noqa: S606 - Windows 桌面应用，用户自己点开的
+    except Exception:
+        pass
+
+
+class MemoryImageTools:
+    """图片能力的注入包（与 ``ExcelImageTools`` / ``ProcessImageTools`` 同构）。
+
+    ``memory_page`` 不能 import main（会形成循环依赖），但截图又必须复用账号中心
+    那套「相对路径 + 统一目录」的存储协议，所以把用得到的几个函数打成一个对象传进来。
+    """
+
+    def __init__(self, *, base_dir, resolve_paths, storage_value, make_dir,
+                 parse_items, serialize_items):
+        self.base_dir = base_dir
+        self.resolve_paths = resolve_paths
+        self.storage_value = storage_value
+        self.make_dir = make_dir
+        self.parse_items = parse_items
+        self.serialize_items = serialize_items
+
+
+def create_image_actions(parent, *, preview, app_title, images, host=None,
+                         palette=MAIN_PALETTE):
+    '''给实景图预览补一排动作按钮（上传 / 粘贴 / 看大图 / 移除当前）。
+
+    **为什么必须补**：``AccountImagePreview`` 只做「显示 + 翻页」，上传入口是
+    调用方的活（见 ``credential_process_dialogs`` 里那两处各 5 个按钮）。少了
+    这一排，空状态文案里那句「点上传截图」就是个死链 —— 用户点不到任何东西。
+
+    ``host`` 是弹窗自身（文件选择框 / 提示框的 parent），不传就退回 ``parent``。
+    '''
+    host = host if host is not None else parent
+    row = tk.Frame(parent, bg=palette.bg)
+    row.pack(anchor="w", pady=(6, 0))
+
+    def add_from_file():
+        preview.choose_image(parent=host)
+
+    def add_from_clipboard():
+        """游戏里 Win+Shift+S 截完直接粘 —— CS 玩家最顺手的一条路。
+
+        剪贴板里没有图**不是错误**，只提示一句；读图/存盘失败也不许抛到
+        Tk 回调外（会静默吞掉整次点击）。
+        """
+        path = None
+        try:
+            if images is not None:
+                path = image_clipboard.save_clipboard_image(
+                    host, images.make_dir(MEMORY_IMAGE_SUBDIR))
+        except Exception:                    # noqa: BLE001 - 剪贴板不是图 / 存盘失败
+            path = None
+        if path is None:
+            messagebox.showinfo(
+                app_title,
+                "剪贴板里没有图片。游戏里按 Win+Shift+S 截一张，再点这里。",
+                parent=host)
+            return
+        items = list(images.parse_items(preview.get_value()))
+        items.append({"path": images.storage_value(path), "label": ""})
+        preview.set_value(images.serialize_items(items))
+
+    for text, command in (("上传截图", add_from_file),
+                          ("粘贴截图", add_from_clipboard),
+                          ("查看大图", lambda: preview.open_large_viewer(parent=host)),
+                          ("移除当前", preview.remove_current)):
+        create_flat_action_button(row, text, command).pack(side="left", padx=(0, 6))
+    return row
+
 
 # ----------------------------------------------------------------------
 # 视图
@@ -73,6 +183,109 @@ MASTERY_FILTER_CHOICES = (("all", "全部掌握度"),) + tuple(
 # ======================================================================
 # 对话框
 # ======================================================================
+class BankItemDialog(tk.Toplevel):
+    """题库里某一条的**完整内容** —— 双击那一条打开。
+
+    为什么要有它：题库表格的三列（序 / 题目 / 答案）天生装不下「答案 + 位置与四周」，
+    列宽一拉就把别的列挤没了 —— 用户的原话是「最好能双击打开，要不然显示不全」。
+    所以列表只做索引，**完整内容在弹窗里看**。
+
+    这里能改的只有两样：``detail``（自己补的位置笔记）与 ``images``（游戏里截的图）。
+    题目 / 答案 / 提示都由内置种子决定，不让就地改 —— 改了会被下次 ``seed_banks``
+    覆盖回去，用户会以为「改了没用」。
+    """
+
+    def __init__(self, parent, *, app_title, item, images=None,
+                 image_preview_cls=None, on_save=None, palette=MAIN_PALETTE,
+                 typography=TYPOGRAPHY):
+        super().__init__(parent)
+        self.item = dict(item)
+        self.app_title = app_title
+        self.images = images
+        self.image_preview_cls = image_preview_cls
+        self.on_save = on_save
+        self.palette = palette
+        self.typography = typography
+        self.saved = False
+
+        self.title(f"第 {self.item.get('seq', '')} 条 · {self.item.get('question', '')}")
+        self.configure(bg=palette.bg)
+        self.geometry("740x640")
+        self.minsize(560, 460)
+        self._build()
+        self.transient(parent.winfo_toplevel())
+        self.grab_set()
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+    # -- 构建 -----------------------------------------------------------
+    def _build(self):
+        palette, font = self.palette, self.typography
+        scroll = ScrollArea(self, bg=palette.bg)
+        scroll.pack(fill="both", expand=True)
+        body = scroll.inner
+
+        tk.Label(body, text=f"第 {self.item.get('seq', '')} 条 · {self.item.get('question', '')}",
+                 bg=palette.bg, fg=palette.text_primary, font=font.title,
+                 wraplength=640, justify="left").pack(anchor="w", pady=(0, 10))
+
+        self._field(body, "答案", str(self.item.get("answer", "") or "—"))
+        self._field(body, "记忆钩子", str(self.item.get("hint", "") or "—"))
+
+        frame = create_section_frame(body, "位置与四周（可以自己补充）")
+        frame.pack(fill="x", pady=(10, 0))
+        self.detail_text = tk.Text(frame, height=6, wrap="word",
+                                   highlightthickness=1,
+                                   highlightbackground=palette.border_soft)
+        self.detail_text.pack(fill="x")
+        self.detail_text.insert("1.0", str(self.item.get("detail", "") or ""))
+
+        shots = create_section_frame(body, "实景截图（游戏里截的图贴这儿最有用）")
+        shots.pack(fill="x", pady=(10, 0))
+        if self.image_preview_cls is not None and self.images is not None:
+            self.image_preview = self.image_preview_cls(
+                shots, str(self.item.get("images", "") or ""),
+                preview_size=(220, 150),
+                empty_text="还没有截图：点「上传截图」选一张，或在游戏里"
+                           "Win+Shift+S 截完点「粘贴截图」。",
+                image_subdir=MEMORY_IMAGE_SUBDIR)
+            self.image_preview.build(shots).pack(fill="x")
+            create_image_actions(shots, preview=self.image_preview,
+                                 app_title=self.app_title, images=self.images,
+                                 host=self)
+        else:
+            self.image_preview = None
+            tk.Label(shots, text="图片功能没接线（images 未注入）。", bg=palette.bg,
+                     fg=palette.text_muted, font=font.caption).pack(anchor="w")
+
+        tk.Label(body, text="提示：图片存在账号图片目录的 memory_items 下，"
+                            "换机器时跟其它截图一起搬。",
+                 bg=palette.bg, fg=palette.text_muted, font=font.caption,
+                 wraplength=640, justify="left").pack(anchor="w", pady=(10, 0))
+
+        actions = tk.Frame(self, bg=palette.bg)
+        actions.pack(side="bottom", fill="x", padx=20, pady=14)
+        create_flat_action_button(actions, "保存", self._save).pack(side="right")
+        create_flat_action_button(actions, "取消", self.destroy).pack(side="right", padx=6)
+
+    def _field(self, parent, title, text):
+        frame = create_section_frame(parent, title)
+        frame.pack(fill="x", pady=(0, 8))
+        tk.Label(frame, text=text, bg=self.palette.bg, fg=self.palette.text_primary,
+                 font=self.typography.body, wraplength=640,
+                 justify="left").pack(anchor="w")
+
+    # -- 保存 -----------------------------------------------------------
+    def _save(self):
+        detail = self.detail_text.get("1.0", "end").strip()
+        images = self.image_preview.get_value() if self.image_preview is not None \
+            else str(self.item.get("images", "") or "")
+        if self.on_save is not None:
+            if not self.on_save(int(self.item["id"]), detail, images):
+                return
+        self.saved = True
+        self.destroy()
+
+
 class PalaceDialog(simpledialog.Dialog):
     """新建 / 编辑一座宫殿。"""
 
@@ -141,12 +354,16 @@ class ItemDialog(simpledialog.Dialog):
     """新建 / 编辑一条记忆项。"""
 
     def __init__(self, parent, title, *, app_title, palaces, loci,
-                 initial=None, default_locus_id=0):
+                 initial=None, default_locus_id=0, images=None,
+                 image_preview_cls=None):
         self.initial = dict(initial or {})
         self.app_title = app_title
         self.palaces = list(palaces or [])
         self.loci = list(loci or [])
         self.default_locus_id = int(default_locus_id or 0)
+        self.images = images
+        self.image_preview_cls = image_preview_cls
+        self.image_preview = None
         self.result = None
         super().__init__(parent, title)
 
@@ -192,6 +409,29 @@ class ItemDialog(simpledialog.Dialog):
             entry.insert(0, str(self.initial.get(field, "") or ""))
             self.entries[field] = entry
             row_index += 1
+
+        create_form_label(master, "详情 / 位置与四周", palette=MAIN_PALETTE).grid(
+            row=row_index, column=0, sticky="nw", padx=6, pady=4)
+        self.detail_text = tk.Text(master, width=40, height=4, wrap="word")
+        self.detail_text.grid(row=row_index, column=1, sticky="ew", padx=6, pady=4)
+        self.detail_text.insert("1.0", str(self.initial.get("detail", "") or ""))
+        row_index += 1
+
+        if self.image_preview_cls is not None and self.images is not None:
+            create_form_label(master, "实景图", palette=MAIN_PALETTE).grid(
+                row=row_index, column=0, sticky="nw", padx=6, pady=4)
+            holder = ttk.Frame(master)
+            holder.grid(row=row_index, column=1, sticky="ew", padx=6, pady=4)
+            self.image_preview = self.image_preview_cls(
+                holder, str(self.initial.get("images", "") or ""),
+                preview_size=(220, 150),
+                empty_text="未贴截图（桩位的实景照片放这儿）：点「上传截图」"
+                           "选文件，或截图后点「粘贴截图」。",
+                image_subdir=MEMORY_IMAGE_SUBDIR)
+            self.image_preview.build(holder).pack(fill="x")
+            create_image_actions(holder, preview=self.image_preview,
+                                 app_title=self.app_title, images=self.images,
+                                 host=self)
 
         master.columnconfigure(1, weight=1)
         self._reload_loci()
@@ -241,6 +481,9 @@ class ItemDialog(simpledialog.Dialog):
                     break
         payload = {field: widget.get().strip()
                    for field, widget in self.entries.items()}
+        payload["detail"] = self.detail_text.get("1.0", "end").strip()
+        if self.image_preview is not None:
+            payload["images"] = self.image_preview.get_value()
         payload["palace_id"] = int(palace["id"]) if palace else 0
         payload["locus_id"] = locus_id
         self.result = payload
@@ -260,7 +503,7 @@ class WalkSession(tk.Toplevel):
     """
 
     def __init__(self, master, items, *, app_title="个人系统", title="走一遍",
-                 palette=MAIN_PALETTE, typography=TYPOGRAPHY,
+                 palette=MAIN_PALETTE, typography=TYPOGRAPHY, images=None,
                  on_grade=None, on_finish=None, on_close=None):
         super().__init__(master)
         self.title(title)
@@ -279,6 +522,7 @@ class WalkSession(tk.Toplevel):
         self.palette = palette
         self.typography = typography
         self.app_title = app_title
+        self.images = images
         self.finished = False
 
         self._build()
@@ -314,16 +558,25 @@ class WalkSession(tk.Toplevel):
         self.back_var = tk.StringVar(value="")
         self.imagery_var = tk.StringVar(value="")
         self.story_var = tk.StringVar(value="")
+        self.detail_var = tk.StringVar(value="")
         for var, font, tone in (
             (self.front_var, self.typography.subtitle, "primary"),
             (self.back_var, self.typography.body, "primary"),
             (self.imagery_var, self.typography.body, "muted"),
             (self.story_var, self.typography.body, "muted"),
+            (self.detail_var, self.typography.body, "muted"),
         ):
             color = palette.text_primary if tone == "primary" else palette.text_muted
             tk.Label(self.answer_frame, textvariable=var, bg=palette.bg, fg=color,
                      font=font, wraplength=660, justify="left").pack(
                 anchor="w", pady=2)
+
+        # 实景图：**只在揭示答案之后出现**（先提示后答案的顺序不能破）
+        self.shot_var = tk.StringVar(value="")
+        tk.Label(self.answer_frame, textvariable=self.shot_var, bg=palette.bg,
+                 fg=palette.text_muted, font=self.typography.caption).pack(anchor="w")
+        self.shot_host = tk.Frame(self.answer_frame, bg=palette.bg)
+        self.shot_host.pack(anchor="w", pady=(4, 0))
 
         buttons = tk.Frame(self, bg=palette.bg)
         buttons.pack(side="bottom", fill="x", padx=24, pady=16)
@@ -366,10 +619,47 @@ class WalkSession(tk.Toplevel):
         self.back_var.set("")
         self.imagery_var.set("")
         self.story_var.set("")
+        self.detail_var.set("")
+        self.shot_var.set("")
+        self._clear_shots()
         self.answer_frame.pack_forget()
         self.reveal_button.configure(state="normal", text="显示答案（空格）")
         for button in self.grade_buttons.values():
             button.configure(state="disabled")
+
+    # -- 实景图 ---------------------------------------------------------
+    def _clear_shots(self):
+        for child in self.shot_host.winfo_children():
+            child.destroy()
+
+    def _shot_paths(self, item) -> list:
+        if self.images is None:
+            return []
+        try:
+            paths = list(self.images.resolve_paths(item.get("images") or ""))
+        except Exception:
+            return []
+        return [p for p in paths if str(p) and os.path.exists(str(p))]
+
+    def _render_shots(self, item):
+        """这一桩的实景图缩略图。读不出图就退化成文件名，不弹错。"""
+        self._clear_shots()
+        paths = self._shot_paths(item)
+        if not paths:
+            self.shot_var.set("")
+            return
+        self.shot_var.set(f"实景图 {len(paths)} 张（双击看大图）：")
+        for path in paths[:3]:
+            thumb = _load_thumbnail(path)
+            if thumb is None:
+                tk.Label(self.shot_host, text=str(path), bg=self.palette.bg,
+                         fg=self.palette.text_muted, anchor="w",
+                         font=self.typography.caption).pack(side="left", padx=4)
+                continue
+            label = tk.Label(self.shot_host, image=thumb, bd=0, bg=self.palette.bg)
+            label.image = thumb
+            label.bind("<Double-1>", lambda _e, p=path: _open_with_system(p))
+            label.pack(side="left", padx=4)
 
     def show_answer(self):
         """展开答案。**这是唯一会显示答案的路径。**"""
@@ -383,6 +673,9 @@ class WalkSession(tk.Toplevel):
         self.imagery_var.set(f"联想画面：{imagery}" if imagery else "")
         story = str(item.get("story") or "").strip()
         self.story_var.set(f"故事链：{story}" if story else "")
+        detail = str(item.get("detail") or "").strip()
+        self.detail_var.set(f"位置与四周：{detail}" if detail else "")
+        self._render_shots(item)
         self.answer_frame.pack(fill="x", padx=24, pady=(6, 10))
         self.revealed = True
         self.reveal_button.configure(state="disabled")
@@ -454,9 +747,9 @@ class MemoryPalacePage(ttk.Frame):
     """记忆宫殿页面。由 ``main`` 建一次，之后靠 pack / pack_forget 切换。"""
 
     def __init__(self, master, db, *, app_title="个人系统",
-                 on_status=None,
-                 todo_hook=None, markdown=None, palette=MAIN_PALETTE,
-                 typography=TYPOGRAPHY):
+                 on_status=None, todo_hook=None, markdown=None,
+                 images=None, image_preview_cls=None,
+                 palette=MAIN_PALETTE, typography=TYPOGRAPHY):
         super().__init__(master)
         self.db = db
         self.app_title = app_title
@@ -465,6 +758,10 @@ class MemoryPalacePage(ttk.Frame):
         self.todo_hook = todo_hook
         # markdown_view 模块，用来渲染教学卡；没注入就退化成纯文本
         self.markdown = markdown
+        # 图片能力：`images` 是路径/落盘工具，`image_preview_cls` 是账号中心那套预览组件
+        # —— 都由 main 注入，本模块不 import main。
+        self.images = images
+        self.image_preview_cls = image_preview_cls
         self.palette = palette
         self.typography = typography
 
@@ -710,14 +1007,23 @@ class MemoryPalacePage(ttk.Frame):
                  wraplength=520, justify="left").pack(side="left", anchor="w")
         create_flat_action_button(head, "导入到宫殿…",
                                   self.import_selected_bank).pack(side="right")
-        self.bank_item_tree = ttk.Treeview(right, columns=("seq", "q", "a"),
+        create_flat_action_button(head, "看详情",
+                                  self.open_selected_bank_item).pack(side="right", padx=6)
+        self.bank_item_hint_var = tk.StringVar(
+            value="双击某一条看完整内容（答案 / 位置与四周）—— 表格装不下那两段字，"
+                  "打开的窗口里还能贴自己在游戏里截的图。")
+        tk.Label(right, textvariable=self.bank_item_hint_var, bg=self.palette.bg,
+                 fg=self.palette.text_muted, font=self.typography.caption,
+                 wraplength=560, justify="left").pack(anchor="w", pady=(8, 0))
+        self.bank_item_tree = ttk.Treeview(right, columns=("seq", "q", "a", "extra"),
                                            show="headings", height=16,
                                            selectmode="browse")
-        for key, text, width in (("seq", "序", 44), ("q", "题目", 260),
-                                 ("a", "答案", 220)):
+        for key, text, width in (("seq", "序", 44), ("q", "题目", 236),
+                                 ("a", "答案", 200), ("extra", "资料", 92)):
             self.bank_item_tree.heading(key, text=text, anchor="w")
             self.bank_item_tree.column(key, width=width, anchor="w")
         self.bank_item_tree.pack(fill="both", expand=True, pady=(6, 0))
+        self.bank_item_tree.bind("<Double-1>", self._on_bank_item_open)
 
     # ---- 视图 6：打卡统计 ---------------------------------------------
     def _build_stats_view(self, parent):
@@ -995,8 +1301,22 @@ class MemoryPalacePage(ttk.Frame):
         self.selected_bank_id = int(selection[0].split(":")[1])
         self._reload_bank_items()
 
+    @staticmethod
+    def _media_label(entry) -> str:
+        """列表里只提示「有没有更多内容」，正文留给双击后的弹窗。"""
+        has_place = bool(str(entry.get("detail") or "").strip())
+        has_image = bool(str(entry.get("images") or "").strip())
+        if has_place and has_image:
+            return "位置 · 图"
+        if has_place:
+            return "位置"
+        if has_image:
+            return "图"
+        return "—"
+
     def _reload_bank_items(self):
-        self.bank_item_tree.delete(*self.bank_item_tree.get_children())
+        tree = self.bank_item_tree
+        tree.delete(*tree.get_children())
         if self.selected_bank_id is None:
             self.bank_desc_var.set("选一个题库看看内容。")
             return
@@ -1004,8 +1324,42 @@ class MemoryPalacePage(ttk.Frame):
         if bank:
             self.bank_desc_var.set(str(bank["description"]))
         for entry in self.db.list_bank_items(self.selected_bank_id):
-            self.bank_item_tree.insert(
-                "", "end", values=(entry["seq"], entry["question"], entry["answer"]))
+            tree.insert("", "end", iid=f"bitem:{entry['id']}",
+                        values=(entry["seq"], entry["question"], entry["answer"],
+                                self._media_label(entry)))
+
+    def open_selected_bank_item(self):
+        """「看详情」按钮：与双击同一个动作，方便用键盘的人。"""
+        if not self.bank_item_tree.selection():
+            messagebox.showinfo(self.app_title,
+                                "先在右边选一条，或者直接双击它。", parent=self)
+            return
+        self._on_bank_item_open()
+
+    def _on_bank_item_open(self, _event=None):
+        """双击题库某一条 → 打开完整内容（题目 / 答案 / 位置与四周 / 实景图）。"""
+        selection = self.bank_item_tree.selection()
+        if not selection:
+            return "break"
+        try:
+            item_id = int(str(selection[0]).split(":")[1])
+        except (IndexError, ValueError):
+            return "break"
+        item = self.db.get_bank_item(item_id)
+        if not item:
+            return "break"
+        BankItemDialog(self, app_title=self.app_title, item=item,
+                       images=self.images, image_preview_cls=self.image_preview_cls,
+                       on_save=self._save_bank_item)
+        return "break"
+
+    def _save_bank_item(self, item_id, detail, images) -> bool:
+        """只写用户自己的两栏（位置笔记 / 截图）—— 题干答案由种子决定。"""
+        if not self.db.update_bank_item(item_id, detail=detail, images=images):
+            return False
+        self._reload_bank_items()
+        self._status("已保存这一条的位置笔记与截图。")
+        return True
 
     # -- 视图 6 ---------------------------------------------------------
     def _reload_stats(self):
@@ -1216,7 +1570,9 @@ class MemoryPalacePage(ttk.Frame):
                             palaces=self.db.list_palaces(),
                             loci=self._all_loci(),
                             initial={"palace_id": self.current_palace_id or 0},
-                            default_locus_id=self.current_locus_id or 0)
+                            default_locus_id=self.current_locus_id or 0,
+                            images=self.images,
+                            image_preview_cls=self.image_preview_cls)
         if not dialog.result:
             return
         self.db.add_item(**dialog.result)
@@ -1231,7 +1587,9 @@ class MemoryPalacePage(ttk.Frame):
             return
         dialog = ItemDialog(self, "编辑记忆项", app_title=self.app_title,
                             palaces=self.db.list_palaces(),
-                            loci=self._all_loci(), initial=item)
+                            loci=self._all_loci(), initial=item,
+                            images=self.images,
+                            image_preview_cls=self.image_preview_cls)
         if not dialog.result:
             return
         self.db.update_item(self.selected_item_id, **dialog.result)
@@ -1271,7 +1629,7 @@ class MemoryPalacePage(ttk.Frame):
             return
         self.walk_window = WalkSession(
             self, items, app_title=self.app_title, title="走一遍 · 记忆宫殿",
-            palette=self.palette, typography=self.typography,
+            palette=self.palette, typography=self.typography, images=self.images,
             on_grade=self._grade_item, on_finish=self._finish_walk,
             on_close=lambda _summary: self._after_walk_closed())
 
