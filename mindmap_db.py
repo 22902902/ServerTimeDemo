@@ -40,6 +40,9 @@ import training_core as tc
 
 logger = logging.getLogger(__name__)
 
+# train_settings 里存「用哪套间隔重复算法」的键
+SETTING_ALGORITHM = "srs_algorithm"
+
 DEFAULT_MAP_TITLE = "未命名导图"
 
 
@@ -111,7 +114,12 @@ class MindmapDB:
                     next_review_at TEXT NOT NULL DEFAULT '',
                     review_count   INTEGER NOT NULL DEFAULT 0,
                     marked_at      TEXT NOT NULL DEFAULT '',
-                    updated_at     TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                    updated_at     TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                    last_review_at TEXT NOT NULL DEFAULT '',
+                    ease_factor    REAL NOT NULL DEFAULT 2.5,
+                    reps           INTEGER NOT NULL DEFAULT 0,
+                    stability      REAL NOT NULL DEFAULT 0,
+                    difficulty     REAL NOT NULL DEFAULT 5
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_mindmap_progress_due "
@@ -145,6 +153,39 @@ class MindmapDB:
                     created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
                 )
             """)
+
+            # 训练参数（key/value）：目前只有「用哪套间隔重复算法」
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS train_settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL DEFAULT ''
+                )
+            """)
+
+            # 老库没有的列在这里补上（新库建表时已经有了，这里是空操作）
+            self._ensure_train_columns(conn)
+
+    def _ensure_train_columns(self, conn) -> None:
+        """缺列就 ``ALTER TABLE ADD COLUMN``；**不动存量数据、不重建表**。
+
+        mindmap 的表从 v1.16.0 起就没改过 schema，所以这里原本**没有**迁移机制 ——
+        加「多算法 SRS」才需要它。``CREATE TABLE IF NOT EXISTS`` 只对新库生效，
+        用户 exe 里那份 db 早就建好了，不补这一步新列会**静默缺失**。
+        """
+        ddls = {
+            "last_review_at": "TEXT NOT NULL DEFAULT ''",
+            "ease_factor": "REAL NOT NULL DEFAULT 2.5",
+            "reps": "INTEGER NOT NULL DEFAULT 0",
+            "stability": "REAL NOT NULL DEFAULT 0",
+            "difficulty": "REAL NOT NULL DEFAULT 5",
+        }
+        have = {str(row["name"])
+                for row in conn.execute("PRAGMA table_info(mindmap_progress)")}
+        for column, ddl in ddls.items():
+            if column in have:
+                continue
+            conn.execute("ALTER TABLE mindmap_progress ADD COLUMN {} {}".format(
+                column, ddl))
 
     # ==================================================================
     # 模板（内置，安装时灌一遍；幂等）
@@ -688,6 +729,33 @@ class MindmapDB:
                 conn.execute("UPDATE mindmap_nodes SET seq = ? WHERE id = ?", (seq, node))
 
     # ==================================================================
+    # 训练参数（key/value）
+    # ==================================================================
+    def get_setting(self, key, default="") -> str:
+        """读一个训练参数。**没有就返回 default**，不建行。"""
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM train_settings WHERE key = ?",
+                               (str(key),)).fetchone()
+        return str(row["value"]) if row else str(default)
+
+    def set_setting(self, key, value) -> None:
+        """写一个训练参数（**幂等 upsert**）。"""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO train_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(key), str(value)))
+
+    def get_algorithm(self) -> str:
+        """当前用哪套间隔重复算法（``stairs`` / ``sm2`` / ``fsrs``）。"""
+        return tc.normalize_algorithm(self.get_setting(SETTING_ALGORITHM))
+
+    def set_algorithm(self, value) -> str:
+        algorithm = tc.normalize_algorithm(value)
+        self.set_setting(SETTING_ALGORITHM, algorithm)
+        return algorithm
+
+    # ==================================================================
     # 进度 + 复习（key = map_id，因为盲画的对象是整张图）
     # ==================================================================
     def get_progress(self, map_id) -> dict:
@@ -700,7 +768,9 @@ class MindmapDB:
         return {
             "map_id": int(map_id), "mastery": tc.MASTERY_NEW, "correct_streak": 0,
             "interval_days": 0, "next_review_at": "", "review_count": 0,
-            "marked_at": "", "updated_at": "",
+            "marked_at": "", "updated_at": "", "last_review_at": "",
+            "ease_factor": tc.SM2_DEFAULT_EASE, "reps": 0,
+            "stability": 0.0, "difficulty": tc.FSRS_DIFFICULTY_DEFAULT,
         }
 
     def ensure_progress(self, map_id) -> dict:
@@ -736,6 +806,13 @@ class MindmapDB:
             interval = 0
             next_at = ""
         with self._connect() as conn:
+            if value <= tc.MASTERY_NEW:
+                # 「取消已学」= 这张图要重新养：算法参数一并归零，免得下次拿旧稳定度算间隔
+                conn.execute(
+                    "UPDATE mindmap_progress SET ease_factor = ?, reps = 0, "
+                    "stability = 0, difficulty = ?, last_review_at = '' "
+                    "WHERE map_id = ?",
+                    (tc.SM2_DEFAULT_EASE, tc.FSRS_DIFFICULTY_DEFAULT, mid))
             conn.execute(
                 """
                 INSERT INTO mindmap_progress (map_id, mastery, correct_streak,
@@ -757,28 +834,46 @@ class MindmapDB:
         mid = int(map_id)
         anchor = tc.parse_date(today) or date.today()
         current = self.get_progress(mid)
-        state = tc.review_next_state(
-            current.get("mastery", tc.MASTERY_NEW),
-            current.get("correct_streak", 0),
-            current.get("interval_days", 0),
-            feedback)
+        # FSRS 要看「距上次复习过了几天」—— 进度行的 updated_at 就是上次动它的时刻
+        last_seen = (tc.parse_date(current.get("last_review_at"))
+                     or tc.parse_date(current.get("updated_at")))
+        state = tc.advance_review(
+            feedback,
+            algorithm=self.get_algorithm(),
+            mastery=current.get("mastery", tc.MASTERY_NEW),
+            streak=current.get("correct_streak", 0),
+            interval_days=current.get("interval_days", 0),
+            ease=current.get("ease_factor", tc.SM2_DEFAULT_EASE),
+            reps=current.get("reps", 0),
+            stability=current.get("stability", 0.0),
+            difficulty=current.get("difficulty", 0.0),
+            elapsed_days=(anchor - last_seen).days if last_seen else 0)
         next_at = (anchor + timedelta(days=int(state["interval_days"]))).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO mindmap_progress (map_id, mastery, correct_streak,
-                    interval_days, next_review_at, review_count, marked_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    interval_days, next_review_at, review_count, marked_at, updated_at,
+                    last_review_at, ease_factor, reps, stability, difficulty)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(map_id) DO UPDATE SET
                     mastery = excluded.mastery,
                     correct_streak = excluded.correct_streak,
                     interval_days = excluded.interval_days,
                     next_review_at = excluded.next_review_at,
                     review_count = mindmap_progress.review_count + 1,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    last_review_at = excluded.last_review_at,
+                    ease_factor = excluded.ease_factor,
+                    reps = excluded.reps,
+                    stability = excluded.stability,
+                    difficulty = excluded.difficulty
                 """,
                 (mid, int(state["mastery"]), int(state["correct_streak"]),
-                 int(state["interval_days"]), next_at, _now(), _now()))
+                 int(state["interval_days"]), next_at, _now(), _now(),
+                 anchor.isoformat(),
+                 float(state["ease_factor"]), int(state["reps"]),
+                 float(state["stability"]), float(state["difficulty"])))
             conn.execute(
                 "INSERT INTO mindmap_reviews (map_id, review_date, feedback, "
                 "mastery_after, branch_hit, branch_total, created_at) "
@@ -787,10 +882,15 @@ class MindmapDB:
                  int(branch_hit or 0), int(branch_total or 0), _now()))
         return {
             "map_id": mid, "feedback": str(feedback),
+            "algorithm": str(state.get("algorithm", tc.DEFAULT_ALGORITHM)),
             "mastery": int(state["mastery"]),
             "correct_streak": int(state["correct_streak"]),
             "interval_days": int(state["interval_days"]),
             "next_review_at": next_at,
+            "ease_factor": float(state["ease_factor"]),
+            "reps": int(state["reps"]),
+            "stability": float(state["stability"]),
+            "difficulty": float(state["difficulty"]),
         }
 
     def list_reviews(self, *, map_id=None, since=None, until=None,

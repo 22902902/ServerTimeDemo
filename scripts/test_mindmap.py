@@ -50,6 +50,7 @@ L. 折叠与搬运    真节点 / (None) 不匹配 / apply_collapsed 往返 / �
 M. 页面契约      页面用到的每个 db 入口与 ml 函数都存在、行字段齐全
 N. 待办桥        盲画措辞 / 不被顺延 / 当天幂等 / 与记忆宫殿互不干扰
 O. 游戏训练包    数独 / CS2 / 象棋 三张知识树：分类 / 分支数 / 往返一致 / 能建图
+P. SRS 三算法    与记忆宫殿同款内核（同串间隔）/ 各存各的设置 / FSRS 同量级
 
 用法：
     python scripts/test_mindmap.py
@@ -1360,6 +1361,103 @@ def test_game_maps() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# P. SRS 三算法（导图侧：与记忆宫殿同款内核，各存各的设置）
+# ══════════════════════════════════════════════════════════════════════════
+def _mm_seq(algorithm, feedbacks, start="2026-01-01"):
+    """建一张空导图、按 **真实节奏** 连着复习，返回 ``(db, map_id, 间隔序列)``。
+
+    FSRS 的间隔取决于「距上次复习过了几天」；today 全传同一天的话 elapsed 恒为
+    0，间隔退化成常数 —— 退化之后照样「有值、不越界、不报错」，是典型的假绿。
+    """
+    from datetime import date, timedelta
+
+    db = bare("srs_%s" % algorithm)
+    db.set_algorithm(algorithm)
+    map_id = db.add_map("要画的")
+    day = date.fromisoformat(start)
+    seq = []
+    for feedback in feedbacks:
+        result = db.record_review(map_id, feedback, today=day.isoformat())
+        seq.append(int(result["interval_days"]))
+        day = day + timedelta(days=max(1, int(result["interval_days"])))
+    return db, map_id, seq
+
+
+def test_srs_algorithms() -> None:
+    section("[P] SRS 三算法（导图侧：同款内核，各存各的设置）")
+    import sqlite3
+    from datetime import date, timedelta
+
+    six = ("known",) * 6
+    _, _, stairs_seq = _mm_seq("stairs", six)
+    check("阶梯：连对六次 = 1/3/7/15/30/60",
+          stairs_seq == [1, 3, 7, 15, 30, 60], stairs_seq)
+    _, _, sm2_seq = _mm_seq("sm2", six)
+    check("SM-2：连对六次 = 1/6/16/45/130/390",
+          sm2_seq == [1, 6, 16, 45, 130, 390], sm2_seq)
+    _, _, fsrs_seq = _mm_seq("fsrs", six)
+    check("FSRS：连对六次 = 4/15/49/146/393/973",
+          fsrs_seq == [4, 15, 49, 146, 393, 973], fsrs_seq)
+    check("FSRS 第 4 次别飞到 200 天以上（D0 公式错配就是这么坏的）",
+          fsrs_seq[3] < 200, fsrs_seq)
+
+    # -- 共用内核的直接证据：同一串反馈，导图与记忆项跑出同一串间隔 ------
+    # 只比常量是不够的：哪天有人给导图换了一套参数，这里才会红。
+    md = MemoryPalaceDB(Path(tempfile.mkdtemp(prefix="mm_srspar_")) / "a.db")
+    _TMP.append(Path(md.db_path).parent)
+    md.set_algorithm("fsrs")
+    pid = md.add_palace("路线")
+    lid = md.add_locus(pid, "桩")
+    iid = md.add_item(front="要记的", palace_id=pid, locus_id=lid)
+    day = date.fromisoformat("2026-01-01")
+    palace_seq = []
+    for _ in range(4):
+        result = md.record_review(iid, "known", today=day.isoformat())
+        palace_seq.append(int(result["interval_days"]))
+        day = day + timedelta(days=max(1, int(result["interval_days"])))
+    check("导图与记忆项跑出同一串 FSRS 间隔（共用内核的证据）",
+          palace_seq == fsrs_seq[:4], (palace_seq, fsrs_seq[:4]))
+
+    # -- 设置各存各的，切导图这边的算法不该动到记忆宫殿那边 --------------
+    db, map_id, _ = _mm_seq("fsrs", ("known", "known"))
+    check("认不出来的算法名写不进设置（回落 stairs）",
+          db.set_algorithm("nonsense") == "stairs"
+          and db.get_algorithm() == "stairs")
+    check("两边的算法选择互不干扰（各一张 train_settings）",
+          db.get_algorithm() == "stairs" and md.get_algorithm() == "fsrs",
+          (db.get_algorithm(), md.get_algorithm()))
+    row = db.get_progress(map_id)
+    check("last_review_at 落库（elapsed 从它算，不靠 updated_at 猜墙钟）",
+          str(row.get("last_review_at", "")).strip() != "",
+          row.get("last_review_at"))
+
+    # -- 取消「已学」要把算法参数一并归零 ------------------------------
+    db2, map2, _ = _mm_seq("fsrs", ("known", "known", "known"))
+    check("养过之后稳定度确实涨了（不然下一条断言是空转）",
+          float(db2.get_progress(map2)["stability"]) > 0,
+          db2.get_progress(map2)["stability"])
+    db2.set_mastery(map2, 0)
+    clean = db2.get_progress(map2)
+    check("取消已学：稳定度 / 次数 / 难度系数一并归零，排期清空",
+          float(clean["stability"]) == 0.0 and int(clean["reps"]) == 0
+          and float(clean["ease_factor"]) == tc.SM2_DEFAULT_EASE
+          and str(clean["next_review_at"]) == "",
+          {k: clean[k] for k in ("stability", "reps", "ease_factor",
+                                 "next_review_at")})
+
+    # -- 列：三个算法要用的列一个都不能少 ------------------------------
+    with sqlite3.connect(db2.db_path) as conn:
+        cols = {str(r[1]) for r in
+                conn.execute("PRAGMA table_info(mindmap_progress)")}
+        tables = {str(r[0]) for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    need = {"ease_factor", "reps", "stability", "difficulty", "last_review_at"}
+    check("mindmap_progress 有 SRS 三算法要用的全部列", need <= cols, sorted(cols))
+    check("train_settings 表存在（算法选择要有地方落）",
+          "train_settings" in tables, sorted(tables))
+
+
 def main_test() -> None:
     test_srs_parity()
     test_seed()
@@ -1374,6 +1472,7 @@ def main_test() -> None:
     test_blind()
     test_collapse()
     test_game_maps()
+    test_srs_algorithms()
     test_page_contracts()
     test_todo_bridge()
 

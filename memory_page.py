@@ -1040,6 +1040,23 @@ class MemoryPalacePage(ttk.Frame):
         create_metric_card(cards, "正确率", self.stats_accuracy_var,
                            "30 天内复习「记得」的比例。").pack(side="left", padx=10)
 
+        # 间隔重复算法是**全局训练设置**（不是某一项的属性），所以放在统计页
+        create_ttk_section_header(host, "间隔重复算法").pack(
+            anchor="w", pady=(16, 6))
+        algo_bar = tk.Frame(host, bg=self.palette.bg)
+        algo_bar.pack(anchor="w", fill="x")
+        self.algorithm_var = tk.StringVar(value=tc.DEFAULT_ALGORITHM)
+        self.algorithm_box = ttk.Combobox(
+            algo_bar, textvariable=self.algorithm_var, state="readonly",
+            values=[label for _key, label in tc.ALGORITHM_CHOICES], width=16)
+        self.algorithm_box.pack(side="left")
+        self.algorithm_box.bind("<<ComboboxSelected>>",
+                                lambda _e: self._on_algorithm_change())
+        self.algorithm_hint = tk.Label(
+            algo_bar, text="", bg=self.palette.bg, fg=self.palette.text_muted,
+            font=self.typography.caption, anchor="w")
+        self.algorithm_hint.pack(side="left", padx=(10, 0))
+
         create_ttk_section_header(host, "打卡日历（按周一对齐）").pack(
             anchor="w", pady=(16, 6))
         self.calendar_host = tk.Frame(host, bg=self.palette.bg)
@@ -1362,7 +1379,25 @@ class MemoryPalacePage(ttk.Frame):
         return True
 
     # -- 视图 6 ---------------------------------------------------------
+    # -- 间隔重复算法（全局训练设置） ----------------------------------
+    def _sync_algorithm(self):
+        """把库里的算法选择同步进下拉框。"""
+        key = self.db.get_algorithm()
+        self.algorithm_var.set(tc.algorithm_label(key))
+        self.algorithm_hint.config(text=tc.ALGORITHM_HINTS.get(key, ""))
+
+    def _on_algorithm_change(self):
+        """切换间隔重复算法。**只改设置**：已经养出来的参数原样留着。"""
+        key = tc.ALGORITHM_BY_LABEL.get(self.algorithm_var.get().strip())
+        if not key:
+            # 下拉框里出现了不认识的值：按「什么都没选」处理，别把空串写进库
+            self._sync_algorithm()
+            return
+        self.db.set_algorithm(key)
+        self.algorithm_hint.config(text=tc.ALGORITHM_HINTS.get(key, ""))
+
     def _reload_stats(self):
+        self._sync_algorithm()
         stats = self.db.stats()
         self.stats_minutes_var.set(str(stats["minutes"]))
         self.stats_days_var.set(str(stats["days"]))

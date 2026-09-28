@@ -42,6 +42,7 @@ L. 页面契约      页面用到的每个数据入口都存在、字段齐全
 M. 待办桥        只在点击时建 / 当天幂等 / 不被顺延 / 两个模块共用一套规则
 N. 游戏训练包    数独 + CS2 七图 + 象棋，九套「宫殿 + 题库」逐条对齐 / 走一遍顺序 / 幂等
 O. 题库详情      detail / images 两列（新库建表 + 老库 ALTER）/ 重灌不覆盖用户截图 / 只放行两栏
+P. SRS 三算法    阶梯回归不动 / SM-2 / FSRS（D0 公式错配会让间隔飞掉）/ 切换算法不毁数据
 
 用法：
     python scripts/test_memory.py
@@ -798,11 +799,21 @@ def test_page_contracts() -> None:
         "list_items count_items categories due_items due_count due_count "
         "walk_order record_review list_reviews mastery_distribution "
         "checkin checkin_dates autofill_today new_today stats "
+        "get_algorithm set_algorithm "
         "list_banks get_bank list_bank_items get_bank_by_code import_bank "
         "list_cards get_card"
     ).split()
     missing = [name for name in used if not callable(getattr(db, name, None))]
     check("页面用到的数据入口都存在", not missing, missing)
+    # 界面要显示算法中文名 + 一句说明；ALGORITHM_CHOICES 加了新算法而忘了补
+    # HINTS，下拉框旁边就是一片空白 —— 这种错不红，只是「看起来没做完」。
+    check("每套算法都有一句说明文案",
+          set(tc.ALGORITHM_HINTS) == {key for key, _label in tc.ALGORITHM_CHOICES},
+          sorted(tc.ALGORITHM_HINTS))
+    check("中文名能反查回算法键（下拉框靠它落库）",
+          all(tc.ALGORITHM_BY_LABEL[label] == key
+              for key, label in tc.ALGORITHM_CHOICES),
+          tc.ALGORITHM_BY_LABEL)
 
     pid = db.import_template(memory_seed.PALACE_TEMPLATES[0]["code"])
     item = db.list_items(palace_id=pid)[0] if db.count_items(palace_id=pid) else None
@@ -1215,6 +1226,143 @@ def test_bank_detail_and_images() -> None:
           (bare["detail"], bare["images"]))
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# P. SRS 三算法（阶梯 / SM-2 / FSRS）
+# ══════════════════════════════════════════════════════════════════════════
+def _srs_seq(algorithm, feedbacks, start="2026-01-01"):
+    """建一个空库、按 **真实节奏** 连着复习，返回 ``(db, item_id, 间隔序列)``。
+
+    「真实节奏」= 每次都先等够间隔再答下一题。不这么写 FSRS 根本测不出来：
+    它的间隔取决于「距上次复习过了几天」，一股脑把 today 传成同一天，
+    elapsed 恒为 0，间隔就退化成一个常数 —— **退化之后依然「有值、不越界、
+    不报错」**，是典型的假绿，光看返回值根本发现不了。
+    """
+    from datetime import date, timedelta
+
+    db = fresh("srs_%s" % algorithm)
+    db.set_algorithm(algorithm)
+    item_id = db.add_item(front="正面", back="背面")
+    day = date.fromisoformat(start)
+    seq = []
+    for feedback in feedbacks:
+        result = db.record_review(item_id, feedback, today=day.isoformat())
+        seq.append(int(result["interval_days"]))
+        day = day + timedelta(days=max(1, int(result["interval_days"])))
+    return db, item_id, seq
+
+
+def test_srs_algorithms() -> None:
+    section("[P] SRS 三算法（阶梯 / SM-2 / FSRS）")
+
+    # -- 1. 算法名归一化：认不出来的一律回落，不许抛异常 ------------------
+    check("三种算法名原样通过",
+          tuple(tc.normalize_algorithm(n) for n in ("stairs", "sm2", "fsrs"))
+          == ("stairs", "sm2", "fsrs"))
+    check("不认识的算法名回落 stairs（老库这一行本来是空的）",
+          tc.normalize_algorithm("bogus") == tc.DEFAULT_ALGORITHM == "stairs"
+          and tc.normalize_algorithm("") == "stairs"
+          and tc.normalize_algorithm(None) == "stairs")
+    check("每个算法都有中文名（下拉框不许出现空白项）",
+          all(str(tc.algorithm_label(n)).strip()
+              for n in ("stairs", "sm2", "fsrs")))
+
+    # -- 2. 三算法各自的间隔序列 ----------------------------------------
+    six = ("known",) * 6
+    _, _, stairs_seq = _srs_seq("stairs", six)
+    check("阶梯：连对六次 = 1/3/7/15/30/60（新算法不许改坏老行为）",
+          stairs_seq == [1, 3, 7, 15, 30, 60], stairs_seq)
+
+    _, _, sm2_seq = _srs_seq("sm2", six)
+    check("SM-2：连对六次 = 1/6/16/45/130/390",
+          sm2_seq == [1, 6, 16, 45, 130, 390], sm2_seq)
+
+    _, _, fsrs_seq = _srs_seq("fsrs", six)
+    check("FSRS：连对六次 = 4/15/49/146/393/973（与 Anki 同量级）",
+          fsrs_seq == [4, 15, 49, 146, 393, 973], fsrs_seq)
+    # 这条是 FSRS 的专属防线：当初把 FSRS-5 的指数式初版难度配到 4.5 的权重上，
+    # D0(3) 算成 -5.5 被夹到下限 1.0（「熟练」反倒成了最简单的一档），(11-D) 恒
+    # 为 10，间隔跑成 4/23/109/437 天 —— 界面上一切正常，只是这张卡从此再也不
+    # 进「今日训练」。
+    check("FSRS 第 4 次别飞到 200 天以上（D0 公式错配就是这么坏的）",
+          fsrs_seq[3] < 200, fsrs_seq)
+    check("三种算法的首次间隔都不超过 7 天（新卡不能一上来就排到下个月）",
+          max(seq[0] for seq in (stairs_seq, sm2_seq, fsrs_seq)) <= 7,
+          (stairs_seq[0], sm2_seq[0], fsrs_seq[0]))
+
+    # -- 3. FSRS 的内部量：可解释性本身就是验收标准 ----------------------
+    check("初版难度：忘了 > 模糊 > 熟练 > 太简单（方向不能反）",
+          tc.fsrs_initial_difficulty(1) > tc.fsrs_initial_difficulty(2)
+          > tc.fsrs_initial_difficulty(3) > tc.fsrs_initial_difficulty(4),
+          [round(tc.fsrs_initial_difficulty(g), 3) for g in (1, 2, 3, 4)])
+    check("熟练的初版难度落在中段而不是被夹到下限（夹了就是公式错配）",
+          4.0 < tc.fsrs_initial_difficulty(3) < 7.0,
+          tc.fsrs_initial_difficulty(3))
+    check("稳定度的定义：过了 S 天还记得的概率正好 90%",
+          abs(tc.fsrs_retrievability(10, 10) - 0.9) < 0.005,
+          tc.fsrs_retrievability(10, 10))
+    check("目标保持率 0.9 时，间隔就等于稳定度（这是它可解释的地方）",
+          tc.fsrs_interval_for(10) == 10 and tc.fsrs_interval_for(100) == 100,
+          (tc.fsrs_interval_for(10), tc.fsrs_interval_for(100)))
+
+    # -- 4. 距上次复习的天数真的参与了计算 ------------------------------
+    # 同一张稳定度 3.71 的卡：等 1 天就来复习 vs 等 10 天再来，间隔必须不同，
+    # 而且**记得越牢（来得越早）涨得越少** —— FSRS 的灵魂就在这条上。
+    early = tc.fsrs_next_state(0, 0, 3.7145, 5.1618, 1, "known")["interval_days"]
+    late = tc.fsrs_next_state(0, 0, 3.7145, 5.1618, 10, "known")["interval_days"]
+    check("早复习涨得少、晚复习涨得多（elapsed 真的进了公式）",
+          early < late, (early, late))
+    db, item_id, first = _srs_seq("fsrs", ("known",))
+    row = db.get_progress(item_id)
+    check("last_review_at 落库（elapsed 从它算，不靠 updated_at 猜墙钟）",
+          str(row.get("last_review_at", "")).strip() != "",
+          row.get("last_review_at"))
+    again = db.record_review(item_id, "known", today="2026-01-02")
+    check("隔一天再答不会算出跟上次一样的间隔（elapsed 不是恒 0）",
+          int(again["interval_days"]) != int(first[0]),
+          (first[0], again["interval_days"]))
+
+    # -- 5. 设置层：切算法只改设置，不碰已经养出来的参数 ----------------
+    db.set_algorithm("fsrs")
+    before = db.get_progress(item_id)
+    db.set_algorithm("stairs")
+    after = db.get_progress(item_id)
+    check("切算法不动已有进度行（养出来的稳定度不会凭空丢）",
+          float(after["stability"]) == float(before["stability"])
+          and float(after["ease_factor"]) == float(before["ease_factor"]),
+          (before["stability"], after["stability"]))
+    check("认不出来的算法名写不进设置（回落 stairs）",
+          db.set_algorithm("nonsense") == "stairs"
+          and db.get_algorithm() == "stairs")
+
+    # -- 6. 「忘了」在三种算法里都要把间隔打回去 ------------------------
+    # FSRS 不会像另两个那样直接归 1 天（它只降稳定度），所以判「比上次短」。
+    for algorithm in ("stairs", "sm2", "fsrs"):
+        _, _, seq = _srs_seq(algorithm, ("known", "known", "forgot"))
+        check(f"{algorithm}：忘了之后间隔必须比上次短", seq[-1] < seq[-2], seq)
+
+    # -- 7. 取消「已学」要把算法参数一并归零 ----------------------------
+    db2, item2, _ = _srs_seq("fsrs", ("known", "known", "known"))
+    dirty = db2.get_progress(item2)
+    check("养过之后稳定度确实涨了（不然下一条断言是空转）",
+          float(dirty["stability"]) > 0, dirty["stability"])
+    db2.set_mastery(item2, 0)
+    clean = db2.get_progress(item2)
+    check("取消已学：稳定度 / 次数 / 难度系数一并归零，排期清空",
+          float(clean["stability"]) == 0.0 and int(clean["reps"]) == 0
+          and float(clean["ease_factor"]) == tc.SM2_DEFAULT_EASE
+          and str(clean["next_review_at"]) == "",
+          {k: clean[k] for k in ("stability", "reps", "ease_factor",
+                                 "next_review_at")})
+
+    # -- 8. 新库的列：三算法要用的列一个都不能少 ------------------------
+    cols = _table_columns(db2.db_path)
+    need = {"ease_factor", "reps", "stability", "difficulty", "last_review_at"}
+    check("memory_progress 有 SRS 三算法要用的全部列",
+          need <= cols["memory_progress"], sorted(cols["memory_progress"]))
+    check("train_settings 表存在（算法选择要有地方落）",
+          "train_settings" in cols, sorted(cols))
+
+
 def main_test() -> None:
     # 顺序 = 小节编号顺序（原先 [N] 排在 [K] 前面，读输出时要来回找）
     test_core_matches_excel()
@@ -1232,6 +1380,7 @@ def main_test() -> None:
     test_todo_bridge()
     test_game_packs()
     test_bank_detail_and_images()
+    test_srs_algorithms()
 
 
 if __name__ == "__main__":

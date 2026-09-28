@@ -879,6 +879,62 @@ def test_bank_detail() -> None:
         root.destroy()
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# J. 间隔重复算法（界面上够得着才算做完）
+# ════════════════════════════════════════════════════════════════════════════
+def test_algorithm_selector() -> None:
+    section("[J] 间隔重复算法（下拉框要够得着、切了要落库）")
+    db = cluster("algo")
+    root, page = build_page(db)
+    try:
+        page.show_view(VIEW_STATS)
+        settle(root, 3)
+        box = getattr(page, "algorithm_box", None)
+        check("统计页有算法下拉框", box is not None)
+        if box is None:
+            return
+        # 「控件不见了」多半是被 expand 区饿死：建了不等于看得见
+        check("下拉框真的被映射出来（不是只 new 了不 pack）",
+              bool(box.winfo_ismapped()) and int(box.winfo_width()) > 40,
+              (box.winfo_ismapped(), box.winfo_width(), box.winfo_height()))
+        check("三套算法都在下拉框里",
+              tuple(box.cget("values"))
+              == tuple(label for _key, label in tc.ALGORITHM_CHOICES),
+              box.cget("values"))
+        check("默认显示阶梯，旁边有一句说明",
+              page.algorithm_var.get() == tc.algorithm_label(tc.DEFAULT_ALGORITHM)
+              and str(page.algorithm_hint.cget("text")).strip() != "",
+              (page.algorithm_var.get(), page.algorithm_hint.cget("text")))
+
+        page.algorithm_var.set(tc.algorithm_label(tc.ALGORITHM_FSRS))
+        page._on_algorithm_change()
+        settle(root, 2)
+        check("选了 FSRS 就写进库（界面够得着才叫做完）",
+              db.get_algorithm() == tc.ALGORITHM_FSRS, db.get_algorithm())
+        check("说明文案跟着换",
+              "还记得的概率" in str(page.algorithm_hint.cget("text")),
+              page.algorithm_hint.cget("text"))
+
+        page.refresh()
+        settle(root, 2)
+        check("刷新后还是 FSRS（不是每次都弹回默认）",
+              page.algorithm_var.get() == tc.algorithm_label(tc.ALGORITHM_FSRS)
+              and db.get_algorithm() == tc.ALGORITHM_FSRS,
+              page.algorithm_var.get())
+
+        # 下拉框里出现认不出来的值：按「没选」处理，不许把空串写进库
+        page.algorithm_var.set("不存在的算法")
+        page._on_algorithm_change()
+        settle(root, 2)
+        check("认不出来的值不会把库写坏（回落显示当前值）",
+              db.get_algorithm() == tc.ALGORITHM_FSRS
+              and page.algorithm_var.get() == tc.algorithm_label(
+                  tc.ALGORITHM_FSRS),
+              (db.get_algorithm(), page.algorithm_var.get()))
+    finally:
+        root.destroy()
+
+
 def main_test() -> None:
     test_skeleton()
     test_nav()
@@ -889,6 +945,7 @@ def main_test() -> None:
     test_todo_hook()
     test_discipline()
     test_bank_detail()
+    test_algorithm_selector()
 
 
 if __name__ == "__main__":

@@ -38,6 +38,9 @@ import training_core as tc
 
 logger = logging.getLogger(__name__)
 
+# train_settings 里存「用哪套间隔重复算法」的键
+SETTING_ALGORITHM = "srs_algorithm"
+
 PALACE_KINDS = ("住宅", "通勤", "虚拟", "自定义")
 
 DEFAULT_PALACE_NAME = "我的记忆宫殿"
@@ -132,7 +135,12 @@ class MemoryPalaceDB:
                     next_review_at TEXT NOT NULL DEFAULT '',
                     review_count   INTEGER NOT NULL DEFAULT 0,
                     marked_at      TEXT NOT NULL DEFAULT '',
-                    updated_at     TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                    updated_at     TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                    last_review_at TEXT NOT NULL DEFAULT '',
+                    ease_factor    REAL NOT NULL DEFAULT 2.5,
+                    reps           INTEGER NOT NULL DEFAULT 0,
+                    stability      REAL NOT NULL DEFAULT 0,
+                    difficulty     REAL NOT NULL DEFAULT 5
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_progress_due "
@@ -162,6 +170,14 @@ class MemoryPalaceDB:
                     accuracy       REAL NOT NULL DEFAULT 0,
                     note           TEXT NOT NULL DEFAULT '',
                     created_at     TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                )
+            """)
+
+            # 训练参数（key/value）：目前只有「用哪套间隔重复算法」
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS train_settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL DEFAULT ''
                 )
             """)
 
@@ -200,6 +216,13 @@ class MemoryPalaceDB:
         不加这一步就会永远缺失，而且是**静默**缺失（读出来是 KeyError 或空串）。
         """
         wanted = {
+            "memory_progress": (
+                ("last_review_at", "TEXT NOT NULL DEFAULT ''"),
+                ("ease_factor", "REAL NOT NULL DEFAULT 2.5"),
+                ("reps", "INTEGER NOT NULL DEFAULT 0"),
+                ("stability", "REAL NOT NULL DEFAULT 0"),
+                ("difficulty", "REAL NOT NULL DEFAULT 5"),
+            ),
             "memory_items": (
                 ("detail", "TEXT NOT NULL DEFAULT ''"),
                 ("images", "TEXT NOT NULL DEFAULT ''"),
@@ -747,6 +770,36 @@ class MemoryPalaceDB:
         return {int(r["locus_id"]): int(r["n"]) for r in rows}
 
     # ==================================================================
+    # 训练参数（key/value）
+    # ==================================================================
+    def get_setting(self, key, default="") -> str:
+        """读一个训练参数。**没有就返回 default**，不建行。"""
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM train_settings WHERE key = ?",
+                               (str(key),)).fetchone()
+        return str(row["value"]) if row else str(default)
+
+    def set_setting(self, key, value) -> None:
+        """写一个训练参数（**幂等 upsert**）。"""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO train_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(key), str(value)))
+
+    def get_algorithm(self) -> str:
+        """当前用哪套间隔重复算法（``stairs`` / ``sm2`` / ``fsrs``）。
+
+        认不出来的值一律退回默认 —— 这里**不能抛异常**：老库里这一行本来是空的。
+        """
+        return tc.normalize_algorithm(self.get_setting(SETTING_ALGORITHM))
+
+    def set_algorithm(self, value) -> str:
+        algorithm = tc.normalize_algorithm(value)
+        self.set_setting(SETTING_ALGORITHM, algorithm)
+        return algorithm
+
+    # ==================================================================
     # 进度 + 复习
     # ==================================================================
     def get_progress(self, item_id) -> dict:
@@ -759,7 +812,9 @@ class MemoryPalaceDB:
         return {
             "item_id": int(item_id), "mastery": tc.MASTERY_NEW, "correct_streak": 0,
             "interval_days": 0, "next_review_at": "", "review_count": 0,
-            "marked_at": "", "updated_at": "",
+            "marked_at": "", "updated_at": "", "last_review_at": "",
+            "ease_factor": tc.SM2_DEFAULT_EASE, "reps": 0,
+            "stability": 0.0, "difficulty": tc.FSRS_DIFFICULTY_DEFAULT,
         }
 
     def ensure_progress(self, item_id) -> dict:
@@ -800,6 +855,14 @@ class MemoryPalaceDB:
             interval = 0
             next_at = ""
         with self._connect() as conn:
+            if value <= tc.MASTERY_NEW:
+                # 「取消已学」= 这张卡要重新养：算法参数一并归零。
+                # 只清排期不清参数的话，下次复习会拿**旧的稳定度**去算间隔。
+                conn.execute(
+                    "UPDATE memory_progress SET ease_factor = ?, reps = 0, "
+                    "stability = 0, difficulty = ?, last_review_at = '' "
+                    "WHERE item_id = ?",
+                    (tc.SM2_DEFAULT_EASE, tc.FSRS_DIFFICULTY_DEFAULT, iid))
             conn.execute(
                 """
                 INSERT INTO memory_progress (item_id, mastery, correct_streak,
@@ -820,38 +883,61 @@ class MemoryPalaceDB:
         iid = int(item_id)
         anchor = tc.parse_date(today) or date.today()
         current = self.get_progress(iid)
-        state = tc.review_next_state(
-            current.get("mastery", tc.MASTERY_NEW),
-            current.get("correct_streak", 0),
-            current.get("interval_days", 0),
-            feedback)
+        # FSRS 要看「距上次复习过了几天」—— 进度行的 updated_at 就是上次动它的时刻
+        last_seen = (tc.parse_date(current.get("last_review_at"))
+                     or tc.parse_date(current.get("updated_at")))
+        state = tc.advance_review(
+            feedback,
+            algorithm=self.get_algorithm(),
+            mastery=current.get("mastery", tc.MASTERY_NEW),
+            streak=current.get("correct_streak", 0),
+            interval_days=current.get("interval_days", 0),
+            ease=current.get("ease_factor", tc.SM2_DEFAULT_EASE),
+            reps=current.get("reps", 0),
+            stability=current.get("stability", 0.0),
+            difficulty=current.get("difficulty", 0.0),
+            elapsed_days=(anchor - last_seen).days if last_seen else 0)
         next_at = (anchor + timedelta(days=int(state["interval_days"]))).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO memory_progress (item_id, mastery, correct_streak,
-                    interval_days, next_review_at, review_count, marked_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    interval_days, next_review_at, review_count, marked_at, updated_at,
+                    last_review_at, ease_factor, reps, stability, difficulty)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(item_id) DO UPDATE SET
                     mastery = excluded.mastery,
                     correct_streak = excluded.correct_streak,
                     interval_days = excluded.interval_days,
                     next_review_at = excluded.next_review_at,
                     review_count = memory_progress.review_count + 1,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    last_review_at = excluded.last_review_at,
+                    ease_factor = excluded.ease_factor,
+                    reps = excluded.reps,
+                    stability = excluded.stability,
+                    difficulty = excluded.difficulty
                 """,
                 (iid, int(state["mastery"]), int(state["correct_streak"]),
-                 int(state["interval_days"]), next_at, _now(), _now()))
+                 int(state["interval_days"]), next_at, _now(), _now(),
+                 anchor.isoformat(),
+                 float(state["ease_factor"]), int(state["reps"]),
+                 float(state["stability"]), float(state["difficulty"])))
             conn.execute(
                 "INSERT INTO memory_reviews (item_id, review_date, feedback, "
                 "mastery_after, created_at) VALUES (?, ?, ?, ?, ?)",
                 (iid, anchor.isoformat(), str(feedback), int(state["mastery"]), _now()))
         return {
             "item_id": iid, "feedback": str(feedback),
+            "algorithm": str(state.get("algorithm", tc.DEFAULT_ALGORITHM)),
             "mastery": int(state["mastery"]),
             "correct_streak": int(state["correct_streak"]),
             "interval_days": int(state["interval_days"]),
             "next_review_at": next_at,
+            "ease_factor": float(state["ease_factor"]),
+            "reps": int(state["reps"]),
+            "stability": float(state["stability"]),
+            "difficulty": float(state["difficulty"]),
         }
 
     def list_reviews(self, *, item_id=None, since=None, until=None,
