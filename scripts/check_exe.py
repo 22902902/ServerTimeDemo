@@ -41,7 +41,7 @@ EXPECTED = {
         "TodoAlertDialog", "ALERT_WIDTH", "snooze_all", "complete_all",
         "_place_bottom_right",
     ],
-    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.17.0"],
+    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.18.0"],
     "training_core": [
         "SRS_INTERVALS", "review_next_state", "streak_from_dates",
         "checkin_grid", "MASTERY_GOOD", "FEEDBACK_FORGOT",
@@ -49,6 +49,18 @@ EXPECTED = {
     "memory_db": [
         "MemoryPalaceDB", "PALACE_KINDS", "DEFAULT_PALACE_NAME",
         "format_item_line",
+        # v1.18.0 题库项的「位置与四周」与实景截图（前者是 MemoryPalaceDB 的方法）
+        "_ensure_memory_columns", "get_bank_item", "update_bank_item",
+    ],
+    "cs2_seed": [
+        # v1.18.0：七张比赛地图点位的单一数据源（宫殿与题库都由它生成）。
+        # 地图码只在这里 —— memory_seed 是运行时现算的，它那边没有。
+        "MAPS", "MIN_CALLOUTS", "MIRAGE_DETAILS", "counts", "validate",
+        "TPL_CS2_DUST2", "BANK_CS2_DUST2", "TPL_CS2_INFERNO", "BANK_CS2_INFERNO",
+        "TPL_CS2_NUKE", "BANK_CS2_NUKE", "TPL_CS2_ANCIENT", "BANK_CS2_ANCIENT",
+        "TPL_CS2_ANUBIS", "BANK_CS2_ANUBIS", "TPL_CS2_TRAIN", "BANK_CS2_TRAIN",
+        # 点位名嵌在 callouts 的元组里，靠 _collect 递归才看得见
+        "B 隧道（Tunnels）", "香蕉道（Banana）", "CT 出生点（CT Spawn）",
     ],
     "memory_seed": [
         "SEED_NUMBER_PEGS", "SEED_PALACE_TEMPLATES", "TEACHING_CARDS",
@@ -57,9 +69,18 @@ EXPECTED = {
         "TPL_SUDOKU", "TPL_CS2_MIRAGE", "TPL_XIANGQI",
         "BANK_SUDOKU", "BANK_CS2_MIRAGE", "BANK_XIANGQI",
         "唯一余数 Naked Single", "马后炮", "T 出生点 T Spawn",
+        # v1.18.0 另外六张图的宫殿 / 题库**由这两个函数现算**（地图码与点位名都在
+        # cs2_seed，这里只查「生成器本身有没有打进包」）
+        "_cs2_palace", "_cs2_bank",
     ],
     "memory_page": [
         "WalkSession", "VIEW_WORKBENCH", "VIEW_LIBRARY", "PalaceDialog",
+        # v1.18.0 题库详情弹窗 + 实景截图（上传 / 粘贴入口是调用方补的）
+        "BankItemDialog", "MemoryImageTools", "create_image_actions",
+        "MEMORY_IMAGE_SUBDIR",
+        # 真实字面量是「详情 / 位置与四周」，不是「位置与四周」
+        # （_collect 收的是**整条**常量，所以不能拿子串去比对）
+        "详情 / 位置与四周", "看详情",
     ],
     "mindmap_db": ["MindmapDB", "DEFAULT_MAP_TITLE", "format_map_line"],
     "mindmap_layout": [
