@@ -19,6 +19,9 @@
 * **``screenshot_path`` 沿用 JSON 存法** —— ``parse_account_image_items`` 已同时
   兼容「单路径字符串」与「JSON 数组」，历史数据两种形态都出现过（实测 7/18 是多图），
   不动它。
+* **删步骤 / 删流程要回收截图** —— 旧口径是「只删行、文件留在磁盘上」，于是孤儿图
+  无限增长，而磁盘上看不出哪张还有用。``collect_orphan_screenshots`` 在**删行之前**
+  算出「删完就没人引用」的路径（**共用同一张图的步骤不会被误伤**），页面据此删文件。
 * **变量是「流程级」的** —— ``{{域名}}`` 这类占位符的值由流程统一持有，一条流程
   因此能服务多个域名 / 多台机器 / 多个环境，这是「避免重复劳动」的关键。
 * **危险命令识别放在数据层** —— 它是领域判断（哪些命令会造成不可逆后果），
@@ -401,6 +404,46 @@ def _as_int(value, default: int = 0) -> int:
         return default
 
 
+def split_screenshot_paths(raw) -> list[str]:
+    """把 ``screenshot_path`` 拆成路径列表（去重、保序）。
+
+    存法沿用 ``parse_account_image_items`` 的约定（JSON 数组 / ``" | "`` / 换行 /
+    单路径），这里**只取路径**、不要标签。之所以在这儿落一份最小的：语义必须与
+    页面层一致，而数据层不能反向 ``import main``（会循环导入）。
+    """
+    text = _norm(raw)
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            data = json.loads(text)
+        except Exception:                       # noqa: BLE001
+            data = None
+        if isinstance(data, list):
+            values: list[str] = []
+            for item in data:
+                if isinstance(item, dict):
+                    path = item.get("path") or item.get("image_path") or item.get("value")
+                else:
+                    path = item
+                path = _norm(path)
+                if path:
+                    values.append(path)
+            return _dedupe(values)
+    if " | " in text:
+        parts = text.split(" | ")
+    elif "\n" in text:
+        parts = text.splitlines()
+    else:
+        parts = [text]
+    return _dedupe([part.strip() for part in parts if part.strip()])
+
+
+def _dedupe(values) -> list[str]:
+    """去重但保序（``dict`` 从 3.7 起保序，比 set 更适合这里）。"""
+    return list(dict.fromkeys(values))
+
+
 class ProcessDBMixin:
     """流程中心的数据访问层，混入 ``main.Database``。
 
@@ -676,6 +719,44 @@ class ProcessDBMixin:
     def delete_process_step(self, step_id: int):
         self.conn.execute("DELETE FROM process_steps WHERE id = ?", (step_id,))
         self.conn.commit()
+
+    def collect_orphan_screenshots(self, step_ids) -> list[str]:
+        """算出「删掉这些步骤之后会变成孤儿」的截图存储值（去重保序）。
+
+        **必须在删行之前调用。** 先取这些步骤引用的路径，再扣掉「别的步骤还引用着」
+        的 —— 所以同一张图被两个步骤共用时不会被误删。删文件由页面做
+        （只有它有路径解析能力）。
+        """
+        ids = [i for i in (_as_int(v) for v in (step_ids or [])) if i]
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        doomed = self.conn.execute(
+            f"SELECT screenshot_path FROM process_steps WHERE id IN ({marks})",
+            ids,
+        ).fetchall()
+        keep = self.conn.execute(
+            f"SELECT screenshot_path FROM process_steps WHERE id NOT IN ({marks})",
+            ids,
+        ).fetchall()
+        survivors: set = set()
+        for row in keep:
+            survivors.update(split_screenshot_paths(row["screenshot_path"]))
+        orphans: list[str] = []
+        for row in doomed:
+            for value in split_screenshot_paths(row["screenshot_path"]):
+                if value not in survivors and value not in orphans:
+                    orphans.append(value)
+        return orphans
+
+    def collect_flow_orphan_screenshots(self, flow_id: int) -> list[str]:
+        """``collect_orphan_screenshots`` 的流程级包装（删整条流程前用）。
+
+        流程的步骤靠 ``ON DELETE CASCADE`` 一起走，所以这一步要在
+        ``delete_process_flow`` **之前**调。
+        """
+        step_ids = [int(row["id"]) for row in self.fetch_process_steps(int(flow_id))]
+        return self.collect_orphan_screenshots(step_ids)
 
     def move_process_step(self, step_id: int, direction: int) -> bool:
         """和相邻步骤交换 step_no（``direction`` = -1 上移 / +1 下移）。
