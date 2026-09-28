@@ -190,6 +190,7 @@ def test_wired_into_ui():
                 "excel_seed_stat", "excel_seed_lookup", "excel_seed_text",
                 "excel_seed_date", "excel_seed_misc", "excel_seed_extra",
                 "training_core", "training_todo_bridge", "memory_seed",
+                "cs2_seed",
                 "memory_db", "memory_page", "mindmap_layout", "mindmap_seed",
                 "mindmap_db", "mindmap_page", "mindmap_image"]
         missing = [n for n in need if n not in spec_src]

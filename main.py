@@ -166,7 +166,7 @@ from todo_page import TodoAlertDialog, TodoPage  # 待办 / 提醒事项页面
 from excel_db import ExcelDB  # Excel 学习中心数据库（200 个内置函数 + 复习进度）
 from excel_page import ExcelImageTools, ExcelLearningPage  # Excel 学习中心页面
 from memory_db import MemoryPalaceDB  # 记忆宫殿：地点桩 + 记忆项 + 间隔重复
-from memory_page import MemoryPalacePage  # 记忆宫殿页面（六视图 + 走一遍）
+from memory_page import MemoryImageTools, MemoryPalacePage  # 记忆宫殿页面（六视图 + 走一遍 + 实景图）
 from mindmap_db import MindmapDB  # 思维导图：大纲节点 + 盲画间隔重复
 from mindmap_page import MindMapPage  # 思维导图页面（五视图 + 自动布局画布）
 from training_todo_bridge import TrainingTodoBridge  # 训练模块 → 待办的写入胶水
@@ -4030,6 +4030,10 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         「生成今日训练待办」走注入的 ``todo_hook``（``TrainingTodoBridge``）——
         页面只拿到一个可调用对象，**不反向 import main、不 import todo_db**。
         ``markdown`` 注入 ``markdown_view`` 模块渲染教学卡，没注入就退化成纯文本。
+
+        图片能力走 ``MemoryImageTools`` + ``AccountImagePreview`` 注入（与 Excel 宝典
+        同一手法）：题库里每一条都能贴自己在游戏里截的图 —— 存储仍走账号中心那套
+        「相对路径 + 统一目录」的协议，落在 ``account_images/memory_items/`` 下。
         """
         self.memory_view = MemoryPalacePage(
             self.memory_palace_page,
@@ -4038,6 +4042,15 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             on_status=self.log_status,
             todo_hook=self.training_todo_bridge.make_hook("memory"),
             markdown=markdown_view,
+            images=MemoryImageTools(
+                base_dir=BASE_DIR,
+                resolve_paths=resolve_account_image_paths,
+                storage_value=get_account_image_storage_value,
+                make_dir=ensure_account_image_dir,
+                parse_items=parse_account_image_items,
+                serialize_items=serialize_account_image_items,
+            ),
+            image_preview_cls=AccountImagePreview,
         )
         self.memory_view.pack(fill="both", expand=True)
 
