@@ -3156,6 +3156,7 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         ).pack(side="right", padx=(12, 0))
 
         for text, command in (
+            ("面板设置", self.open_settings),
             ("修改密码", self.change_password),
             ("备份", self._backup_data),
             ("恢复备份", self._restore_backup),

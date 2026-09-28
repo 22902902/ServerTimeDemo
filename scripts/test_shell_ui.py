@@ -215,8 +215,23 @@ def main_test():
         str(w.cget("text")) for w in topbar_labels
         if w.winfo_class() == "Label" and str(w.cget("text")) != ""
     ]
-    for expected in ("修改密码", "备份", "恢复备份", "初始化密码"):
+    for expected in ("面板设置", "修改密码", "备份", "恢复备份", "初始化密码"):
         check(f"顶栏含动作「{expected}」", expected in texts)
+
+    # v1.15.1：SettingsDialog（面板 / 关闭行为 / 开机自启动）以前只在「到期管理」页
+    # 工具栏里有个「设置」，顶栏没有任何入口。这条守卫盯住顶栏那个入口别再掉了。
+    settings_labels = [
+        w for w in topbar_labels
+        if w.winfo_class() == "Label" and str(w.cget("text")) == "面板设置"
+    ]
+    check("顶栏有「面板设置」入口", len(settings_labels) == 1,
+          f"找到 {len(settings_labels)} 个")
+    if settings_labels:
+        check("「面板设置」已绑定点按事件",
+              bool(settings_labels[0].bind("<Button-1>")),
+              repr(settings_labels[0].bind("<Button-1>")))
+    check("app.open_settings 是可调用的入口",
+          callable(getattr(app, "open_settings", None)))
 
     image_labels = [
         w for w in topbar_labels
