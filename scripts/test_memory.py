@@ -28,7 +28,7 @@
 覆盖
 ------------------------------------------------------------------------------
 A. 训练内核      与 excel_db 的口径钉在一起 / 阶梯 / 三键 / 打卡连续
-B. 种子一致性    10 卡 / 6 宫殿 / 98 桩 / 100 数字桩 / 8 题库 190 题 / 装载自检
+B. 种子一致性    数量下限 / 编码唯一 / 数字桩 00~99 / 每个题库 ≥20 题 / 装载自检
 C. 建表与幂等    新库一次到位 / 重开不重复灌 / 老库（只有老表）不被动
 D. 宫殿 CRUD      增改查删 / 模板导入幂等 / 删宫殿两种口径
 E. 地点桩        seq 紧凑 / 删中间重排 / reorder / move / 删桩不删项
@@ -40,7 +40,8 @@ J. 题库入库      导入幂等 / 自动挂桩 / 桩不够时收尾 / 二次�
 K. 小工具        教学卡 / suggest_new_count / split_tags / format_item_line
 L. 页面契约      页面用到的每个数据入口都存在、字段齐全
 M. 待办桥        只在点击时建 / 当天幂等 / 不被顺延 / 两个模块共用一套规则
-N. 游戏训练包    数独 / CS2 / 象棋 三套「宫殿 + 题库」逐条对齐 / 走一遍顺序 / 幂等
+N. 游戏训练包    数独 + CS2 七图 + 象棋，九套「宫殿 + 题库」逐条对齐 / 走一遍顺序 / 幂等
+O. 题库详情      detail / images 两列（新库建表 + 老库 ALTER）/ 重灌不覆盖用户截图 / 只放行两栏
 
 用法：
     python scripts/test_memory.py
@@ -925,28 +926,39 @@ def test_todo_bridge() -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# N. 游戏训练包（数独 / CS2 / 中国象棋）
+# N. 游戏训练包（数独 / CS2 七图 / 中国象棋）
 # ══════════════════════════════════════════════════════════════════════════
-# 三套「宫殿模板 + 配套题库」。**配对关系才是内容本身**：宫殿第 N 桩必须正好接住
+# 九套「宫殿模板 + 配套题库」。**配对关系才是内容本身**：宫殿第 N 桩必须正好接住
 # 题库第 N 条（import_bank 就是按序号 1:1 挂桩的）。桩与题错位了，界面不报错、
 # 数据也「有值」，只是这条路线背起来莫名其妙 —— 所以这里逐条比对，不是只数个数。
+#
+# CS2 这一组是从 ``cs2_seed.MAPS`` 现算的，不手抄编码：七张图的宫殿与题库本来就由
+# 同一张表生成（见 ``memory_seed._cs2_palace/_cs2_bank``），这里跟着一起长，
+# 以后再加地图不用回来改测试。
+CS2_MAP_KEYS = ("DUST2", "INFERNO", "NUKE", "ANCIENT", "ANUBIS", "TRAIN")
+CS2_PACKS = [(f"TPL_CS2_{key}", f"BANK_CS2_{key}", 20) for key in CS2_MAP_KEYS]
 GAME_PACKS = [
     ("TPL_SUDOKU", "BANK_SUDOKU", 20),
     ("TPL_CS2_MIRAGE", "BANK_CS2_MIRAGE", 20),
     ("TPL_XIANGQI", "BANK_XIANGQI", 20),
-]
+] + CS2_PACKS
+# 七张 CS2 地图（含 Mirage）必须都在种子里；少一张就是「用户点开没有 Dust2」。
+CS2_ALL_BANKS = ["BANK_CS2_MIRAGE"] + [b for _, b, _ in CS2_PACKS]
 
 
 def test_game_packs() -> None:
-    section("[N] 游戏训练包（数独 / CS2 / 象棋）")
+    section("[N] 游戏训练包（数独 / CS2 七图 / 象棋）")
     tpl_codes = {t["code"] for t in memory_seed.PALACE_TEMPLATES}
     bank_codes = {b["code"] for b in memory_seed.BANKS}
-    check("三个游戏宫殿模板都在",
+    check(f"{len(GAME_PACKS)} 套游戏宫殿模板都在",
           all(t in tpl_codes for t, _, _ in GAME_PACKS),
           [t for t, _, _ in GAME_PACKS if t not in tpl_codes])
-    check("三个配套题库都在",
+    check(f"{len(GAME_PACKS)} 套配套题库都在",
           all(b in bank_codes for _, b, _ in GAME_PACKS),
           [b for _, b, _ in GAME_PACKS if b not in bank_codes])
+    check("CS2 七张比赛地图一张不少",
+          all(b in bank_codes for b in CS2_ALL_BANKS),
+          [b for b in CS2_ALL_BANKS if b not in bank_codes])
 
     tmp = tempfile.mkdtemp(prefix="mem_game_")
     try:
@@ -1006,7 +1018,205 @@ def test_game_packs() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# O. 题库详情与实景图（detail / images）
+# ══════════════════════════════════════════════════════════════════════════
+# v1.18.0 为「双击看完整内容 / 把游戏里的截图贴上来」加了这两栏。三个容易**静默**
+# 出错的地方，就是这一节的全部内容：
+#
+# 1. **老库缺列**：``CREATE TABLE IF NOT EXISTS`` 对已建好的表是空操作 —— 不补
+#    ``ALTER TABLE`` 的话，开发机和用户 exe 里那份 db 永远没有这两列，读出来是
+#    空串或 KeyError，界面不报错、只是「双击打开一片空白」。
+# 2. **重灌种子把用户的东西冲掉**：种子是「内置文案」的权威，但 detail（用户写的
+#    位置笔记）和 images（用户截的图）不是。被覆盖的表现是「昨天写的今天没了」。
+# 3. **就地改题干**：改了会被下次 seed_banks 覆盖回去 → 用户以为「改了没用」。
+#    所以 ``update_bank_item`` 只放行 detail / images 两栏。
+def _table_columns(db_path) -> dict:
+    """每张表的列名集合 —— 直接 PRAGMA 读真库，不猜建表语句写了什么。"""
+    import sqlite3
+
+    with sqlite3.connect(str(db_path)) as conn:
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        return {name: {str(r[1]) for r in conn.execute(f"PRAGMA table_info({name})")}
+                for name in tables}
+
+
+def test_bank_detail_and_images() -> None:
+    section("[O] 题库详情与实景图（detail / images）")
+    import sqlite3
+
+    # -- 1. 新库：建表语句里就得有这两列 --------------------------------
+    db = fresh("detail")
+    cols = _table_columns(db.db_path)
+    for table in ("memory_bank_items", "memory_items"):
+        check(f"{table} 新库直接就有 detail / images",
+              {"detail", "images"} <= cols[table], sorted(cols[table]))
+
+    # -- 2. 内置题库项都要带齐两栏，CS2 七图还要每条都有「位置与四周」 --
+    # 空着等于这一栏白做：双击打开看到的是一片空文本框，用户不知道该填什么。
+    # 「位置与四周」是 CS2 点位说明的正文（用户要的就是这个），所以只有七张地图
+    # 的题库被要求逐条非空 —— 三十六计那类老题库允许留空（用户自己补）。
+    banks = db.list_banks()
+    missing_key = [(b["code"], r["seq"]) for b in banks
+                   for r in db.list_bank_items(b["id"])
+                   if not {"detail", "images"} <= set(r)]
+    check("题库项都带 detail / images 两栏（不会静默缺列）", not missing_key,
+          missing_key[:5])
+    cs2_banks = [b for b in banks if b["code"] in set(CS2_ALL_BANKS)]
+    check(f"七张 CS2 地图的题库都在库里（{len(CS2_ALL_BANKS)} 个）",
+          len(cs2_banks) == len(CS2_ALL_BANKS),
+          [b["code"] for b in banks if b["code"].startswith("BANK_CS2")])
+    check("CS2 每个题库都是 20 条",
+          all(len(db.list_bank_items(b["id"])) == 20 for b in cs2_banks),
+          [(b["code"], len(db.list_bank_items(b["id"]))) for b in cs2_banks])
+    cs2_blank = [(b["code"], r["seq"]) for b in cs2_banks
+                 for r in db.list_bank_items(b["id"]) if not str(r["detail"]).strip()]
+    check("**CS2 七图每一条都有「位置与四周」**", not cs2_blank, cs2_blank[:5])
+    check("内置题库项一开始没有截图（图是用户自己截的）",
+          all(not str(r["images"]).strip() for b in banks
+              for r in db.list_bank_items(b["id"])))
+
+    # -- 3. 老库：表已存在且形状是旧的 → 开库补列，存量数据原样 --------
+    d = Path(tempfile.mkdtemp(prefix="mem_alter_"))
+    _TMP.append(d)
+    legacy = d / "legacy.db"
+    with sqlite3.connect(legacy) as conn:
+        conn.execute(
+            "CREATE TABLE memory_bank_items ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, bank_id INTEGER NOT NULL, "
+            "seq INTEGER NOT NULL, question TEXT NOT NULL, "
+            "answer TEXT NOT NULL DEFAULT '', hint TEXT NOT NULL DEFAULT '')")
+        conn.execute(
+            "CREATE TABLE memory_items ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, palace_id INTEGER NOT NULL DEFAULT 0, "
+            "locus_id INTEGER NOT NULL DEFAULT 0, front TEXT NOT NULL, "
+            "back TEXT NOT NULL DEFAULT '', imagery TEXT NOT NULL DEFAULT '', "
+            "story TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '', "
+            "tags TEXT NOT NULL DEFAULT '', source_key TEXT NOT NULL DEFAULT '', "
+            "created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')))")
+        conn.execute("INSERT INTO memory_bank_items (bank_id, seq, question, answer, hint) "
+                     "VALUES (999, 1, '老题', '老答案', '老提示')")
+        conn.execute("INSERT INTO memory_items (front, back) VALUES ('老项', '老背面')")
+    legacy_db = MemoryPalaceDB(legacy)                 # 开一次库就会补列
+    cols = _table_columns(legacy)
+    for table in ("memory_bank_items", "memory_items"):
+        check(f"老库 {table} 被 ALTER 补上 detail / images",
+              {"detail", "images"} <= cols[table], sorted(cols[table]))
+    with sqlite3.connect(legacy) as conn:
+        old_row = conn.execute("SELECT question, answer, hint, detail, images "
+                               "FROM memory_bank_items WHERE bank_id = 999").fetchone()
+        old_item = conn.execute("SELECT front, back, detail, images "
+                                "FROM memory_items").fetchone()
+    check("补列不动存量数据（老行原样，新列是空串）",
+          tuple(old_row) == ("老题", "老答案", "老提示", "", "")
+          and tuple(old_item) == ("老项", "老背面", "", ""), (old_row, old_item))
+    check("老库补完列，内置题库照常灌进来", len(legacy_db.list_banks()) >= 5,
+          len(legacy_db.list_banks()))
+    check("老库补完列后，新灌进来的题库项也带齐两栏",
+          {"detail", "images"}
+          <= set(legacy_db.list_bank_items(int(legacy_db.list_banks()[0]["id"]))[0]))
+
+    # -- 4. update_bank_item 只放行用户自己那两栏 ----------------------
+    # 用一个带「位置与四周」的 CS2 题库来验（下面第 5 步也复用它）。
+    cs2_code = cs2_banks[0]["code"]
+    bank_id = int(cs2_banks[0]["id"])
+    entry = db.list_bank_items(bank_id)[0]
+    check("update_bank_item 放行 detail",
+          db.update_bank_item(int(entry["id"]),
+                              detail="T 家出门左转，第二个木箱后面") is True)
+    check("update_bank_item 放行 images",
+          db.update_bank_item(int(entry["id"]), images="memory_items/a.png") is True)
+    back = db.get_bank_item(int(entry["id"]))
+    check("两栏真的写回了库",
+          back["detail"] == "T 家出门左转，第二个木箱后面"
+          and back["images"] == "memory_items/a.png", back)
+    for field in ("question", "answer", "hint", "seq"):
+        check(f"**update_bank_item 不放行 {field}**（不让就地改内置文案）",
+              db.update_bank_item(int(entry["id"]), **{field: "自己改的"}) is False)
+    check("一个字段都不给 → False", db.update_bank_item(int(entry["id"])) is False)
+    check("被拒掉的改动一条都没落库",
+          db.get_bank_item(int(entry["id"]))["question"] == entry["question"]
+          and int(db.get_bank_item(int(entry["id"]))["seq"]) == int(entry["seq"]))
+    check("id 不存在 → False", db.update_bank_item(999999, detail="x") is False)
+    check("get_bank_item 找不到返回 None", db.get_bank_item(999999) is None)
+
+    # -- 5. 重灌种子：内置文案更新，用户的两栏保住 ----------------------
+    # 「用户说改了没用」的正面防线，两个方向都要成立：
+    #   ① 用户写的位置笔记 / 截图 不能被冲掉；
+    #   ② 种子里的错字要能推给老库（所以题干是**要**覆盖回去的）。
+    pid = db.import_template(memory_seed.PALACE_TEMPLATES[0]["code"])
+    db.import_bank(cs2_code, pid)
+    rows = db.list_bank_items(bank_id)
+    keep, blanked = rows[0], rows[1]
+    user_images = "memory_items/我的截图.png"
+    db.update_bank_item(int(keep["id"]), detail="我自己补的位置笔记", images=user_images)
+    before_count = len(rows)
+    with sqlite3.connect(db.db_path) as conn:
+        conn.execute("UPDATE memory_bank_items SET question = '【错的】' WHERE id = ?",
+                     (int(keep["id"]),))
+        conn.execute("UPDATE memory_bank_items SET detail = '' WHERE id = ?",
+                     (int(blanked["id"]),))
+    db.seed_banks()                                   # 模拟「下次启动」
+    after_keep = db.get_bank_item(int(keep["id"]))
+    after_blank = db.get_bank_item(int(blanked["id"]))
+    check("**重灌种子不冲掉用户自己写的 detail**",
+          after_keep["detail"] == "我自己补的位置笔记", after_keep["detail"])
+    check("**重灌种子不冲掉用户自己截的图**",
+          after_keep["images"] == user_images, after_keep["images"])
+    check("空着的 detail 会被种子补上（给老题库补四周细节就靠这条）",
+          after_blank["detail"] == str(blanked["detail"]) and after_blank["detail"],
+          (blanked["detail"], after_blank["detail"]))
+    check("种子里的题干是权威（写错了会被纠回来）",
+          after_keep["question"] == keep["question"],
+          (keep["question"], after_keep["question"]))
+    check("重灌不新增行", len(db.list_bank_items(bank_id)) == before_count,
+          (before_count, len(db.list_bank_items(bank_id))))
+
+    # -- 6. 导入成记忆项时两栏要跟着走 ---------------------------------
+    carry = fresh("carry")
+    tpl_code, bank_code, _ = GAME_PACKS[1]            # CS2 · Mirage
+    cpid = carry.import_template(tpl_code)
+    carry.import_bank(bank_code, cpid)
+    src = carry.list_bank_items(int(carry.get_bank_by_code(bank_code)["id"]))
+    made = carry.list_items(palace_id=cpid)
+    check("导入后条目数与题库一致", len(made) == len(src) == 20,
+          (len(made), len(src)))
+    want = sorted((str(s["question"]), str(s["detail"])) for s in src)
+    got = sorted((str(x["front"]), str(x["detail"])) for x in made)
+    check("**import_bank 把「位置与四周」带进记忆项**", got == want, got[:2])
+    check("导进来的每一条都有位置与四周",
+          all(str(x["detail"]).strip() for x in made),
+          [x["seq"] for x in made if not str(x["detail"]).strip()])
+    order = carry.walk_order(cpid)
+    check("走一遍的每一站都带着位置与四周（展开答案时要显示）",
+          bool(order) and all(str(r.get("detail", "")).strip() for r in order),
+          [r["station"] for r in order if not str(r.get("detail", "")).strip()])
+
+    # -- 7. 手写记忆项同样带这两栏（不挂题库的条目也能贴图） -----------
+    item_id = carry.add_item(front="手写一条", back="背面", detail="左数第三个门",
+                             images="memory_items/x.png")
+    row = carry.get_item(item_id)
+    check("add_item 能带 detail / images",
+          row["detail"] == "左数第三个门" and row["images"] == "memory_items/x.png", row)
+    check("update_item 放行 detail / images",
+          carry.update_item(item_id, detail="改过的位置排布",
+                            images="memory_items/y.png") is True)
+    row = carry.get_item(item_id)
+    check("记忆项两栏真的写回",
+          row["detail"] == "改过的位置排布" and row["images"] == "memory_items/y.png", row)
+    listed = next(x for x in carry.list_items() if int(x["id"]) == item_id)
+    check("list_items 每行都带这两栏（页面直接读得到）",
+          {"detail", "images"} <= set(listed), sorted(listed)[:6])
+    bare_id = carry.add_item(front="什么都没填的一条")
+    bare = carry.get_item(bare_id)
+    check("不填这两栏时是空串而不是 None（页面上会显示成「None」）",
+          bare["detail"] == "" and bare["images"] == "",
+          (bare["detail"], bare["images"]))
+
+
 def main_test() -> None:
+    # 顺序 = 小节编号顺序（原先 [N] 排在 [K] 前面，读输出时要来回找）
     test_core_matches_excel()
     test_seed_consistency()
     test_schema()
@@ -1017,10 +1227,11 @@ def main_test() -> None:
     test_srs()
     test_checkins()
     test_bank_import()
-    test_game_packs()
     test_helpers()
     test_page_contracts()
     test_todo_bridge()
+    test_game_packs()
+    test_bank_detail_and_images()
 
 
 if __name__ == "__main__":

@@ -37,6 +37,12 @@ E. WalkSession 用假记录器单测四条不变量（不碰库）
 F. 今日训练    队列来源 = due_items / 队列为空时只提示不弹窗
 G. 待办联动    没注入时只提示 / 注入后点一下才调一次
 H. 关键纪律    状态栏在底部 / 左栏不被右侧 expand 区饿死
+I. 题库详情    双击开弹窗看到完整内容 / 上传与粘贴两条入口 / 保存写回 /
+               走一遍揭示之后才出「位置与四周」与实景图
+
+本文件会 import ``main``（只为了拿生产的那套图片函数与预览组件）。``main`` 顶层
+没有副作用，但要把 ``BASE_DIR`` / ``ACCOUNT_IMAGE_DIR`` 指到临时目录再传进去 ——
+否则截图会落进开发库的 ``account_images/``。
 
 用法::
 
@@ -59,16 +65,23 @@ except Exception:
 
 from tkinter import messagebox  # noqa: E402
 
+import main as app_main  # noqa: E402  （顶层无副作用，之前已确认）
 import markdown_view  # noqa: E402
+import memory_page  # noqa: E402  （要按名字换掉 BankItemDialog 做探针）
 import training_core as tc  # noqa: E402
 from memory_db import MemoryPalaceDB  # noqa: E402
 from memory_page import (  # noqa: E402
+    HAS_PIL,
+    MEMORY_IMAGE_SUBDIR,
     TREE_PALACE,
     TREE_VIEW,
+    VIEW_BANKS,
     VIEW_CHOICES,
     VIEW_LIBRARY,
     VIEW_STATS,
     VIEW_TODAY,
+    BankItemDialog,
+    MemoryImageTools,
     MemoryPalacePage,
     WalkSession,
 )
@@ -220,12 +233,13 @@ def cleanup() -> None:
         shutil.rmtree(d, ignore_errors=True)
 
 
-def build_page(db, *, todo_hook=None) -> tuple:
+def build_page(db, *, todo_hook=None, images=None, image_preview_cls=None) -> tuple:
     root = tk.Tk()
     root.geometry("1400x900+40+40")
     page = MemoryPalacePage(root, db, app_title="记忆宫殿测试",
                             on_status=lambda _t: None, todo_hook=todo_hook,
-                            markdown=markdown_view)
+                            markdown=markdown_view,
+                            images=images, image_preview_cls=image_preview_cls)
     page.pack(fill="both", expand=True)
     settle(root, 3)
     return root, page
@@ -608,6 +622,263 @@ def test_discipline() -> None:
         root.destroy()
 
 
+def find_button(widget, text: str):
+    """按按钮文案找控件 —— 用来验「入口真的存在」。
+
+    只认文案是不够的：文案在、命令没接上，点下去什么都不发生。所以拿到按钮后
+    一律再 ``invoke()`` 一次，看它是不是真的调到了东西（调用方先把被调函数换成
+    记录器，避免真弹文件选择框 / 模态窗）。
+    """
+    for child in widget.winfo_children():
+        try:
+            if str(child.cget("text")) == text and child.winfo_class() in ("Button", "TButton"):
+                return child
+        except tk.TclError:
+            pass
+        found = find_button(child, text)
+        if found is not None:
+            return found
+    return None
+
+
+def _png(path: Path, size=(64, 48)) -> Path:
+    """造一张真图：读不出来的图会让缩略图静默退化成文件名，那样测不出东西。"""
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, (198, 40, 40)).save(str(path))
+    return path
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# I. 题库详情（双击打开 / 位置与四周 / 上传截图）
+# ══════════════════════════════════════════════════════════════════════════
+def test_bank_detail() -> None:
+    section("[I] 题库详情（双击打开 / 位置与四周 / 上传截图）")
+    # 图片能力用 main.py 里**生产的那一套函数**（不是测试替身），只把
+    # BASE_DIR / ACCOUNT_IMAGE_DIR 指到临时目录：存进去的还是相对路径，与流程
+    # 截图 / 笔记截图同一套协议；顺带保证不往开发库的 account_images/ 里写东西。
+    base = Path(tempfile.mkdtemp(prefix="mem_ui_img_"))
+    _TMP.append(base)
+    saved_dirs = (app_main.BASE_DIR, app_main.ACCOUNT_IMAGE_DIR)
+    app_main.BASE_DIR = base
+    app_main.ACCOUNT_IMAGE_DIR = base / "account_images"
+    tools = MemoryImageTools(
+        base_dir=app_main.BASE_DIR,
+        resolve_paths=app_main.resolve_account_image_paths,
+        storage_value=app_main.get_account_image_storage_value,
+        make_dir=app_main.ensure_account_image_dir,
+        parse_items=app_main.parse_account_image_items,
+        serialize_items=app_main.serialize_account_image_items)
+
+    db = cluster("bank_detail")
+    root, page = build_page(db, images=tools,
+                            image_preview_cls=app_main.AccountImagePreview)
+    try:
+        check("PIL 可用（缩略图与预览都靠它，缺了会静默退化）", HAS_PIL)
+
+        page.show_view(VIEW_BANKS)
+        settle(root, 3)
+        check("题库视图切过去了（帧真的换了）",
+              page.view_key == VIEW_BANKS and mapped(page.views[VIEW_BANKS]),
+              (page.view_key, mapped(page.views[VIEW_BANKS])))
+        check("左右两栏都映射出来了",
+              mapped(page.bank_tree) and mapped(page.bank_item_tree),
+              (mapped(page.bank_tree), mapped(page.bank_item_tree)))
+        check("条目表末列是「资料」（告诉用户还有别的内容可看）",
+              tuple(page.bank_item_tree["columns"]) == ("seq", "q", "a", "extra"),
+              page.bank_item_tree["columns"])
+        check("提示语告诉用户可以双击",
+              "双击" in page.bank_item_hint_var.get(), page.bank_item_hint_var.get())
+
+        dust2 = db.get_bank_by_code("BANK_CS2_DUST2")
+        check("内置题库里有 Dust2", dust2 is not None,
+              [b["code"] for b in db.list_banks() if b["code"].startswith("BANK_CS2")])
+        page.selected_bank_id = int(dust2["id"])
+        page._reload_bank_items()
+        settle(root, 2)
+        rows = page.bank_item_tree.get_children()
+        check("右边列出 Dust2 的 20 条", len(rows) == 20, len(rows))
+        check("行 iid 形如 bitem:<id>（双击靠它反查）",
+              str(rows[0]).startswith("bitem:"), rows[0])
+        values = page.bank_item_tree.item(rows[0])["values"]
+        check("表格里题目与答案都读得到（只作索引）",
+              bool(str(values[1]).strip()) and bool(str(values[2]).strip()), values)
+        check("有位置详情的条目，资料列标「位置」（这会儿还没有图）",
+              str(values[3]) == "位置", values)
+        check("_media_label 四种组合都对",
+              [MemoryPalacePage._media_label(e) for e in
+               ({"detail": "x", "images": "y"}, {"detail": "x"},
+                {"images": "y"}, {})] == ["位置 · 图", "位置", "图", "—"],
+              [MemoryPalacePage._media_label(e) for e in
+               ({"detail": "x", "images": "y"}, {"detail": "x"},
+                {"images": "y"}, {})])
+
+        # 没选条目就点「看详情」→ 只提示，不许炸
+        page.bank_item_tree.selection_remove(*page.bank_item_tree.selection())
+        with QuietModals() as modals:
+            page.open_selected_bank_item()
+            settle(root, 2)
+        check("没选条目点「看详情」只提示、不炸",
+              "showinfo" in modals.kinds(), modals.kinds())
+
+        # ---- 双击某一条 → 打开详情窗（Toplevel，不阻塞主循环）------------
+        opened: list = []
+
+        class SpyBankDialog(BankItemDialog):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                opened.append(self)
+
+        real_dialog = memory_page.BankItemDialog
+        page.bank_item_tree.selection_set(rows[0])
+        settle(root, 2)
+        memory_page.BankItemDialog = SpyBankDialog       # 双击绑的就是它
+        try:
+            page._on_bank_item_open()
+            settle(root, 3)
+        finally:
+            memory_page.BankItemDialog = real_dialog
+        dlg = opened[-1] if opened else None
+        check("双击真的弹出了详情窗", dlg is not None, opened)
+        check("详情窗映射在屏幕上（不是建了就扔）",
+              dlg is not None and mapped(dlg),
+              dlg.winfo_ismapped() if dlg else None)
+        if dlg is None:                                  # 后面全依赖它，早点收工
+            return
+
+        item = dlg.item
+        found = texts_of(dlg)
+        check("窗口标题带序号与题目",
+              str(item["seq"]) in dlg.title() and str(item["question"]) in dlg.title(),
+              dlg.title())
+        check("**完整答案显示出来了**（表格列宽装不下的那段）",
+              str(item["answer"]) in found, str(item["answer"])[:40])
+        check("记忆钩子也显示出来了", str(item["hint"]) in found)
+        check("位置与四周在可编辑文本框里，初值 = 库里的值",
+              dlg.detail_text.get("1.0", "end").strip() == str(item["detail"]),
+              dlg.detail_text.get("1.0", "end")[:40])
+        check("弹窗里带实景图预览", dlg.image_preview is not None)
+        check("预览的子目录 = memory_items（与流程/笔记截图同一套协议）",
+              dlg.image_preview.image_subdir == MEMORY_IMAGE_SUBDIR,
+              dlg.image_preview.image_subdir)
+
+        # ---- 上传 / 粘贴两条入口：按钮在，而且点了真的会调东西 -------------
+        upload_button = find_button(dlg, "上传截图")
+        paste_button = find_button(dlg, "粘贴截图")
+        check("有「上传截图」按钮（**预览组件自己不带，得由弹窗补**）",
+              upload_button is not None)
+        check("有「粘贴截图」按钮（游戏里 Win+Shift+S 截完直接粘）",
+              paste_button is not None)
+        check("有「查看大图」按钮", find_button(dlg, "查看大图") is not None)
+        called: list = []
+        real_choose = dlg.image_preview.choose_image
+        dlg.image_preview.choose_image = lambda **kw: called.append(kw) or True
+        try:
+            upload_button.invoke()          # 不真弹文件选择框：先把被调函数换掉
+        finally:
+            dlg.image_preview.choose_image = real_choose
+        check("「上传截图」真的接到了 choose_image（文案在、命令没接上等于死链）",
+              len(called) == 1 and "parent" in called[0], called)
+
+        real_save = memory_page.image_clipboard.save_clipboard_image
+        try:
+            memory_page.image_clipboard.save_clipboard_image = lambda *_a, **_k: None
+            with QuietModals() as modals:
+                paste_button.invoke()
+                settle(root, 2)
+            check("剪贴板里没图时只提示一句、不炸",
+                  "showinfo" in modals.kinds(), modals.kinds())
+            pasted = _png(base / "account_images" / MEMORY_IMAGE_SUBDIR / "paste.png")
+            memory_page.image_clipboard.save_clipboard_image = lambda *_a, **_k: pasted
+            paste_button.invoke()
+            settle(root, 2)
+        finally:
+            memory_page.image_clipboard.save_clipboard_image = real_save
+        pasted_value = app_main.get_account_image_storage_value(pasted)
+        check("「粘贴截图」把图挂到了这一条上",
+              pasted_value in dlg.image_preview.get_value(), dlg.image_preview.get_value())
+        check("存的是相对路径（换机器能跟着搬）",
+              not Path(pasted_value).is_absolute(), pasted_value)
+
+        # ---- 保存：位置笔记 + 截图都写回库，列表跟着变 --------------------
+        note = "我写的位置笔记：A 大左侧木箱后面"
+        dlg.detail_text.delete("1.0", "end")
+        dlg.detail_text.insert("1.0", note)
+        dlg._save()
+        settle(root, 3)
+        after = db.get_bank_item(int(item["id"]))
+        check("保存把位置笔记写回库", after["detail"] == note, after["detail"])
+        check("保存把截图写回库", pasted_value in str(after["images"]), after["images"])
+        check("截图文件真的在磁盘上",
+              any(p.exists() for p in tools.resolve_paths(after["images"])),
+              after["images"])
+        check("保存后弹窗自己关了", not dlg.winfo_exists())
+        check("列表「资料」列变成「位置 · 图」",
+              str(page.bank_item_tree.item(
+                  page.bank_item_tree.get_children()[0])["values"][3]) == "位置 · 图",
+              page.bank_item_tree.item(page.bank_item_tree.get_children()[0])["values"])
+        check("保存后状态栏回显了一句",
+              "已保存" in page.status_var.get(), page.status_var.get())
+
+        # ---- 记忆项对话框用的是同一个入口（别只在题库里能做）--------------
+        pid = db.import_template("TPL_CS2_DUST2")
+        db.import_bank("BANK_CS2_DUST2", pid)
+        # **不真弹模态窗**：ItemDialog 继承 simpledialog.Dialog，构造时 wait_window
+        # 会把主循环挂住。所以用 __new__ 造实例、直接调 body()。
+        d = memory_page.ItemDialog.__new__(memory_page.ItemDialog)
+        d.initial = dict(db.list_items(palace_id=pid)[0])
+        d.app_title = "记忆宫殿测试"
+        d.palaces = db.list_palaces()
+        d.loci = db.list_loci(pid)
+        d.default_locus_id = 0
+        d.images = tools
+        d.image_preview_cls = app_main.AccountImagePreview
+        d.image_preview = None
+        d.result = None
+        item_host = tk.Toplevel(root)
+        d.body(item_host)
+        settle(root, 2)
+        check("记忆项对话框也有「上传截图」入口",
+              find_button(item_host, "上传截图") is not None)
+        check("记忆项对话框也有「粘贴截图」入口",
+              find_button(item_host, "粘贴截图") is not None)
+        check("记忆项对话框的详情框回填了原值",
+              d.detail_text.get("1.0", "end").strip()
+              == str(d.initial.get("detail") or ""), d.detail_text.get("1.0", "end")[:40])
+        item_host.destroy()
+        settle(root, 1)
+
+        # ---- 走一遍：位置与四周、实景图都只能在揭示之后出现 ---------------
+        page.current_palace_id = pid
+        page.walk_current_palace()
+        settle(root, 3)
+        session = page.walk_window
+        check("走一遍开起来了", session is not None and mapped(session), bool(session))
+        if session is None:
+            return
+        first = session.items[0]
+        check("揭示之前看不到位置与四周（先提示后答案不能破）",
+              session.revealed is False
+              and not str(session.detail_var.get() or "").strip(),
+              session.detail_var.get())
+        check("揭示之前没有实景图", not mapped(session.shot_host))
+        session.show_answer()
+        settle(root, 2)
+        check("揭示后出现「位置与四周」",
+              "位置与四周" in session.detail_var.get()
+              and str(first["detail"]) in session.detail_var.get(),
+              session.detail_var.get())
+        check("揭示后出现实景图（弹窗里贴的那张跟着走到了这一站）",
+              "实景图" in session.shot_var.get(), session.shot_var.get())
+        check("揭示后实景图区真装了缩略图", mapped(session.shot_host))
+        session.close()
+        settle(root, 2)
+    finally:
+        app_main.BASE_DIR, app_main.ACCOUNT_IMAGE_DIR = saved_dirs
+        root.destroy()
+
+
 def main_test() -> None:
     test_skeleton()
     test_nav()
@@ -617,6 +888,7 @@ def main_test() -> None:
     test_today_training()
     test_todo_hook()
     test_discipline()
+    test_bank_detail()
 
 
 if __name__ == "__main__":
