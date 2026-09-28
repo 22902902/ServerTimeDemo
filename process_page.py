@@ -627,17 +627,21 @@ class ProcessPage(ttk.Frame):
         if flow is None:
             return
         step_count = len(self.db.fetch_process_steps(int(flow["id"])))
+        reclaim = self.db.collect_flow_orphan_screenshots(int(flow["id"]))
         if not messagebox.askyesno(
             self.app_title,
             f"确认删除流程「{flow['title']}」吗？\n\n"
             f"将同时删除该流程下的 {step_count} 个步骤记录与执行记录。\n"
-            f"（截图文件不会被删除，仍留在磁盘上）",
+            + (f"并回收 {len(reclaim)} 张不再被引用的截图。"
+               if reclaim else "（没有需要回收的截图）"),
             parent=self,
         ):
             return
         self.db.delete_process_flow(int(flow["id"]))
+        removed = self._reclaim_screenshots(reclaim)
         self.refresh_flows()
-        self._set_status("已删除流程。")
+        self._set_status("已删除流程。"
+                         + (f"回收了 {removed} 张截图。" if removed else ""))
 
     def toggle_favorite(self):
         flow = self._selected_flow()
@@ -919,17 +923,44 @@ class ProcessPage(ttk.Frame):
         step = self._resolve_step(step_id)
         if step is None:
             return
+        reclaim = self.db.collect_orphan_screenshots([int(step["id"])])
         if not messagebox.askyesno(
             self.app_title,
-            f"确认删除步骤【{step['step_no']}】{step['title']}吗？\n（截图文件保留在磁盘上）",
+            f"确认删除步骤【{step['step_no']}】{step['title']}吗？\n"
+            + (f"并回收 {len(reclaim)} 张不再被引用的截图。"
+               if reclaim else "（没有需要回收的截图）"),
             parent=self,
         ):
             return
         flow_id = int(step["flow_id"])
         self.db.delete_process_step(int(step["id"]))
         self.db.renumber_process_steps(flow_id)
+        removed = self._reclaim_screenshots(reclaim)
         self.refresh_flows(select_flow_id=flow_id)
-        self._set_status("已删除步骤，后续步骤序号已重排。")
+        self._set_status("已删除步骤，后续步骤序号已重排。"
+                         + (f"回收了 {removed} 张截图。" if removed else ""))
+
+    def _reclaim_screenshots(self, values) -> int:
+        """把「已经没有任何步骤引用」的截图从磁盘删掉，返回删掉的张数。
+
+        只在**用户确认过删除**之后调用，且值来自 ``collect_orphan_screenshots``
+        —— 数据层已经把「还有别人引用」的扣掉了，所以这里的删除面收窄到
+        「删了也没有人会找不到图」。
+
+        文件不在了不算错（用户可能自己清过），所以吞掉 ``OSError`` 而不是中断
+        整个删除流程：删文件失败不该让「删步骤」这件事失败。张数会回报到状态栏，
+        真出问题能对得上账。
+        """
+        removed = 0
+        for value in values or []:
+            for path in self.images.resolve_paths(value) or []:
+                try:
+                    if path.is_file():
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+        return removed
 
     def move_step(self, step_id: int, direction: int):
         if self.db.move_process_step(step_id, direction):
