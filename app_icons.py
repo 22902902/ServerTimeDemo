@@ -210,7 +210,26 @@ def _g_excel(g: Pen) -> None:            # Excel 宝典
     g.poly([(7.0, 3.4), (7.0, 12.6)])
 
 
-def _g_dot(g: Pen) -> None:              # 兜底（未登记图标的模块）
+def _g_palace(g: Pen) -> None:           # 记忆宫殿
+    # 山墙 + 三根柱子 + 基座：15px 下「一座建筑」的轮廓最好认，
+    # 和 _g_grid（四个方块）/ _g_book（翻开的书）都不会混。
+    g.poly([(8.0, 2.6), (3.0, 6.4), (13.0, 6.4), (8.0, 2.6)])
+    g.poly([(4.7, 8.0), (4.7, 12.0)])
+    g.poly([(8.0, 8.0), (8.0, 12.0)])
+    g.poly([(11.3, 8.0), (11.3, 12.0)])
+    g.poly([(3.0, 13.4), (13.0, 13.4)])
+
+
+def _g_mindmap(g: Pen) -> None:          # 思维导图
+    # 一个实心中心节点，折线分叉到右上 / 右下两个子节点 —— 「一分为二」的树，
+    # 比任何「三个圆点连线」的画法在 15px 下都更清楚。
+    g.box(2.6, 6.6, 6.0, 9.4, r=1.2, fill=True)
+    g.poly([(6.0, 8.0), (8.6, 8.0), (8.6, 4.6), (10.0, 4.6)])
+    g.poly([(6.0, 8.0), (8.6, 8.0), (8.6, 11.4), (10.0, 11.4)])
+    g.box(10.0, 3.2, 13.4, 5.8, r=1.0)
+    g.box(10.0, 10.2, 13.4, 12.8, r=1.0)
+
+
     g.box(6.8, 6.8, 9.2, 9.2, r=1.2, fill=True)
 
 
@@ -237,6 +256,8 @@ NAV_GLYPHS = {
     "module_study_demo": _g_book,
     "module_life_todo": _g_checklist,
     "module_life_excel": _g_excel,
+    "module_life_palace": _g_palace,
+    "module_life_mindmap": _g_mindmap,
 }
 
 

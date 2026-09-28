@@ -70,6 +70,8 @@ NAV_MODEL = [
         "items": [
             {"kind": "module", "key": "module_life_todo", "label": "待办"},
             {"kind": "module", "key": "module_life_excel", "label": "Excel 宝典"},
+            {"kind": "module", "key": "module_life_palace", "label": "记忆宫殿"},
+            {"kind": "module", "key": "module_life_mindmap", "label": "思维导图"},
             {"kind": "module", "key": "module_study_notes", "label": "笔记"},
             {"kind": "module", "key": "module_study_demo", "label": "Python 学习"},
         ],

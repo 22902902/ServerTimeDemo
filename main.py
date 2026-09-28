@@ -165,6 +165,11 @@ from todo_db import TodoDB  # 待办事项数据库（含法定节假日日历�
 from todo_page import TodoAlertDialog, TodoPage  # 待办 / 提醒事项页面
 from excel_db import ExcelDB  # Excel 学习中心数据库（200 个内置函数 + 复习进度）
 from excel_page import ExcelImageTools, ExcelLearningPage  # Excel 学习中心页面
+from memory_db import MemoryPalaceDB  # 记忆宫殿：地点桩 + 记忆项 + 间隔重复
+from memory_page import MemoryPalacePage  # 记忆宫殿页面（六视图 + 走一遍）
+from mindmap_db import MindmapDB  # 思维导图：大纲节点 + 盲画间隔重复
+from mindmap_page import MindMapPage  # 思维导图页面（五视图 + 自动布局画布）
+from training_todo_bridge import TrainingTodoBridge  # 训练模块 → 待办的写入胶水
 from excel_todo_bridge import ExcelTodoBridge  # Excel 宝典 → 待办：把「今日复习」变成一条待办
 from excel_note_bridge import ExcelNoteBridge  # Excel 宝典 → 学习笔记：把自测整理成一套模板
 from startup_manager import (  # 开机自启动：只写 HKCU 的 Run 键，当前用户级、不用提权
@@ -2981,6 +2986,16 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         # 落点是一个**锁定分类**（见 study_notes_db.ensure_locked_category）：
         # 它在笔记模块里改不了名、删不掉，但完全不挡用户自己的笔记与分类。
         self.excel_note_bridge = ExcelNoteBridge(self.study_notes_db)
+
+        # 记忆宫殿 / 思维导图：与其它模块共用同一个 db 文件（表名前缀 memory_ /
+        # mindmap_ 自成一套，互不干扰）。首次启动自动建表，并把内置宫殿模板、
+        # 题库、导图范式灌进去（幂等，重跑不会重复建）。
+        self.memory_db = MemoryPalaceDB(DB_PATH)
+        self.mindmap_db = MindmapDB(DB_PATH)
+        # 训练模块（记忆宫殿 / 思维导图）→ 待办的写入胶水。与 Excel 那一套同一手法：
+        # 只包着 todo_db、不碰界面；页面拿到的是 make_hook("memory"/"mindmap")
+        # 的返回值，所以两个页面都不需要 import main，也绕不出环形导入。
+        self.training_todo_bridge = TrainingTodoBridge(self.todo_db)
         # 开机自启动的注册表读写。script 只在源码版用得上（打包版直接拉 exe 自己）。
         # 这个对象**不碰界面**，所以主窗口、托盘菜单、设置对话框都能直接调它。
         self.startup_manager = StartupManager(script=Path(__file__).resolve())
@@ -3048,6 +3063,22 @@ class ExpiryManagerApp(TkinterDnD.Tk):
                         "7 阶段路径、20 条实战配方、间隔重复复习与打卡统计。",
                 "page": "excel_learn",
             },
+            "module_life_palace": {
+                "title": "记忆宫殿",
+                "path": "生活 / 记忆宫殿",
+                "desc": "把要记的东西挂到熟悉路线的地点桩上：内置 3 套宫殿模板、100 个数字桩、"
+                        "5 个题库。走一遍先给提示后给答案，按 1/3/7/15/30/60/120 天间隔复习，"
+                        "带打卡日历与掌握度分布。",
+                "page": "memory_palace",
+            },
+            "module_life_mindmap": {
+                "title": "思维导图",
+                "path": "生活 / 思维导图",
+                "desc": "大纲驱动 + 自动布局的导图工作台：10 张内置范式、折叠 / 缩放 / 重排、"
+                        "Markdown / OPML / 纯文本 / PNG 四种导出。盲画只给中心主题与结构规模，"
+                        "逼自己回忆整张骨架。",
+                "page": "mindmap",
+            },
             "module_study_notes": {
                 "title": "学习笔记",
                 "path": "学习 / 笔记",
@@ -3088,6 +3119,8 @@ class ExpiryManagerApp(TkinterDnD.Tk):
             "system_toolbox": (self.system_toolbox_page, None),
             "todo":           (self.todo_page,            self.todo_page_refresh),
             "excel_learn":    (self.excel_learn_page,     self.excel_page_refresh),
+            "memory_palace":  (self.memory_palace_page,   self.memory_page_refresh),
+            "mindmap":        (self.mindmap_page,         self.mindmap_page_refresh),
             "study_demo":     (self.study_demo_page,     None),
             "note":           (self.note_page,          None),
             "placeholder":    (self.placeholder_page,    None),
@@ -3380,6 +3413,14 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         # Excel 学习中心页面
         self.excel_learn_page = ttk.Frame(self.page_container)
         self._build_excel_page()
+
+        # 记忆宫殿页面
+        self.memory_palace_page = ttk.Frame(self.page_container)
+        self._build_memory_palace_page()
+
+        # 思维导图页面
+        self.mindmap_page = ttk.Frame(self.page_container)
+        self._build_mindmap_page()
 
         # 简单笔记页面
         self.note_page = ttk.Frame(self.page_container)
@@ -3982,6 +4023,43 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         （含「当天不重复建」与「不被顺延到工作日」两条约定）。
         """
         return self.excel_todo_bridge.create_review_todo(payload)
+
+    def _build_memory_palace_page(self):
+        """构建记忆宫殿页面（嵌入主窗口，非独立窗口）。
+
+        「生成今日训练待办」走注入的 ``todo_hook``（``TrainingTodoBridge``）——
+        页面只拿到一个可调用对象，**不反向 import main、不 import todo_db**。
+        ``markdown`` 注入 ``markdown_view`` 模块渲染教学卡，没注入就退化成纯文本。
+        """
+        self.memory_view = MemoryPalacePage(
+            self.memory_palace_page,
+            self.memory_db,
+            app_title=APP_TITLE,
+            on_status=self.log_status,
+            todo_hook=self.training_todo_bridge.make_hook("memory"),
+            markdown=markdown_view,
+        )
+        self.memory_view.pack(fill="both", expand=True)
+
+    def memory_page_refresh(self):
+        """页面切换垫片：拉一次最新进度，再重画当前视图。"""
+        self.memory_view.refresh()
+
+    def _build_mindmap_page(self):
+        """构建思维导图页面（嵌入主窗口，非独立窗口）。同一套注入手法。"""
+        self.mindmap_view = MindMapPage(
+            self.mindmap_page,
+            self.mindmap_db,
+            app_title=APP_TITLE,
+            on_status=self.log_status,
+            todo_hook=self.training_todo_bridge.make_hook("mindmap"),
+            markdown=markdown_view,
+        )
+        self.mindmap_view.pack(fill="both", expand=True)
+
+    def mindmap_page_refresh(self):
+        """页面切换垫片：拉一次最新进度，再重画当前视图。"""
+        self.mindmap_view.refresh()
 
     def _build_study_demo_page(self):
         """构建 Python 学习辅助模块页面"""
