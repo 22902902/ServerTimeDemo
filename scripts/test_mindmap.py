@@ -36,7 +36,7 @@
 覆盖
 ------------------------------------------------------------------------------
 A. 训练内核      与记忆宫殿共用一套 SRS（24 步反馈序列逐格一致）
-B. 种子一致性    10 卡 / 10 模板 / 码唯一 / 装载自检
+B. 种子一致性    10 卡 / 13 模板 / 码唯一 / 装载自检
 C. 建表与幂等    五张表 / 构造即灌模板 / 重开不重复 / 自建图不参与 source_key 唯一
 D. 导图 CRUD     增改查删 / 改名同步中心主题 / 级联删 / 关键词与分类
 E. 大纲 <-> 树   往返 / 相对缩进 / 项目符号 / Tab / id 认领三步 / 保住折叠与备注
@@ -49,6 +49,7 @@ K. 盲画          只给数量不给文字 / 逐级展开 / 层数 = max_depth
 L. 折叠与搬运    真节点 / (None) 不匹配 / apply_collapsed 往返 / 文本重存不丢状态
 M. 页面契约      页面用到的每个 db 入口与 ml 函数都存在、行字段齐全
 N. 待办桥        盲画措辞 / 不被顺延 / 当天幂等 / 与记忆宫殿互不干扰
+O. 游戏训练包    数独 / CS2 / 象棋 三张知识树：分类 / 分支数 / 往返一致 / 能建图
 
 用法：
     python scripts/test_mindmap.py
@@ -1303,6 +1304,62 @@ def test_todo_bridge() -> None:
           result["created"] is True and result["item_id"] == 777, result)
 
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# O. 游戏训练包（数独 / CS2 / 中国象棋）
+# ══════════════════════════════════════════════════════════════════════════
+# 三张知识树。这里锁的是「**大纲首行 = 中心主题**」和「往返一致」两件事 ——
+# ``create_from_template`` 出来的图，标题取的是大纲首行，两者一旦不同步，
+# 建出来的图会顶着另一个名字。
+GAME_MAPS = [
+    ("TPL_MM_SUDOKU", "数独解法体系", 5),
+    ("TPL_MM_CS2", "CS2 知识树", 5),
+    ("TPL_MM_XIANGQI", "中国象棋知识树", 5),
+]
+
+
+def test_game_maps() -> None:
+    section("[O] 游戏训练包（数独 / CS2 / 象棋）")
+    codes = {t["code"] for t in mindmap_seed.TEMPLATES}
+    check("三个游戏模板都在", all(c in codes for c, _, _ in GAME_MAPS),
+          [c for c, _, _ in GAME_MAPS if c not in codes])
+    check("新增了「游戏训练」分类",
+          "游戏训练" in mindmap_seed.template_categories(),
+          mindmap_seed.template_categories())
+
+    tmp = tempfile.mkdtemp(prefix="mm_game_")
+    try:
+        db = MindmapDB(Path(tmp) / "game.db")
+        for code, topic, min_branches in GAME_MAPS:
+            tpl = mindmap_seed.get_template(code)
+            check(f"{code} 取得到", tpl is not None)
+            if tpl is None:
+                continue
+            check(f"{code} 的分类是「游戏训练」",
+                  tpl["category"] == "游戏训练", tpl["category"])
+            first = tpl["outline"].splitlines()[0].strip()
+            check(f"{code} 大纲首行就是中心主题 {topic!r}", first == topic, first)
+
+            tree = ml.parse_outline(tpl["outline"])
+            brief = ml.blind_brief(tree)
+            check(f"{code} 至少 {min_branches} 条一级分支",
+                  int(brief["branches"]) >= min_branches, brief)
+            check(f"{code} 至少有层级（depth ≥ 2）", int(brief["depth"]) >= 2, brief)
+            check(f"{code} 大纲往返一致",
+                  ml.parse_outline(ml.outline_text(tree)) == tree)
+
+            mid = db.create_from_template(code)
+            loaded = db.load_tree(mid)
+            after = ml.blind_brief(loaded)
+            check(f"{code} 建成图后节点数与模板一致",
+                  int(after["total"]) == int(brief["total"]),
+                  (after["total"], brief["total"]))
+            check(f"{code} 建成图的中心主题还是 {topic!r}",
+                  after["root"] == topic, after["root"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main_test() -> None:
     test_srs_parity()
     test_seed()
@@ -1316,6 +1373,7 @@ def main_test() -> None:
     test_export()
     test_blind()
     test_collapse()
+    test_game_maps()
     test_page_contracts()
     test_todo_bridge()
 

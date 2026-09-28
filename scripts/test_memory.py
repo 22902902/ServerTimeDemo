@@ -28,7 +28,7 @@
 覆盖
 ------------------------------------------------------------------------------
 A. 训练内核      与 excel_db 的口径钉在一起 / 阶梯 / 三键 / 打卡连续
-B. 种子一致性    10 卡 / 3 宫殿 / 38 桩 / 100 数字桩 / 5 题库 130 题 / 装载自检
+B. 种子一致性    10 卡 / 6 宫殿 / 98 桩 / 100 数字桩 / 8 题库 190 题 / 装载自检
 C. 建表与幂等    新库一次到位 / 重开不重复灌 / 老库（只有老表）不被动
 D. 宫殿 CRUD      增改查删 / 模板导入幂等 / 删宫殿两种口径
 E. 地点桩        seq 紧凑 / 删中间重排 / reorder / move / 删桩不删项
@@ -40,6 +40,7 @@ J. 题库入库      导入幂等 / 自动挂桩 / 桩不够时收尾 / 二次�
 K. 小工具        教学卡 / suggest_new_count / split_tags / format_item_line
 L. 页面契约      页面用到的每个数据入口都存在、字段齐全
 M. 待办桥        只在点击时建 / 当天幂等 / 不被顺延 / 两个模块共用一套规则
+N. 游戏训练包    数独 / CS2 / 象棋 三套「宫殿 + 题库」逐条对齐 / 走一遍顺序 / 幂等
 
 用法：
     python scripts/test_memory.py
@@ -266,9 +267,12 @@ def test_palace_crud() -> None:
     before_n = len(db.list_palaces())
     ids = db.import_all_templates()
     again = db.import_all_templates()
-    check("导入全部模板返回 3 个 id", len(ids) == 3, ids)
+    # 模板总数会随内置内容增加（v1.17.0 从 3 套加到 6 套）—— 判据必须
+    # **由种子推导**，写死的数字只会在「加内容」时假红一次。
+    tpl_total = len(memory_seed.PALACE_TEMPLATES)
+    check(f"导入全部模板返回 {tpl_total} 个 id", len(ids) == tpl_total, ids)
     check("重复导入不会再建（幂等）",
-          again == ids and len(db.list_palaces()) == before_n + 3,
+          again == ids and len(db.list_palaces()) == before_n + tpl_total,
           (again, before_n, len(db.list_palaces())))
     check("模板宫殿带 source_key 可追溯（前缀 template:）",
           db.get_palace_by_source("template:TPL_HOME") is not None,
@@ -919,6 +923,89 @@ def test_todo_bridge() -> None:
           result["created"] is True and result["item_id"] == 4242, result)
 
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# N. 游戏训练包（数独 / CS2 / 中国象棋）
+# ══════════════════════════════════════════════════════════════════════════
+# 三套「宫殿模板 + 配套题库」。**配对关系才是内容本身**：宫殿第 N 桩必须正好接住
+# 题库第 N 条（import_bank 就是按序号 1:1 挂桩的）。桩与题错位了，界面不报错、
+# 数据也「有值」，只是这条路线背起来莫名其妙 —— 所以这里逐条比对，不是只数个数。
+GAME_PACKS = [
+    ("TPL_SUDOKU", "BANK_SUDOKU", 20),
+    ("TPL_CS2_MIRAGE", "BANK_CS2_MIRAGE", 20),
+    ("TPL_XIANGQI", "BANK_XIANGQI", 20),
+]
+
+
+def test_game_packs() -> None:
+    section("[N] 游戏训练包（数独 / CS2 / 象棋）")
+    tpl_codes = {t["code"] for t in memory_seed.PALACE_TEMPLATES}
+    bank_codes = {b["code"] for b in memory_seed.BANKS}
+    check("三个游戏宫殿模板都在",
+          all(t in tpl_codes for t, _, _ in GAME_PACKS),
+          [t for t, _, _ in GAME_PACKS if t not in tpl_codes])
+    check("三个配套题库都在",
+          all(b in bank_codes for _, b, _ in GAME_PACKS),
+          [b for _, b, _ in GAME_PACKS if b not in bank_codes])
+
+    tmp = tempfile.mkdtemp(prefix="mem_game_")
+    try:
+        db = MemoryPalaceDB(Path(tmp) / "game.db")
+        for tpl_code, bank_code, expect in GAME_PACKS:
+            tpl = next(t for t in memory_seed.PALACE_TEMPLATES
+                       if t["code"] == tpl_code)
+            check(f"{tpl_code} 恰好 {expect} 桩", len(tpl["loci"]) == expect,
+                  len(tpl["loci"]))
+            check(f"{tpl_code} 的 kind 在官方集合内",
+                  tpl["kind"] in memory_db.PALACE_KINDS, tpl["kind"])
+            check(f"{tpl_code} 桩名不重复",
+                  len({n for n, _ in tpl["loci"]}) == len(tpl["loci"]))
+
+            pid = db.import_template(tpl_code)
+            loci = db.list_loci(pid)
+            check(f"{tpl_code} 导入后 {expect} 桩", len(loci) == expect, len(loci))
+
+            result = db.import_bank(bank_code, pid)
+            check(f"{bank_code} 导入 {expect} 条",
+                  result["created"] == expect, result)
+            items = db.list_items(palace_id=pid)
+            check(f"{bank_code} 全部挂在这一座宫殿上",
+                  len(items) == expect, len(items))
+
+            # ★ 核心断言：第 N 条落在第 N 桩（严格按 seq 顺序，不是按 id 巧合）
+            check(f"{tpl_code} 记忆项按桩序 1:1 落位",
+                  [it["locus_id"] for it in items] == [l["id"] for l in loci],
+                  [(it["front"], it["locus_id"]) for it in items][:3])
+
+            # 逐条：桩名与题面必须指向同一个东西（题面去掉括号后应被桩名包含）
+            mismatched = []
+            for locus, item in zip(loci, items):
+                bare = str(item["front"]).split("（")[0].split("(")[0].strip()
+                if bare and bare not in str(locus["name"]):
+                    mismatched.append((locus["name"], item["front"]))
+            check(f"{tpl_code} 桩名与题面逐条对得上", not mismatched,
+                  mismatched[:3])
+
+            # 幂等：再导一次一条都不新增
+            again = db.import_bank(bank_code, pid)
+            check(f"{bank_code} 重导幂等",
+                  again["created"] == 0 and again["skipped"] == expect, again)
+
+        # 「走一遍」的顺序 = 桩 seq —— 这是记忆宫殿的核心动作，顺序错了就退化成抽背
+        pid = db.import_template("TPL_XIANGQI")
+        db.import_bank("BANK_XIANGQI", pid)
+        order = db.walk_order(pid)
+        check("走一遍覆盖全部 20 条", len(order) == 20, len(order))
+        check("走一遍第一站就是第 1 桩「马后炮」",
+              bool(order) and str(order[0]["front"]).startswith("马后炮"),
+              order[0]["front"] if order else None)
+        check("走一遍的站号是 1..20 递增",
+              [int(r["station"]) for r in order] == list(range(1, 21)),
+              [int(r["station"]) for r in order][:5])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main_test() -> None:
     test_core_matches_excel()
     test_seed_consistency()
@@ -930,6 +1017,7 @@ def main_test() -> None:
     test_srs()
     test_checkins()
     test_bank_import()
+    test_game_packs()
     test_helpers()
     test_page_contracts()
     test_todo_bridge()
