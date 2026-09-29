@@ -498,6 +498,34 @@ def layout_size(tree, **kwargs):
     return layout(tree, **kwargs)["size"]
 
 
+def apply_positions(layout, positions) -> dict:
+    """把手工拖出来的坐标盖到自动布局上。**原地改并返回同一份 layout**。
+
+    只盖传进来的那几个节点：没拖过的节点保持自动布局给的位置 —— 于是新加的
+    节点不会因为没有手工坐标就消失。盖完**重算 size / bounds**：节点被拖到远处
+    之后，画布的滚动区必须跟着变大，否则那边就滚不过去了。
+    """
+    if not positions:
+        return layout
+    for record in layout["nodes"]:
+        key = record.get("key")
+        if key is None:
+            continue
+        pos = positions.get(int(key))
+        if pos is None:
+            continue
+        record["x"], record["y"] = float(pos[0]), float(pos[1])
+    nodes = layout["nodes"]
+    if nodes:
+        x0 = min(n["x"] for n in nodes)
+        y0 = min(n["y"] for n in nodes)
+        x1 = max(n["x"] + n["w"] for n in nodes)
+        y1 = max(n["y"] + n["h"] for n in nodes)
+        layout["bounds"] = (x0, y0, x1, y1)
+        layout["size"] = (max(1.0, x1 - x0), max(1.0, y1 - y0))
+    return layout
+
+
 def edge_points(parent, child):
     """一条连线的端点：父节点右中点 -> 子节点左中点。"""
     return (parent["x"] + parent["w"], parent["y"] + parent["h"] / 2.0,

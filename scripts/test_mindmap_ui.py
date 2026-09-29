@@ -978,6 +978,119 @@ def test_algorithm_selector() -> None:
         root.destroy()
 
 
+class _Ev:
+    """假的事件对象。Tk 的事件对象也就是几个属性，够用就行。"""
+
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+
+def test_free_canvas() -> None:
+    section("[K] 自由画布（真的拖一次，坐标要进库）")
+    db, map_id = cluster("freecv")
+    root, page = build_page(db)
+    try:
+        page.show_view(VIEW_EDITOR)
+        settle(root, 3)
+        page.current_map_id = map_id
+        page.tree = db.load_tree(map_id)
+        settle(root, 3)
+
+        check("编辑视图有「自由布局」按钮", hasattr(page, "free_button"))
+        check("按钮真的被映射出来（不是只 new 了不 pack）",
+              bool(page.free_button.winfo_ismapped())
+              and int(page.free_button.winfo_width()) > 40,
+              (page.free_button.winfo_ismapped(),
+               page.free_button.winfo_width()))
+        check("默认关着（不摆位置的时候就是自动布局）",
+              page.free_layout is False
+              and "关" in str(page.free_button.cget("text")),
+              page.free_button.cget("text"))
+
+        records = page.canvas_layout.get("nodes") or []
+        node = next((r for r in records if r.get("key") is not None
+                     and int(r["depth"]) == 1), None)
+        check("布局里有可拖的一级分支", node is not None, len(records))
+        if node is None:
+            return
+
+        def screen_of(record):
+            """布局坐标 -> 画布像素。拖动手感全靠这一换算。"""
+            ox, oy = page._canvas_offset
+            return (record["x"] * page.zoom + ox + record["w"] * page.zoom / 2.0,
+                    record["y"] * page.zoom + oy + record["h"] * page.zoom / 2.0)
+
+        # 关着的时候按下去：不该抓任何节点（否则点一下就把节点挪了）
+        cx, cy = screen_of(node)
+        page._on_canvas_press(_Ev(cx, cy))
+        check("关着的时候按下去不抓节点", page._drag is None)
+        page._on_canvas_drag(_Ev(cx + 80, cy + 40))
+        check("关着的时候拖动也不写坐标", db.node_positions(map_id) == {},
+              db.node_positions(map_id))
+
+        # 打开自由布局，真的拖一次
+        page.toggle_free_layout()
+        settle(root, 2)
+        check("开了之后按钮文案跟着变",
+              page.free_layout is True and "开" in str(page.free_button.cget("text")),
+              page.free_button.cget("text"))
+
+        cx, cy = screen_of(node)
+        check("命中测试找得到这个节点（by_iid 与 tag 不是一个东西，拿错就拖不动）",
+              page._node_at(_Ev(cx, cy)) == int(node["key"]),
+              page._node_at(_Ev(cx, cy)))
+        page._on_canvas_press(_Ev(cx, cy))
+        check("按下之后抓住了节点", page._drag is not None)
+        page._on_canvas_drag(_Ev(cx + 120, cy + 60))
+        settle(root, 2)
+        during = page._free_pos.get(int(node["key"]))
+        check("拖动过程中画面就跟着走了（不是松手才动）", during is not None, during)
+        page._on_canvas_release(_Ev(cx + 120, cy + 60))
+        settle(root, 2)
+
+        saved = db.node_positions(map_id)
+        check("**松手之后坐标进了库**（下次打开还在）",
+              int(node["key"]) in saved, saved)
+        if int(node["key"]) in saved:
+            auto_x = float(node["x"])
+            check("坐标确实挪动了（不是原地打转）",
+                  abs(saved[int(node["key"])][0] - auto_x) > 1.0,
+                  (auto_x, saved[int(node["key"])]))
+            check("坐标被夹在 >= 0（负坐标会跑到画布外，看着像节点丢了）",
+                  saved[int(node["key"])][0] >= 0.0
+                  and saved[int(node["key"])][1] >= 0.0, saved[int(node["key"])])
+
+        # 关掉 -> 回到自动布局；再开 -> 手工位置回来
+        page.toggle_free_layout()
+        settle(root, 2)
+        auto_now = page._node_record(int(node["key"]))
+        check("关掉自由布局：节点回到自动排布的位置",
+              abs(float(auto_now["x"]) - float(node["x"])) < 0.01,
+              (auto_now["x"], node["x"]))
+        page.toggle_free_layout()
+        settle(root, 2)
+        free_now = page._node_record(int(node["key"]))
+        check("再打开：手工摆的位置还在（坐标是记在库里的）",
+              abs(float(free_now["x"]) - saved[int(node["key"])][0]) < 0.01,
+              (free_now["x"], saved.get(int(node["key"]))))
+
+        # 点一下但没拖：不该写坐标（否则点一下节点就"被摆过"了）
+        before = dict(db.node_positions(map_id))
+        other = next((r for r in page.canvas_layout["nodes"]
+                      if r.get("key") is not None
+                      and int(r["key"]) != int(node["key"])
+                      and int(r["depth"]) == 1), None)
+        if other is not None:
+            ox, oy = screen_of(other)
+            page._on_canvas_press(_Ev(ox, oy))
+            page._on_canvas_release(_Ev(ox, oy))
+            check("点一下不拖：不写坐标", db.node_positions(map_id) == before,
+                  db.node_positions(map_id))
+    finally:
+        root.destroy()
+
+
 def main_test() -> None:
     test_skeleton()
     test_nav()
@@ -989,6 +1102,7 @@ def main_test() -> None:
     test_todo_hook()
     test_discipline()
     test_algorithm_selector()
+    test_free_canvas()
 
 
 if __name__ == "__main__":

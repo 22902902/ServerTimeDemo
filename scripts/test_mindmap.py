@@ -52,6 +52,7 @@ N. 待办桥        盲画措辞 / 不被顺延 / 当天幂等 / 与记忆宫殿
 O. 游戏训练包    数独 / CS2 / 象棋 三张知识树：分类 / 分支数 / 往返一致 / 能建图
 P. SRS 三算法    与记忆宫殿同款内核（同串间隔）/ 各存各的设置 / FSRS 同量级
 Q. 导图转宫殿    中心主题->宫殿 / 一级分支->桩 / 更深层->记忆项 / 幂等追加 / 不抹手工劳动
+R. 自由画布      pos_x/pos_y 两列（NULL=自动）/ 老库 ALTER / 只盖拖过的节点 / 清掉回自动
 
 用法：
     python scripts/test_mindmap.py
@@ -1568,6 +1569,111 @@ def source_key_of(palace_db, map_id):
     return palace_db.get_palace_by_source(mmb.source_key(map_id))
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# R. 自由画布（手工坐标）
+# ══════════════════════════════════════════════════════════════════════════
+_OLD_NODES_DDL = """
+CREATE TABLE mindmap_nodes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    map_id     INTEGER NOT NULL,
+    parent_id  INTEGER NOT NULL DEFAULT 0,
+    seq        INTEGER NOT NULL DEFAULT 0,
+    depth      INTEGER NOT NULL DEFAULT 0,
+    text       TEXT NOT NULL DEFAULT '',
+    note       TEXT NOT NULL DEFAULT '',
+    collapsed  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+)
+"""
+
+
+def test_free_positions() -> None:
+    section("[R] 自由画布（pos_x / pos_y：NULL = 走自动布局）")
+    db = bare("free")
+    map_id = db.add_map("摆一摆")
+    db.save_outline(map_id, ml.parse_outline("根\n- 甲\n- 乙\n"))
+    nodes = db.list_nodes(map_id)
+    targets = [n for n in nodes if str(n["text"]).strip() in ("甲", "乙")]
+    check("样例导图有两条分支可拖", len(targets) == 2,
+          [n["text"] for n in nodes])
+
+    # -- 1. 没摆过 = 库里没有坐标（不是 0，0 是合法的左上角坐标） --------
+    check("新图没有任何手工坐标", db.node_positions(map_id) == {},
+          db.node_positions(map_id))
+    cols = _node_columns(db.db_path)
+    check("mindmap_nodes 有 pos_x / pos_y 两列",
+          {"pos_x", "pos_y"} <= cols, sorted(cols))
+
+    # -- 2. 存一个、读回来；**只动这一行** ------------------------------
+    first, second = int(targets[0]["id"]), int(targets[1]["id"])
+    check("set_node_pos 返回 True（真的写到了行）",
+          db.set_node_pos(first, 320.5, 88.25) is True)
+    positions = db.node_positions(map_id)
+    check("读回来的坐标一致", positions.get(first) == (320.5, 88.25), positions)
+    check("**没拖过的那个仍然没有坐标**（只写这一行，不碰别的）",
+          second not in positions, positions)
+
+    # -- 3. 清掉 = 回到自动布局 ----------------------------------------
+    cleared = db.clear_node_positions(map_id)
+    check("清掉返回受影响的行数", cleared == 1, cleared)
+    check("清完之后又是空的（= 一律自动布局）",
+          db.node_positions(map_id) == {}, db.node_positions(map_id))
+
+    # -- 4. apply_positions：只盖传进来的、盖完尺寸要跟着变大 -----------
+    tree = db.load_tree(map_id)
+    auto = ml.layout(tree)
+    by_key = {n["key"]: n for n in auto["nodes"]}
+    auto_xy = {k: (round(v["x"], 2), round(v["y"], 2)) for k, v in by_key.items()}
+    size_before = tuple(round(v, 2) for v in auto["size"])
+
+    moved = ml.apply_positions(ml.layout(tree), {first: (900.0, 700.0)})
+    moved_by_key = {n["key"]: n for n in moved["nodes"]}
+    check("手工坐标盖上了", (round(moved_by_key[first]["x"], 2),
+                            round(moved_by_key[first]["y"], 2)) == (900.0, 700.0),
+          (moved_by_key[first]["x"], moved_by_key[first]["y"]))
+    check("**没拖过的节点还在自动布局给的位置**（不会因为没有坐标就消失）",
+          (round(moved_by_key[second]["x"], 2), round(moved_by_key[second]["y"], 2))
+          == auto_xy[second],
+          (round(moved_by_key[second]["x"], 2), round(moved_by_key[second]["y"], 2)))
+    # 节点被拖到远处：滚动区必须跟着变大，否则那边根本滚不过去
+    check("盖完之后 size 跟着变大（不然远处滚不到）",
+          moved["size"][0] > auto["size"][0] and moved["size"][1] > auto["size"][1],
+          (size_before, tuple(round(v, 2) for v in moved["size"])))
+    check("bounds 也跟着更新",
+          moved["bounds"][2] >= 900.0, moved["bounds"])
+
+    # -- 5. 空坐标 / 不存在的节点都不许炸 ------------------------------
+    same = ml.apply_positions(ml.layout(tree), {})
+    check("传空坐标 = 原样返回（自动布局）",
+          [(round(n["x"], 2), round(n["y"], 2)) for n in same["nodes"]]
+          == [(round(n["x"], 2), round(n["y"], 2)) for n in auto["nodes"]])
+    check("传一个不存在的节点 id 也不炸",
+          ml.apply_positions(ml.layout(tree), {999999: (1.0, 2.0)})["nodes"]
+          == ml.layout(tree)["nodes"])
+
+    # -- 6. 老库迁移：没有这两列的表，重开要补出来 ----------------------
+    old_path = Path(tempfile.mkdtemp(prefix="mm_oldcols_")) / "old.db"
+    _TMP.append(old_path.parent)
+    import sqlite3
+    import sqlite3
+    with sqlite3.connect(str(old_path)) as conn:
+        conn.execute(_OLD_NODES_DDL)
+    db2 = MindmapDB(old_path)
+    cols2 = _node_columns(db2.db_path)
+    check("老库重开后补出了 pos_x / pos_y（否则自由画布**静默失效**）",
+          {"pos_x", "pos_y"} <= cols2, sorted(cols2))
+    check("补完之后照样能存坐标",
+          db2.node_positions(1) == {})
+
+
+def _node_columns(db_path) -> set:
+    """``mindmap_nodes`` 的列名集合 —— 直接 PRAGMA 读真库，不猜建表语句。"""
+    import sqlite3
+    import sqlite3
+    with sqlite3.connect(str(db_path)) as conn:
+        return {str(r[1]) for r in conn.execute("PRAGMA table_info(mindmap_nodes)")}
+
+
 def main_test() -> None:
     test_srs_parity()
     test_seed()
@@ -1584,6 +1690,7 @@ def main_test() -> None:
     test_game_maps()
     test_srs_algorithms()
     test_map_to_palace()
+    test_free_positions()
     test_page_contracts()
     test_todo_bridge()
 

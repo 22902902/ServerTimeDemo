@@ -50,6 +50,17 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _stamp(day) -> str:
+    """给「指定日」打时间戳：日期部分用 ``day``，时分秒取当下。
+
+    ``_now()`` 一律写墙钟，于是「按 9-28 记一次」在库里落的却是今天的日期，
+    ``new_today(today='9-28')`` 数出来是 0。调用方给了「今天」，写库就得认
+    这个口径 —— 不传时 ``day`` 就是今天，与 ``_now()`` 完全等价。
+    """
+    return "{} {}".format(day.isoformat(),
+                          datetime.now().strftime("%H:%M:%S"))
+
+
 def _like_kw(keyword) -> str:
     return f"%{str(keyword or '').strip()}%"
 
@@ -98,6 +109,8 @@ class MindmapDB:
                     text       TEXT NOT NULL DEFAULT '',
                     note       TEXT NOT NULL DEFAULT '',
                     collapsed  INTEGER NOT NULL DEFAULT 0,
+                    pos_x      REAL,
+                    pos_y      REAL,
                     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
                 )
             """)
@@ -164,6 +177,7 @@ class MindmapDB:
 
             # 老库没有的列在这里补上（新库建表时已经有了，这里是空操作）
             self._ensure_train_columns(conn)
+            self._ensure_node_columns(conn)
 
     def _ensure_train_columns(self, conn) -> None:
         """缺列就 ``ALTER TABLE ADD COLUMN``；**不动存量数据、不重建表**。
@@ -185,6 +199,23 @@ class MindmapDB:
             if column in have:
                 continue
             conn.execute("ALTER TABLE mindmap_progress ADD COLUMN {} {}".format(
+                column, ddl))
+
+
+    def _ensure_node_columns(self, conn) -> None:
+        """``mindmap_nodes`` 缺的列在这里补上（``pos_x`` / ``pos_y``）。
+
+        ``CREATE TABLE IF NOT EXISTS`` 只帮新库 —— 用户 exe 里那份 db 早就建好了，
+        不补这一步，自由画布在老库上会**静默失效**（存不进坐标，界面上拖得动、
+        重开就没了）。
+        """
+        ddls = {"pos_x": "REAL", "pos_y": "REAL"}
+        have = {str(row["name"])
+                for row in conn.execute("PRAGMA table_info(mindmap_nodes)")}
+        for column, ddl in ddls.items():
+            if column in have:
+                continue
+            conn.execute("ALTER TABLE mindmap_nodes ADD COLUMN {} {}".format(
                 column, ddl))
 
     # ==================================================================
@@ -569,6 +600,47 @@ class MindmapDB:
                                (int(node_id),)).fetchone()
         return dict(row) if row else None
 
+
+    # ==================================================================
+    # 自由画布（手工拖出来的节点坐标）
+    # ==================================================================
+    def node_positions(self, map_id) -> dict:
+        """**被手工拖过**的节点坐标 ``{node_id: (x, y)}``。
+
+        没拖过的节点**不出现在结果里**（库里是 NULL）—— 调用方拿到的是「要覆盖
+        哪些」而不是「全部节点在哪」，于是新加的节点照旧走自动布局。
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, pos_x, pos_y FROM mindmap_nodes WHERE map_id = ? "
+                "AND pos_x IS NOT NULL AND pos_y IS NOT NULL",
+                (int(map_id),)).fetchall()
+        return {int(r["id"]): (float(r["pos_x"]), float(r["pos_y"]))
+                for r in rows}
+
+    def set_node_pos(self, node_id, x, y) -> bool:
+        """记住这个节点被拖到了哪。**只写这一行**，别的坐标一个字节都不动。"""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE mindmap_nodes SET pos_x = ?, pos_y = ? WHERE id = ?",
+                (float(x), float(y), int(node_id)))
+        return cur.rowcount > 0
+
+    def clear_node_positions(self, map_id) -> int:
+        """回到自动布局：清掉这张图的手工坐标，返回**真的清掉了几处**。
+
+        只清 ``pos_x`` / ``pos_y`` 不为空的行 —— SQLite 的 ``rowcount``
+        数的是**匹配到的行**，不加这个条件会把「本来就没坐标的节点」也算
+        进来，于是一张 3 节点的图永远返回 3，界面上「已清掉 3 处」是虚报。
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE mindmap_nodes SET pos_x = NULL, pos_y = NULL "
+                "WHERE map_id = ? AND "
+                "(pos_x IS NOT NULL OR pos_y IS NOT NULL)",
+                (int(map_id),))
+        return int(cur.rowcount or 0)
+
     def update_node(self, node_id, **fields) -> bool:
         allowed = ("text", "note", "collapsed", "seq", "depth", "parent_id")
         sets: list[str] = []
@@ -870,7 +942,7 @@ class MindmapDB:
                     difficulty = excluded.difficulty
                 """,
                 (mid, int(state["mastery"]), int(state["correct_streak"]),
-                 int(state["interval_days"]), next_at, _now(), _now(),
+                 int(state["interval_days"]), next_at, _stamp(anchor), _stamp(anchor),
                  anchor.isoformat(),
                  float(state["ease_factor"]), int(state["reps"]),
                  float(state["stability"]), float(state["difficulty"])))

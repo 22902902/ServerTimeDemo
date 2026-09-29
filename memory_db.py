@@ -50,6 +50,17 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _stamp(day) -> str:
+    """给「指定日」打时间戳：日期部分用 ``day``，时分秒取当下。
+
+    ``_now()`` 一律写墙钟，于是「按 9-28 记一次」在库里落的却是今天的日期，
+    ``new_today(today='9-28')`` 数出来是 0。调用方给了「今天」，写库就得认
+    这个口径 —— 不传时 ``day`` 就是今天，与 ``_now()`` 完全等价。
+    """
+    return "{} {}".format(day.isoformat(),
+                          datetime.now().strftime("%H:%M:%S"))
+
+
 def _like_kw(keyword) -> str:
     return f"%{str(keyword or '').strip()}%"
 
@@ -919,7 +930,7 @@ class MemoryPalaceDB:
                     difficulty = excluded.difficulty
                 """,
                 (iid, int(state["mastery"]), int(state["correct_streak"]),
-                 int(state["interval_days"]), next_at, _now(), _now(),
+                 int(state["interval_days"]), next_at, _stamp(anchor), _stamp(anchor),
                  anchor.isoformat(),
                  float(state["ease_factor"]), int(state["reps"]),
                  float(state["stability"]), float(state["difficulty"])))

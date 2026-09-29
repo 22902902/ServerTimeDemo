@@ -425,6 +425,11 @@ class MindMapPage(ttk.Frame):
         self.zoom = ZOOM_DEFAULT
         self.blind_window: BlindSession | None = None
         self._canvas_offset = (float(CANVAS_PAD), float(CANVAS_PAD))
+        # 自由画布：``free_layout`` 是开关，``_free_pos`` 是手工坐标缓存
+        self.free_layout = False
+        self._free_pos: dict = {}
+        self._free_pos_map: int | None = None
+        self._drag: dict | None = None
         self._pending_layout = False
         self._pending_center = False
         self._applying = False
@@ -480,6 +485,7 @@ class MindMapPage(ttk.Frame):
             ("手动打卡", self.checkin_today),
             "---",
             ("把当前导图转成记忆宫殿", self.convert_to_palace),
+            ("恢复自动布局（清掉手工位置）", self.reset_free_layout),
             ("删除当前导图", self.delete_current_map),
         ])
 
@@ -617,6 +623,9 @@ class MindMapPage(ttk.Frame):
         tk.Label(right_head, text="缩放", bg=self.palette.bg,
                  fg=self.palette.text_muted,
                  font=self.typography.caption).pack(side="right", padx=(8, 0))
+        self.free_button = create_flat_action_button(
+            right_head, "自由布局：关", self.toggle_free_layout)
+        self.free_button.pack(side="right", padx=(8, 0))
 
         # 画布 + 滚动条。同样的顺序讲究：先 pack 定尺寸的滚动条，
         # 最后 pack 会 expand 的画布。
@@ -635,6 +644,9 @@ class MindMapPage(ttk.Frame):
                               yscrollcommand=self.vbar.set)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<Double-1>", self._on_canvas_double_click)
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.canvas.bind("<MouseWheel>", self._on_canvas_wheel)
         self.canvas.bind("<Shift-MouseWheel>", self._on_canvas_wheel_x)
@@ -1203,7 +1215,14 @@ class MindMapPage(ttk.Frame):
     def _render_canvas(self):
         canvas = self.canvas
         canvas.delete("all")
+        # 换图才读一次坐标：拖动时每一帧都读库太浪费，而且没必要
+        map_id = self.current_map_id
+        if map_id is not None and map_id != self._free_pos_map:
+            self._free_pos = self.db.node_positions(map_id)
+            self._free_pos_map = map_id
         layout = ml.layout(self.tree)
+        if self.free_layout and self._free_pos:
+            ml.apply_positions(layout, self._free_pos)
         self.canvas_layout = layout
         zoom = self.zoom
         width, height = layout["size"]
@@ -1348,6 +1367,92 @@ class MindMapPage(ttk.Frame):
         self.zoom = max(ZOOM_MIN, min(ZOOM_MAX, float(value)))
         self.zoom_var.set(f"{int(round(self.zoom * 100))}%")
         self._render_canvas()
+
+    # -- 自由画布 ---------------------------------------------------------
+    def toggle_free_layout(self):
+        """自由布局开关。开了才能拖节点；关着的时候一律自动排布。"""
+        self.free_layout = not self.free_layout
+        self.free_button.configure(
+            text=f"自由布局：{'开' if self.free_layout else '关'}")
+        self._render_canvas()
+        self._status("自由布局已开：拖节点摆位置，松手就记住。"
+                     if self.free_layout else "自由布局已关：回到自动排布。")
+
+    def reset_free_layout(self):
+        """清掉这张图的手工坐标。**要问一句** —— 摆过的位置是用户自己摆的。"""
+        map_id = self.current_map_id
+        if map_id is None:
+            messagebox.showinfo(self.app_title, "先在左栏选一张导图。", parent=self)
+            return
+        if not self._free_pos:
+            messagebox.showinfo(self.app_title, "这张图还没有手工摆过位置。",
+                                parent=self)
+            return
+        if not messagebox.askyesno(
+                self.app_title,
+                f"清掉这张图上 {len(self._free_pos)} 个手工位置，回到自动排布？",
+                parent=self):
+            return
+        cleared = self.db.clear_node_positions(map_id)
+        self._free_pos = {}
+        self._free_pos_map = map_id
+        self._render_canvas()
+        self._status(f"已回到自动布局（清掉 {cleared} 个手工位置）。")
+
+    def _on_canvas_press(self, event):
+        """按下：记下抓的是哪个节点、当时的位置。**没开自由布局就不抓。**"""
+        if not self.free_layout:
+            return
+        node_id = self._node_at(event)
+        if node_id is None:
+            return
+        node = self._node_record(node_id)
+        if node is None:
+            return
+        self._drag = {"node_id": node_id,
+                      "base_x": float(node["x"]), "base_y": float(node["y"]),
+                      "x": self.canvas.canvasx(event.x),
+                      "y": self.canvas.canvasy(event.y), "moved": False}
+
+    def _on_canvas_drag(self, event):
+        """拖动：按**画布坐标**算位移，再除以缩放换回布局坐标。"""
+        drag = self._drag
+        if drag is None:
+            return
+        x = self.canvas.canvasx(event.x)
+        y = self.canvas.canvasy(event.y)
+        zoom = self.zoom or 1.0
+        # 夹在 >= 0：负坐标会跑到画布左 / 上边界外面，滚动区盖不住，
+        # 看着就像「节点拖丢了」。
+        self._free_pos[drag["node_id"]] = (
+            max(0.0, drag["base_x"] + (x - drag["x"]) / zoom),
+            max(0.0, drag["base_y"] + (y - drag["y"]) / zoom))
+        drag["moved"] = True
+        self._render_canvas()
+
+    def _on_canvas_release(self, _event=None):
+        """松手：真拖过才落库。点一下没动不该写一行坐标。"""
+        drag = self._drag
+        self._drag = None
+        if drag is None or not drag["moved"]:
+            return
+        pos = self._free_pos.get(drag["node_id"])
+        if pos is None:
+            return
+        self.db.set_node_pos(drag["node_id"], pos[0], pos[1])
+        self._status("位置已记住。")
+
+    def _node_record(self, node_id):
+        """按**节点 id** 找当前布局里的那条记录。
+
+        ``layout["by_iid"]`` 的键是布局内部用的 ``"n0"`` 这类 iid，而画布 tag 上
+        打的是节点 id —— 两者不是一个东西，拿错了就永远找不到节点（拖不动，
+        却不报错）。
+        """
+        for record in self.canvas_layout.get("nodes") or ():
+            if record.get("key") is not None and int(record["key"]) == int(node_id):
+                return record
+        return None
 
     def relayout(self):
         """重算坐标并回到左上（装得下就居中）。**不碰数据。**"""
