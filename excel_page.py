@@ -76,6 +76,7 @@ from excel_db import (
     strip_emphasis,
     today_str,
 )
+from excel_export import markdown_to_html, print_document
 from excel_formula_hl import tokenize as tokenize_formula
 from excel_seed import CATEGORIES
 from excel_todo_bridge import review_todo_payload
@@ -664,6 +665,8 @@ class ExcelLearningPage(ttk.Frame):
                 ("批量导入函数（CSV / Excel）", self.import_functions_dialog),
                 ("下载导入模板", self.save_import_template),
                 ("导出函数库为 CSV", self.export_functions_csv),
+                ("导出函数库为 Markdown（可打印）",
+                 self.export_functions_markdown),
                 "---",
                 ("手动打卡", self.checkin_today),
                 ("重建函数库种子（不清进度）", self.reseed_functions),
@@ -2881,6 +2884,40 @@ class ExcelLearningPage(ttk.Frame):
             self._set_status(f"写模板失败：{exc}")
             return
         self._set_status(f"模板已写到 {saved}（把那两行示例改掉再导入）。")
+
+    def export_functions_markdown(self):
+        """把整库导成 Markdown，顺带一份 HTML —— 打印要排版，md 没有。
+
+        导完问一句「现在打印吗」：走系统里关联 HTML 的程序（浏览器）。
+        打印失败不打扰 —— 文件已经落盘了，让用户自己打开就行。
+        """
+        import os
+        today = today_str()
+        target_dir = os.path.join(
+            os.path.dirname(os.path.abspath(self.db.db_path)), "exports")
+        os.makedirs(target_dir, exist_ok=True)
+        md_path = os.path.join(target_dir, f"excel_functions_{today}.md")
+        try:
+            count = self.db.export_functions_markdown(md_path)
+        except OSError as exc:
+            self._set_status(f"导出失败：{exc}")
+            return
+        html_path = md_path[:-3] + ".html"
+        try:
+            with open(md_path, encoding="utf-8") as handle:
+                content = handle.read()
+            with open(html_path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(markdown_to_html(
+                    content, title=f"Excel 函数库（{today}）"))
+        except OSError:
+            html_path = ""
+        self._set_status(f"已导出 {count} 个函数到 {md_path}。")
+        if html_path and messagebox.askyesno(
+                "导出完成",
+                f"已导出 {count} 个函数。\n\n现在打印吗？\n"
+                f"（不想打印就打开 {os.path.basename(md_path)} 自己看）"):
+            if not print_document(html_path):
+                self._set_status("没能调起打印，文件已经导出好了，可自行打开。")
 
     def export_functions_csv(self):
         """把整库导成 CSV：等于一份「我的函数库」备份，也能改完再导回来。"""

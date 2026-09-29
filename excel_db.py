@@ -1094,6 +1094,87 @@ def seed_excel_data(conn: sqlite3.Connection, force: bool = False) -> dict:
     return {"functions": len(SEED_FUNCTIONS), "recipes": len(SEED_RECIPES)}
 
 
+def _function_markdown_lines(item: dict, progress: dict | None = None) -> list[str]:
+    """单个函数的 Markdown 片段。**没有值的字段整段不写**（空栏很占地方）。"""
+    lines = []
+    code = str(item.get("code") or "")
+    name = str(item.get("name_cn") or "")
+    lines.append(f"### {code} {name}".rstrip())
+    lines.append("")
+    if str(item.get("description") or "").strip():
+        lines.append(str(item["description"]).strip())
+        lines.append("")
+    for title, key, mono in (
+        ("语法", "syntax", True),
+        ("参数", "args_desc", False),
+        ("返回值", "returns", False),
+        ("示例", "example_formula", True),
+        ("适用", "use_cases", False),
+        ("易错点", "pitfalls", False),
+        ("相关", "related", False),
+    ):
+        value = str(item.get(key) or "").strip()
+        if not value:
+            continue
+        shown = f"`{value}`" if mono else value
+        lines.append(f"- **{title}**：{shown}")
+    if str(item.get("example_result") or "").strip():
+        lines.append(f"- **示例结果**：{item['example_result']}")
+    extra = []
+    if str(item.get("book_page") or "").strip():
+        extra.append(f"书页 {item['book_page']}")
+    if progress is not None:
+        extra.append("掌握度 " + mastery_label(
+            int(progress.get("mastery", 0) or 0)))
+    if extra:
+        lines.append("- " + " / ".join(extra))
+    note = str(item.get("my_note") or "").strip()
+    if note:
+        lines.append("")
+        lines.append(f"> 我的笔记：{note}")
+    lines.append("")
+    return lines
+
+
+def functions_markdown(items, *, title="Excel 函数库",
+                       progress: dict | None = None) -> str:
+    """整库 Markdown：按分类分章 + 目录。**纯函数**，不碰数据库。"""
+    rows = [dict(item) for item in (items or [])]
+    lines = [f"# {title}", ""]
+
+    grouped: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for item in rows:
+        category = str(item.get("category") or "未分类")
+        if category not in grouped:
+            grouped[category] = []
+            order.append(category)
+        grouped[category].append(item)
+
+    lines.append(f"共 {len(rows)} 个函数，{len(order)} 个分类。")
+    lines.append("")
+    lines.append("## 目录")
+    lines.append("")
+    for category in order:
+        lines.append(f"- {category}（{len(grouped[category])}）")
+    lines.append("")
+
+    for category in order:
+        lines.append(f"## {category}")
+        lines.append("")
+        for item in grouped[category]:
+            row_progress = None
+            if progress is not None:
+                # 进度行是懒创建的：没复习过的函数**没有那一行**，
+                # 这时它该显示「未学」，而不是整段不写
+                row_progress = (progress.get(item.get("id"))
+                                or {"mastery": 0})
+            lines.extend(_function_markdown_lines(item, row_progress))
+        lines.append("---")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 # ======================================================================
 # 数据访问
 # ======================================================================
@@ -1346,6 +1427,16 @@ class ExcelDB:
             (*payload.values(), int(function_id)),
         )
         self.conn.commit()
+
+    def export_functions_markdown(self, path) -> int:
+        """把整库导成 Markdown（书页码与自己写的笔记一并带走）。"""
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        rows = self.all_functions()
+        target.write_text(
+            functions_markdown(rows, progress=self.progress_map()),
+            encoding="utf-8", newline="\n")
+        return len(rows)
 
     def export_functions_csv(self, path) -> int:
         """把整库导成 CSV（列头与导入模板一致，可以「导出 → 改 → 再导回来」）。"""

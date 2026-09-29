@@ -46,6 +46,8 @@ Q. 待办联动桥    只在点击时建 / 周六不被顺延（对照证明 ski
 R. 页面聚合口径  配方行 / 分类统计 / 路径进度 / 自测汇总的键齐全，空库不除零
 S. 公式分词      拼接**恒等于原文** / 200 个函数的真实公式全部往返 /
                  函数名必须紧跟左括号 / 引用 字符串 数字 各归各类
+T. 导出与打印    整库 Markdown 按分类分章 / 书页码与我的笔记跟着走 /
+                 空字段不占位 / HTML 转义 / 打印失败静默返回 False
 
 用法：
     python scripts/test_excel.py
@@ -81,6 +83,7 @@ from excel_db import (  # noqa: E402
     SRS_INTERVALS,
     ExcelDB,
     category_stats,
+    functions_markdown,
     compute_streak,
     difficulty_label,
     ensure_columns,
@@ -120,6 +123,11 @@ from excel_db import (  # noqa: E402
     scenario_sentences,
     strip_emphasis,
     validate_import_row,
+)
+from excel_export import (  # noqa: E402
+    PRINT_STYLE,
+    markdown_to_html,
+    print_document,
 )
 from excel_formula_hl import KINDS, tokenize  # noqa: E402
 from excel_todo_bridge import ExcelTodoBridge, review_todo_payload  # noqa: E402
@@ -1476,6 +1484,71 @@ def test_page_contracts() -> None:
     db.close()
 
 
+# T. 导出与打印
+# ══════════════════════════════════════════════════════════════════════════
+def test_export_markdown() -> None:
+    section("[T] 导出与打印")
+    db = fresh("export_md")
+    try:
+        # -- 1. 形态：分章 + 目录 ------------------------------------
+        text = functions_markdown(db.all_functions())
+        check("标题在", text.startswith("# Excel 函数库"), text[:40])
+        check("有目录章", "\n## 目录\n" in text)
+        check("分类章数 = 分类数 + 目录",
+              text.count("\n## ") == len({i["category"] for i in db.all_functions()}) + 1,
+              text.count("\n## "))
+        check("每个函数一个三级标题",
+              text.count("\n### ") == len(db.all_functions()),
+              (text.count("\n### "), len(db.all_functions())))
+        check("目录里写了每个分类的条数",
+              all(f"（{sum(1 for i in db.all_functions() if i['category'] == c)}）" in text
+                  for c in {i["category"] for i in db.all_functions()}))
+
+        # -- 2. 空字段不占位（打印出来不能是一片空栏） ---------------
+        one = functions_markdown([{"code": "X", "name_cn": "测试", "category": "其它",
+                                   "syntax": "=X()"}])
+        check("只有语法时只写语法", "**语法**" in one and "**参数**" not in one, one)
+        check("末尾不拖一串空行（打印时不该有整页空白）",
+              "\n\n\n" not in one and one.endswith("\n"), repr(one[-12:]))
+
+        # -- 3. 用户自己的东西必须跟着走 ------------------------------
+        target = db.all_functions()[0]
+        db.update_function_fields(target["id"], book_page="P123",
+                                  my_note="这是我写的笔记")
+        again = functions_markdown(db.all_functions(),
+                                   progress=db.progress_map())
+        check("书页码跟着导出", "书页 P123" in again, [l for l in again.splitlines()
+                                                   if "P123" in l])
+        check("我的笔记跟着导出", "这是我写的笔记" in again)
+        check("掌握度也写进去了", "掌握度" in again)
+
+        # -- 4. 落盘 --------------------------------------------------
+        out = Path(tempfile.mkdtemp(prefix="excel_md_")) / "lib.md"
+        count = db.export_functions_markdown(out)
+        check("导出返回条数", count == len(db.all_functions()), count)
+        check("文件真的写出来了（UTF-8）",
+              out.read_text(encoding="utf-8").startswith("# Excel 函数库"))
+    finally:
+        db.close()
+
+    # -- 5. HTML：转义与排版 -----------------------------------------
+    html_text = markdown_to_html("# 标题\n\n- `B2>=60` **粗**\n\n| a | b |\n| --- | --- |\n"
+                                 "| 1 | 2 |\n\n段落 <&>\n", title="测试")
+    check("标题成 h1", "<h1>标题</h1>" in html_text)
+    check("行内代码成 code", "<code>B2&gt;=60</code>" in html_text, html_text)
+    check("加粗成 strong", "<strong>粗</strong>" in html_text)
+    check("表格成 table", "<table>" in html_text and "<td>1</td>" in html_text)
+    check("**尖括号被转义**（公式里到处是 < >，不转义会吃掉结构）",
+          "&lt;&amp;&gt;" in html_text, html_text)
+    check("带打印样式（分页不让代码块断开）",
+          "@media print" in PRINT_STYLE and "page-break-inside" in PRINT_STYLE)
+    check("空文档也出得来", "<body>" in markdown_to_html("", title="空"))
+
+    # -- 6. 打印：失败必须静默 ---------------------------------------
+    check("打不了就返回 False（不许把异常抛到界面上）",
+          print_document(Path(tempfile.mkdtemp()) / "不存在.html") is False)
+
+
 def main_test() -> None:
     test_seed_consistency()
     test_seed_schema()
@@ -1496,6 +1569,7 @@ def main_test() -> None:
     test_todo_bridge()
     test_page_contracts()
     test_formula_tokens()
+    test_export_markdown()
 
 
 if __name__ == "__main__":
