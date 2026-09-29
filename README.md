@@ -46,7 +46,7 @@ python main.py
 | 内容 | 为什么不入库 |
 | --- | --- |
 | `*.db`、`login_memory.json`、`remember_me.json` | 数据库与登录凭据（含手机号、密码密文） |
-| `dist/`、`build/` | 打包产物与构建中间件 |
+| `build/`、`dist/` | 构建中间件与打包产物（运行目录「随身包」在仓库外，见下） |
 | `Tools/` | 收集的工具软件（约 600 MB） |
 | `excel/`、`account_images/`、`process_flow_images/` 等 | 业务表格与图片 |
 | `embedded_admin_tools/config/interfaces.local.json` | **真实接口地址**（仓库里的 `interfaces.json` 只有 `example.com` 占位符） |
@@ -67,20 +67,26 @@ python main.py
 （账号与流程截图）、`Tools/`（工具箱）、`interfaces.local.json`（真实接口
 地址）。它们本来散在好几个地方，拷的时候容易漏。
 
-`scripts/make_portable.py` 把它们**收进一个自包含文件夹** `dist/随身包/`：
-里面的 `ExpiryManager_fixed.exe` 双击即可运行，而 exe 同级目录就是程序的
-数据目录 —— 数据天然就在它旁边。**换机器时拷这一个文件夹就够了。**
+所以运行目录就是一个**自包含文件夹**：`F:\ServerTimeDemo_随身包\`
+（可用环境变量 `SERVERDEMO_PORTABLE_DIR` 覆盖）。里面的
+`ExpiryManager_fixed.exe` 双击即可运行，而 exe 同级目录就是程序的数据目录
+—— 数据天然就在它旁边。**换机器时拷这一个文件夹就够了。**
+
+它**特意放在仓库外面**：`dist/` 是 PyInstaller 的默认产物目录，历史上还有过
+`build.bat` 首句 `rmdir /s /q dist` 的写法 —— 包放在里面随时可能被连根清掉，
+而它装的是全部数据。
 
 ```bash
-python scripts/make_portable.py --list          # 先看会收哪些东西
-python scripts/make_portable.py --full          # 首次建包（约 635 MB）
-python scripts/make_portable.py                 # 以后只刷 exe（几秒）
-python scripts/make_portable.py --target E:\    # 直接写到 U 盘
+python scripts/make_portable.py --list           # 看包里有什么、护栏齐不齐
+python scripts/make_portable.py                  # 维护护栏文件（幂等）
+python scripts/make_portable.py --target X:\     # 整份增量同步到 U 盘
 ```
 
 包里会放一份 `使用说明.txt`。有一点必须知道：包里
-`ExpiryManager_Data/.migrated` 是个**不能删的空文件** —— 程序靠它判断
-「数据已经整理好」，删掉会让下次启动把数据搬到别的位置。
+`ExpiryManager_Data/.migrated` 是个**不能删的空文件** —— 程序的
+`_migrate_data_dir()` 只看它在不在；不在就会把数据根下的 db / 图片 / Tools
+**复制一份**进 `ExpiryManager_Data/`。是复制不是搬，**数据不会丢**，但 Tools
+有 599 MB，白白多占一块空间。
 
 ### 另存一份带校验的冷备
 
@@ -96,18 +102,18 @@ python scripts/export_sensitive.py 目标目录 --skip-tools      # 只要数据
 ## 打包为 exe
 
 ```bash
-pyinstaller --noconfirm ExpiryManager_fixed.spec --distpath "dist/随身包"
+pyinstaller --clean --noconfirm ExpiryManager_fixed.spec --distpath "F:/ServerTimeDemo_随身包"
 ```
 
-产物直接落在 `dist/随身包/ExpiryManager_fixed.exe` —— 也就是**运行目录**。
-这样 `dist/` 下只有一个文件夹，不会出现「exe 在这头、数据在那头」的两份。
-（旧命令不带 `--distpath` 时会输出到 `dist/`，那种情况下需要再执行一次
-`python scripts/make_portable.py` 把 exe 同步进包。）
+产物直接落进**运行目录**：`F:\ServerTimeDemo_随身包\ExpiryManager_fixed.exe`，
+不用再手动拷 exe。数据不受影响 —— PyInstaller 只写自己那一个产物文件，
+包里其它内容一律不动。
 
 说明：
 
 - 请优先使用 `.spec` 文件打包，里面已包含 `embedded_admin_tools` 的配置文件、返回码文件和图标资源。
 - 如果直接执行 `pyinstaller main.py`，内嵌接口工具在打包版中可能找不到 `interfaces.json`、`returnCode.json` 等资源。
+- 忘加 `--distpath` 时产物会落到 `dist/`，把 exe 拷进随身包即可。
 
 ## 当前提醒规则
 

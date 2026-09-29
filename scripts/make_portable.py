@@ -1,67 +1,62 @@
 # -*- coding: utf-8 -*-
-"""构建「随身包」—— 把运行所需的一切收进一个自包含文件夹。
+"""维护 / 分发「随身包」—— 运行所需的一切都在一个文件夹里。
 
-为什么需要它
-------------
-程序的数据本来散落两处，换电脑或拷 U 盘时要一个个找：
+包的位置
+--------
+默认 ``F:\\ServerTimeDemo_随身包``，可用环境变量 ``SERVERDEMO_PORTABLE_DIR`` 覆盖。
 
-* ``BASE_DIR``（exe 同级目录）下的 ``expiry_manager.db``、``account_images``、
-  ``Tools``…… —— 运行时产生的数据；
-* 仓库根下的 ``excel/`` —— 「服务器与云服务到期情况.xlsx」是程序的默认导入文件；
-* ``interfaces.local.json`` —— 真实接口地址（不入库，只在本机）。
+它**放在仓库外面**是有意的：``dist/`` 是 PyInstaller 的默认产物目录，历史上还有
+``build.bat`` 首句 ``rmdir /s /q dist`` 的写法 —— 包放在里面随时可能被连根清掉，
+而它装的是**全部数据**（也是唯一的一份活库）。
 
-少带一样，新电脑上就少一块功能；多带一份，就多出几百 MB 废拷贝。
+更新程序
+--------
+打包时把产物直接写进包里，不要再用默认的 ``dist/``::
 
-「随身包」把这些一次收齐：里面的 ``ExpiryManager_fixed.exe`` 双击即可运行，
-而 exe 同级目录就是 ``BASE_DIR`` —— 数据天然就在它旁边。拷走整个文件夹，
-换台电脑接着用，不需要安装。
+    pyinstaller ExpiryManager_fixed.spec --clean --noconfirm \\
+        --distpath "F:/ServerTimeDemo_随身包"
+    python scripts/make_portable.py            # 维护护栏文件（幂等，随时可跑）
 
-用法::
+**数据不用同步** —— 平时双击包里的 exe 用，数据就写在包里了。
 
-    python scripts/make_portable.py --full           # 首次建包（同步全部）
-    python scripts/make_portable.py                  # 日常只刷 exe（几秒）
-    python scripts/make_portable.py --target E:\\     # 直接同步到 U 盘
-    python scripts/make_portable.py --list           # 只列出会同步什么
+拷到 U 盘
+---------
+::
+
+    python scripts/make_portable.py --target X:\\
+
+整份增量同步（大小与修改时间都一致就跳过），第二次跑很快。
+目标上较新的同名文件不会被覆盖，防手滑。
 
 两个必须知道的点
 ----------------
-1. 包里保留了 ``ExpiryManager_Data/.migrated`` 这个隐藏空文件。程序首次启动时
-   若发现它不存在，会执行「数据目录迁移」，把根目录的数据库、图片、Tools
-   反向搬进 ``ExpiryManager_Data/`` —— 那会让数据换个位置。所以它不能少。
-2. 默认只刷 exe，是为了防止「用仓库根的旧 excel / 旧 study_demo.db 覆盖便携包里
-   已经更新的那份」。同步数据请显式加 ``--full``，且它默认保护较新的目标文件。
+1. 包里 ``ExpiryManager_Data/.migrated`` 是个 0 字节隐藏文件，**不能删**。
+   ``main.py`` 的 ``_migrate_data_dir()`` 只看它在不在：不存在就把 ``BASE_DIR``
+   根下的 db / 图片 / Tools 用 ``shutil.copytree`` **复制一份**进
+   ``ExpiryManager_Data/``。是复制不是搬，**数据不会丢**，但 Tools 有 599 MB，
+   白白多占一块空间。
+2. 包里还有个隐藏的 ``ExpiryManager_Data/logs/`` —— 程序把日志写在那里，
+   顺带证明「包目录就是它的 BASE_DIR」。
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TARGET = ROOT / "dist" / "随身包"
 EXE_NAME = "ExpiryManager_fixed.exe"
 
-# 源（相对仓库根）-> 随身包内的相对路径。
-# 顺序有意义：先放本体，再放数据，最后放配置。
-ITEMS: list[tuple[str, str]] = [
-    (f"dist/{EXE_NAME}", EXE_NAME),
-    ("dist/expiry_manager.db", "expiry_manager.db"),
-    ("dist/login_memory.json", "login_memory.json"),
-    ("dist/remember_me.json", "remember_me.json"),
-    ("dist/account_images", "account_images"),
-    ("dist/study_notes_images", "study_notes_images"),
-    ("dist/adb_history", "adb_history"),
-    ("dist/study_demo", "study_demo"),
-    ("excel", "excel"),
-    ("study_demo.db", "study_demo.db"),
-    ("embedded_admin_tools/config/interfaces.local.json", "interfaces.local.json"),
-    ("dist/Tools", "Tools"),
-]
+# 包的位置：优先环境变量，便于换机/换盘时覆盖
+DEFAULT_PACKAGE = Path(
+    os.environ.get("SERVERDEMO_PORTABLE_DIR", r"F:\ServerTimeDemo_随身包")
+)
 
-# 包里必须存在、但不是从源文件拷来的东西
+# 包里必须存在、但不是从源码拷来的东西
 GUARD_FILES = ("ExpiryManager_Data/.migrated",)
 GUARD_DIRS = (
     "ExpiryManager_Data/logs",
@@ -84,6 +79,9 @@ ServerTimeDemo 随身包
 直接拷这个文件夹（带着里面全部内容）。不要只拷 exe：数据库、图片、
 工具箱都在同级的子文件夹里，漏了就少一块功能。
 
+也可以让脚本代劳（增量同步，第二次很快）：
+    python scripts/make_portable.py --target X:\\          （X 换成 U 盘盘符）
+
 文件夹里都是什么
 ----------------
   {exe}   程序本体
@@ -100,10 +98,10 @@ ServerTimeDemo 随身包
 --------
 1. 这些文件是一个整体，别单独删或改名。特别是 ExpiryManager_Data\\
    里那个隐藏的空文件 .migrated 不能删 —— 程序靠它判断「数据已经
-   整理好了」，删掉会导致下次启动把数据搬到别的位置。
+   整理好了」，删掉会让下次启动白复制一份 Tools 进来，占地方。
 2. interfaces.local.json 里是内部接口地址，敏感，不要分享出去。
-3. 更新程序：重新构建后执行 `python scripts/make_portable.py`
-   （不加 --full），它会把最新的 exe 同步进来，数据不受影响。
+3. 更新程序：打包时把产物直接写进本文件夹（pyinstaller 加
+   --distpath），数据不受影响；不要先在别处打包再手动拷 exe。
 
 生成时间：{ts}
 """
@@ -115,7 +113,6 @@ class Stats:
         self.skip = 0
         self.newer = 0
         self.bytes = 0
-        self.missing: list[str] = []
 
     def line(self) -> str:
         return (
@@ -126,7 +123,7 @@ class Stats:
 
 
 def _sync_file(src: Path, dst: Path, st: Stats, *, protect_newer: bool) -> None:
-    """把单个文件同步到包内。大小与修改时间都一致就跳过。"""
+    """把单个文件同步过去。大小与修改时间都一致就跳过。"""
     if dst.exists() and dst.is_file():
         s, d = src.stat(), dst.stat()
         if protect_newer and d.st_mtime > s.st_mtime + 1:
@@ -147,8 +144,29 @@ def _sync_file(src: Path, dst: Path, st: Stats, *, protect_newer: bool) -> None:
     st.bytes += src.stat().st_size
 
 
-def _sync_tree(src: Path, dst: Path, st: Stats, *, protect_newer: bool) -> None:
-    # 先建根，否则「源是个空目录」时目标不会被创建
+def ensure_guards(pkg: Path) -> None:
+    """把包里那些「不是从源码拷来的」东西补齐：防迁移标记、日志目录、使用说明。"""
+    pkg.mkdir(parents=True, exist_ok=True)
+    for rel in GUARD_FILES:
+        p = pkg / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.exists():
+            p.write_bytes(b"")
+            print(f"  [{rel}] 已创建（防迁移标记）")
+    for rel in GUARD_DIRS:
+        (pkg / rel).mkdir(parents=True, exist_ok=True)
+
+    readme = pkg / README_NAME
+    text = README_TEMPLATE.format(
+        exe=EXE_NAME, ts=datetime.now().strftime("%Y-%m-%d %H:%M")
+    )
+    if not readme.exists() or readme.read_text(encoding="utf-8") != text:
+        readme.write_text(text, encoding="utf-8", newline="\r\n")
+        print(f"  [{README_NAME}] 已更新")
+
+
+def sync_tree(src: Path, dst: Path, st: Stats, *, protect_newer: bool) -> None:
+    """整份增量同步（src 一般是包本身，dst 是 U 盘）。"""
     dst.mkdir(parents=True, exist_ok=True)
     for path in sorted(src.rglob("*")):
         rel = path.relative_to(src)
@@ -158,97 +176,71 @@ def _sync_tree(src: Path, dst: Path, st: Stats, *, protect_newer: bool) -> None:
             _sync_file(path, dst / rel, st, protect_newer=protect_newer)
 
 
-def build(target: Path, *, full: bool, protect_newer: bool = True) -> Stats:
-    st = Stats()
-    target.mkdir(parents=True, exist_ok=True)
-
-    for src_rel, dst_rel in ITEMS:
-        src = ROOT / src_rel
-        if not src.exists():
-            st.missing.append(src_rel)
-            continue
-        # 默认只刷 exe；其余等 --full
-        if not full and dst_rel != EXE_NAME:
-            continue
-        dst = target / dst_rel
-        if src.is_dir():
-            _sync_tree(src, dst, st, protect_newer=protect_newer)
+def show_list(pkg: Path) -> None:
+    print(f"随身包：{pkg}")
+    if not pkg.exists():
+        print("  ★ 不存在 —— 是不是还没打包？见本脚本文件头的说明。")
+        return
+    fs = [f for f in pkg.rglob("*") if f.is_file()]
+    print(f"  {len(fs)} 个文件 / {sum(f.stat().st_size for f in fs) / 1048576:.1f} MB")
+    print()
+    print("顶层内容：")
+    for it in sorted(pkg.iterdir(), key=lambda x: (x.is_file(), x.name)):
+        if it.is_dir():
+            sub = [f for f in it.rglob("*") if f.is_file()]
+            size = sum(f.stat().st_size for f in sub)
+            print(f"  [目录] {it.name:28} {len(sub):4} 个文件 {size / 1048576:9.1f} MB")
         else:
-            _sync_file(src, dst, st, protect_newer=protect_newer)
-        print(f"  [{dst_rel}] 已同步", flush=True)
-
-    # 护栏：防迁移标记 + 日志目录
+            print(f"  [文件] {it.name:28} {'':4}          {it.stat().st_size / 1024:9.1f} KB")
+    print()
+    print("护栏检查：")
     for rel in GUARD_FILES:
-        p = target / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        if not p.exists():
-            p.write_bytes(b"")
-            print(f"  [{rel}] 已创建（防迁移标记）", flush=True)
+        ok = (pkg / rel).exists()
+        print(f"  {'✓' if ok else '★ 缺失'} {rel}")
     for rel in GUARD_DIRS:
-        (target / rel).mkdir(parents=True, exist_ok=True)
-
-    # 使用说明：内容有变化才重写
-    readme = target / README_NAME
-    text = README_TEMPLATE.format(exe=EXE_NAME, ts=datetime.now().strftime("%Y-%m-%d %H:%M"))
-    if not readme.exists() or readme.read_text(encoding="utf-8") != text:
-        readme.write_text(text, encoding="utf-8", newline="\r\n")
-
-    return st
-
-
-def show_list() -> None:
-    print(f"随身包目标：{DEFAULT_TARGET}")
-    print(f"（仓库根 {ROOT}）")
-    print()
-    print("会同步这些：")
-    total = 0
-    for src_rel, dst_rel in ITEMS:
-        src = ROOT / src_rel
-        if not src.exists():
-            print(f"  [缺] {src_rel:52} -> {dst_rel}")
-            continue
-        if src.is_dir():
-            n = sum(1 for p in src.rglob("*") if p.is_file())
-            size = sum(p.stat().st_size for p in src.rglob("*") if p.is_file())
-            print(f"  [{n:4} 个文件 {size / 1048576:8.1f} MB] {src_rel:44} -> {dst_rel}")
-        else:
-            size = src.stat().st_size
-            print(f"  [ {size / 1048576:8.1f} MB         ] {src_rel:44} -> {dst_rel}")
-        total += size
-    print()
-    print(f"合计约 {total / 1048576:.1f} MB")
-    print("另外会创建：ExpiryManager_Data/.migrated（防迁移标记）、ExpiryManager_Data/logs/")
+        ok = (pkg / rel).is_dir()
+        print(f"  {'✓' if ok else '★ 缺失'} {rel}/")
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="构建 ServerTimeDemo 随身包（自包含、可运行、可拷走）")
-    ap.add_argument("--target", default=str(DEFAULT_TARGET), help="目标文件夹，默认 dist/随身包；可直接给 U 盘盘符")
-    ap.add_argument("--full", action="store_true", help="同步全部内容（首次建包用）；默认只刷 exe")
-    ap.add_argument("--no-protect", action="store_true", help="--full 时允许用较旧的源覆盖较新的目标（慎用）")
-    ap.add_argument("--list", action="store_true", help="只列出会同步什么，不动文件")
+    ap = argparse.ArgumentParser(
+        description="维护 / 分发 ServerTimeDemo 随身包（改代码后维护护栏；拷 U 盘用 --target）"
+    )
+    ap.add_argument("--package", default=str(DEFAULT_PACKAGE),
+                    help=f"包的位置，默认 {DEFAULT_PACKAGE}")
+    ap.add_argument("--target", default=None,
+                    help="把整个包增量同步到这里（如 U 盘根目录），会在其下建同名文件夹")
+    ap.add_argument("--no-protect", action="store_true",
+                    help="允许用较旧的源覆盖较新的目标（慎用）")
+    ap.add_argument("--list", action="store_true", help="只列出包里有什么，不动文件")
     args = ap.parse_args(argv)
 
+    pkg = Path(args.package)
+
     if args.list:
-        show_list()
+        show_list(pkg)
         return 0
 
-    target = Path(args.target)
-    mode = "全部内容" if args.full else f"仅 {EXE_NAME}"
-    print(f"随身包 -> {target}")
-    print(f"模式：{mode}")
+    print(f"随身包：{pkg}")
     print()
+    print("维护护栏文件：")
+    ensure_guards(pkg)
+    print("✓ 就绪")
 
-    st = build(target, full=args.full, protect_newer=not args.no_protect)
-
-    print()
-    print(st.line())
-    if st.missing:
+    if args.target:
+        dst = Path(args.target) / pkg.name
         print()
-        print("以下源不存在（已跳过，检查一下是不是路径变了）：")
-        for m in st.missing:
-            print(f"  - {m}")
-    print()
-    print(f"完成。整个文件夹拷走即可：{target}")
+        print(f"同步到：{dst}")
+        st = Stats()
+        sync_tree(pkg, dst, st, protect_newer=not args.no_protect)
+        print(st.line())
+        print()
+        print(f"完成。U 盘上的文件夹：{dst}")
+    else:
+        print()
+        print("（未指定 --target，只维护了包本身。）")
+        print(f"整个文件夹拷走即可：{pkg}")
+        print("或让脚本同步：python scripts/make_portable.py --target X:\\")
     return 0
 
 
