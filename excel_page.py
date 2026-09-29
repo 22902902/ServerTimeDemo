@@ -76,6 +76,7 @@ from excel_db import (
     strip_emphasis,
     today_str,
 )
+from excel_formula_hl import tokenize as tokenize_formula
 from excel_seed import CATEGORIES
 from excel_todo_bridge import review_todo_payload
 from page_components import (
@@ -210,8 +211,38 @@ def _badge(parent, text: str, *, fg: str, bg: str = "", palette=MAIN_PALETTE,
     )
 
 
+# --------------------------------------------------------------------------
+# 公式着色（颜色在界面侧；分词器只管分类）
+# --------------------------------------------------------------------------
+FORMULA_COLORS = {
+    "func": "#1a4f8a",      # 函数名：蓝
+    "string": "#2e6b46",    # 写死的字面量：绿
+    "ref": "#8a6a2f",       # 单元格 / 区域 / 表名：棕
+    "number": "#7a3f9d",    # 数字：紫
+    "operator": "#6b6b6b",  # 运算符与分隔符：灰
+    "paren": "#6b6b6b",     # 括号：灰
+}
+
+
+def _paint_formula(body, text) -> None:
+    """给只读 Text 里的公式上色。**只加 tag，一个字符都不改。**
+
+    ``tokenize`` 保证拼接后等于原文，所以这里可以放心按字符偏移算区间；
+    复制出去的仍然是原始字符串 —— 高亮要是改了文本，用户照着敲就会报错。
+    """
+    offset = 0
+    for token in tokenize_formula(text):
+        color = FORMULA_COLORS.get(token.kind)
+        if color:
+            tag = "hl_" + token.kind
+            body.tag_configure(tag, foreground=color)
+            body.tag_add(tag, f"1.0+{offset}c",
+                         f"1.0+{offset + len(token.text)}c")
+        offset += len(token.text)
+
+
 def _mono_block(parent, text: str, *, palette=MAIN_PALETTE, on_copy=None,
-                height_lines=None, copy_text=None):
+                height_lines=None, copy_text=None, highlight=None):
     """等宽代码块 + 一键复制。只读 Text 仍可选中，所以「看」和「拷」都满足。"""
     holder = tk.Frame(parent, bg=palette.surface_alt, highlightthickness=1,
                       highlightbackground=palette.border_soft)
@@ -228,6 +259,8 @@ def _mono_block(parent, text: str, *, palette=MAIN_PALETTE, on_copy=None,
         relief="flat", highlightthickness=0, bd=0, padx=3, pady=3, cursor="xterm",
     )
     body.insert("1.0", text)
+    if highlight is not None:
+        _paint_formula(body, text)
     body.configure(state="disabled")
     if on_copy:
         body.bind("<Control-c>", lambda e: on_copy(
@@ -237,7 +270,7 @@ def _mono_block(parent, text: str, *, palette=MAIN_PALETTE, on_copy=None,
 
 
 def _field(parent, title: str, text: str, *, palette=MAIN_PALETTE,
-           fg=None, font=None, mono=False):
+           fg=None, font=None, mono=False, highlight=None):
     """「小标题 + 正文」的成对展示块。空文本直接不渲染（返回 None）。"""
     text = _plain(text).strip()
     if not text:
@@ -245,6 +278,16 @@ def _field(parent, title: str, text: str, *, palette=MAIN_PALETTE,
     block = tk.Frame(parent, bg=palette.surface)
     tk.Label(block, text=title, bg=palette.surface, fg=palette.text_muted,
              font=TYPOGRAPHY.caption, anchor="w").pack(anchor="w")
+    if mono and highlight is not None:
+        body = tk.Text(block, height=1, wrap="char", font=TYPOGRAPHY.mono,
+                       bg=palette.surface, fg=fg or palette.text_primary,
+                       relief="flat", highlightthickness=0, bd=0,
+                       padx=0, pady=0)
+        body.insert("1.0", text)
+        _paint_formula(body, text)
+        body.configure(state="disabled")
+        body.pack(anchor="w", fill="x", pady=(2, 0))
+        return block
     tk.Label(block, text=text, bg=palette.surface,
              fg=fg or palette.text_primary, font=font or TYPOGRAPHY.body,
              justify="left", anchor="w", wraplength=760).pack(anchor="w", pady=(2, 0))
@@ -1493,7 +1536,8 @@ class ExcelLearningPage(ttk.Frame):
                      font=TYPOGRAPHY.caption).pack(side="left", padx=(10, 0))
 
         block = _mono_block(host, item.get("syntax", ""), palette=self.palette,
-                            on_copy=self.copy_to_clipboard, height_lines=2)
+                            on_copy=self.copy_to_clipboard, height_lines=2,
+                            highlight=tokenize_formula)
         block.pack(fill="x", anchor="w", pady=(10, 0))
 
         for title, key, kwargs in (
@@ -1516,7 +1560,8 @@ class ExcelLearningPage(ttk.Frame):
                      fg=self.palette.text_muted,
                      font=TYPOGRAPHY.caption).pack(anchor="w", pady=(12, 2))
             example = _mono_block(host, item["example_formula"], palette=self.palette,
-                                  on_copy=self.copy_to_clipboard, height_lines=3)
+                                  on_copy=self.copy_to_clipboard, height_lines=3,
+                                  highlight=tokenize_formula)
             example.pack(fill="x", anchor="w")
             if item.get("example_result"):
                 tk.Label(host, text=item["example_result"], bg=self.palette.surface,
@@ -1893,7 +1938,9 @@ class ExcelLearningPage(ttk.Frame):
                             ("示例结果", question.get("reveal_result", "")),
                             ("易错点", question.get("reveal_pitfalls", ""))):
             block = _field(holder, title, text, palette=self.palette,
-                           mono=title in ("语法", "示例"))
+                           mono=title in ("语法", "示例"),
+                           highlight=tokenize_formula
+                           if title in ("语法", "示例") else None)
             if block is not None:
                 block.pack(anchor="w", pady=(2, 0))
         ttk.Button(holder, text="看完整说明",

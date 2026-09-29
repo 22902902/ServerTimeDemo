@@ -1376,6 +1376,71 @@ def test_radar(root, page, db) -> None:
           any(int(c.cget("width")) != 400 for c in canvases[index + 1:]),
           [c.cget("width") for c in canvases])
 
+# R. 公式语法高亮
+# ══════════════════════════════════════════════════════════════════════════
+def _all_text_widgets(widget) -> list:
+    """递归收所有 Text 控件（等宽块就是它们）。"""
+    found = []
+    try:
+        children = widget.winfo_children()
+    except tk.TclError:
+        return found
+    for child in children:
+        try:
+            if child.winfo_class() == "Text":
+                found.append(child)
+        except tk.TclError:
+            pass
+        found.extend(_all_text_widgets(child))
+    return found
+
+
+def test_formula_highlight(root, page, db) -> None:
+    section("[R] 公式语法高亮")
+    target = None
+    for item in db.list_functions():
+        if str(item.get("example_formula") or "").strip():
+            target = item
+            break
+    check("样例函数有示例公式", target is not None)
+    if target is None:
+        return
+
+    page.open_function(target["code"])
+    settle(root, 3)
+
+    painted = []
+    for body in _all_text_widgets(page):
+        try:
+            tags = [t for t in body.tag_names() if t.startswith("hl_")]
+        except tk.TclError:
+            continue
+        if tags:
+            painted.append((body, tags))
+    check("详情里至少两块公式被着色（语法 + 示例）", len(painted) >= 2,
+          len(painted))
+
+    texts = [body.get("1.0", "end-1c") for body, _ in painted]
+    check("示例公式原样在屏上（高亮一个字符都没改）",
+          str(target["example_formula"]) in texts, texts)
+    check("语法也在屏上", str(target.get("syntax") or "") in texts,
+          [t[:40] for t in texts])
+
+    body, tags = painted[0]
+    painted_chars = set()
+    for tag in tags:
+        ranges = body.tag_ranges(tag)
+        for i in range(0, len(ranges), 2):
+            start = body.index(ranges[i])
+            end = body.index(ranges[i + 1])
+            painted_chars.update(range(int(start.split(".")[1]),
+                                       int(end.split(".")[1])))
+    check("真的有字符被上色（不是只建了空 tag）", bool(painted_chars),
+          sorted(painted_chars)[:20])
+    check("着色块是只读的（state=disabled）",
+          str(body.cget("state")) == "disabled", body.cget("state"))
+
+
 def main_test() -> None:
     tmpdir = Path(tempfile.mkdtemp(prefix="excel_ui_test_"))
     root = tk.Tk()
@@ -1408,6 +1473,7 @@ def main_test() -> None:
         test_todo_button(root, page, db)
         test_radar(root, page, db)
         test_note_link(root, page, db, tmpdir)
+        test_formula_highlight(root, page, db)
     finally:
         if db is not None:
             db.close()

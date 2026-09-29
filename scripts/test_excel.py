@@ -43,6 +43,9 @@ N. 自测作答      答对答错都回灌同一条遗忘曲线 / 错题本按�
 O. 批量导入解析  模板往返 / 中英文列头别名 / 三种分隔符 / GBK 回退 / 幂等归一化 / 必填与格式校验
 P. 批量导入写库  dry_run 不落盘 / 新增入自建 / 内置默认跳过 / 覆盖只写非空列（书页码与心得保住）/ 导出再导入是更新
 Q. 待办联动桥    只在点击时建 / 周六不被顺延（对照证明 skip_holidays 必要）/ 当天幂等 / 缺字段不建
+R. 页面聚合口径  配方行 / 分类统计 / 路径进度 / 自测汇总的键齐全，空库不除零
+S. 公式分词      拼接**恒等于原文** / 200 个函数的真实公式全部往返 /
+                 函数名必须紧跟左括号 / 引用 字符串 数字 各归各类
 
 用法：
     python scripts/test_excel.py
@@ -118,6 +121,7 @@ from excel_db import (  # noqa: E402
     strip_emphasis,
     validate_import_row,
 )
+from excel_formula_hl import KINDS, tokenize  # noqa: E402
 from excel_todo_bridge import ExcelTodoBridge, review_todo_payload  # noqa: E402
 from todo_db import TodoDB  # noqa: E402
 from excel_seed import (  # noqa: E402
@@ -1357,6 +1361,64 @@ def test_todo_bridge() -> None:
 # ══════════════════════════════════════════════════════════════════════════
 # R. 页面会用到的聚合口径
 # ══════════════════════════════════════════════════════════════════════════
+# S. 公式分词（语法高亮的地基）
+# ══════════════════════════════════════════════════════════════════════════
+def test_formula_tokens() -> None:
+    section("[S] 公式分词")
+    check("KINDS 覆盖六类 + 兜底 text",
+          {"func", "string", "ref", "number", "operator", "paren", "text"}
+          <= set(KINDS), KINDS)
+
+    # -- 1. 认得出各类 ------------------------------------------------
+    tokens = tokenize('=IF(B2>=60, "及格", "不及格")')
+    kind_of = {t.text: t.kind for t in tokens}
+    check("函数名是 func", kind_of.get("IF") == "func", tokens)
+    check("单元格引用是 ref", kind_of.get("B2") == "ref", tokens)
+    check("数字是 number", kind_of.get("60") == "number", tokens)
+    check("中文字符串是 string", kind_of.get('"及格"') == "string", tokens)
+    check("比较运算符是 operator", kind_of.get(">=") == "operator", tokens)
+
+    for sample, wanted in (
+        ("A1:B2", "ref"),            # 区域
+        ("$A$1", "ref"),             # 绝对引用
+        ("表1!A:B", "ref"),          # 带表名（中文表名 + 整列）
+        ("'我的 表'!A1", "ref"),     # 表名带空格要引号包住
+        ("表1[单价]", "ref"),        # 结构化引用
+        ("1.05%", "number"),         # 百分数
+        ("SUM", ""),                 # 光一个函数名、后面没括号 —— 不算函数
+    ):
+        got = [t.kind for t in tokenize(sample)]
+        ok = (got == [wanted]) if wanted else ("func" not in got)
+        check(f"{sample!r} -> {wanted or '不当成函数'}", ok, got)
+
+    # -- 2. 拼接恒等：错一个字符，用户照着敲就是坏的 ------------------
+    samples = [
+        "", "=", "SUM", '=IFERROR(VLOOKUP(A2, 表1!A:B, 2, 0), "无")',
+        "={1,2,3}", '=未闭合"引号', "=A1&\"-\"&B2", "=SUM(A:A)*1.05%",
+        "=表1[单价]+表1[数量]", "换行\n也要保住",
+    ]
+    bad = [s for s in samples if "".join(t.text for t in tokenize(s)) != s]
+    check("手写样本拼接后一字不差", not bad, bad)
+
+    # 真实数据才是重点：库里 200 个函数的语法与示例
+    from excel_seed import SEED_FUNCTIONS as FUNCTIONS
+    real = []
+    for item in FUNCTIONS:
+        for key in ("syntax", "example_formula"):
+            text = str(item.get(key) or "")
+            if text:
+                real.append((item["code"], key, text))
+    broken = [(c, k) for c, k, t in real
+              if "".join(x.text for x in tokenize(t)) != t]
+    check(f"库里 {len(real)} 条真实公式全部往返一致", not broken, broken[:5])
+    check("真实公式里能分出函数名",
+          any(t.kind == "func" for _, _, s in real for t in tokenize(s)))
+    check("真实公式里能分出字符串",
+          any(t.kind == "string" for _, _, s in real for t in tokenize(s)))
+    check("认不出来的片段一律是 text（不许丢）",
+          all(t.kind in KINDS for _, _, s in real for t in tokenize(s)))
+
+
 def test_page_contracts() -> None:
     section("[R] 页面契约（页面用到的每个数据入口）")
     db = fresh("contract")
@@ -1433,6 +1495,7 @@ def main_test() -> None:
     test_import_writing()
     test_todo_bridge()
     test_page_contracts()
+    test_formula_tokens()
 
 
 if __name__ == "__main__":
