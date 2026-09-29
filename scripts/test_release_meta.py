@@ -192,7 +192,12 @@ def test_wired_into_ui():
                 "training_core", "training_todo_bridge", "memory_seed",
                 "cs2_seed",
                 "memory_db", "memory_page", "mindmap_layout", "mindmap_seed",
-                "mindmap_db", "mindmap_page", "mindmap_image"]
+                "mindmap_db", "mindmap_page", "mindmap_image",
+                "speech",
+                "mindmap_memory_bridge",
+                "excel_formula_hl",
+                "excel_export",
+                "process_image_migrate",]
         missing = [n for n in need if n not in spec_src]
         check("打包 spec 把新模块写进了 hiddenimports",
               not missing, f"漏了 {missing}（运行版会 ImportError）")
