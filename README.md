@@ -38,6 +38,40 @@ python main.py
 
 如果目录中存在 `服务器与云服务到期情况.xlsx`，程序首次启动会自动导入。
 
+
+## 数据与私有配置（不进版本库）
+
+公开仓库里只有代码，**运行数据一律不入库**：
+
+| 内容 | 为什么不入库 |
+| --- | --- |
+| `*.db`、`login_memory.json`、`remember_me.json` | 数据库与登录凭据（含手机号、密码密文） |
+| `dist/`、`build/` | 打包产物与构建中间件 |
+| `Tools/` | 收集的工具软件（约 600 MB） |
+| `excel/`、`account_images/`、`process_flow_images/` 等 | 业务表格与图片 |
+| `embedded_admin_tools/config/interfaces.local.json` | **真实接口地址**（仓库里的 `interfaces.json` 只有 `example.com` 占位符） |
+
+接口配置文件按这个顺序查找（先私有、后示例）：
+
+1. 环境变量 `EXPIRY_INTERFACE_CONFIG` 指向的文件
+2. 程序目录旁的 `interfaces.local.json`（打包成 exe 后走这条）
+3. 同目录的 `interfaces.local.json`（源码运行走这条）
+4. 同目录的 `interfaces.json`（仓库内的示例，只有占位地址）
+
+所以本机放一份 `interfaces.local.json` 就能连真实环境，而且它被 `.gitignore`
+排除、不会被提交。
+
+这些数据换机器时要带走，用导出的方式：
+
+```bash
+python scripts/export_sensitive.py 目标目录                  # 含 Tools，约 600 MB
+python scripts/export_sensitive.py 目标目录 --skip-tools      # 只要数据，约 5 MB
+python scripts/export_sensitive.py --list                    # 先看会导出什么
+```
+
+脚本是增量的（大小与修改时间都一致就跳过），并在目标目录写 `备份清单.txt`
+（含关键文件 SHA256）与 `恢复说明.txt`。
+
 ## 打包为 exe
 
 ```bash
