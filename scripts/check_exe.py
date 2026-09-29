@@ -16,8 +16,11 @@ code object 解开、递归收集 ``co_names`` / ``co_consts``，逐个断言新
 
     python scripts/check_exe.py                  # 检查 dist/ExpiryManager_fixed.exe
     python scripts/check_exe.py 别的.exe
+    python scripts/check_exe.py --selfcheck      # 只用本地源码核 EXPECTED（不打开 exe）
 
-加新功能之后，把新的函数名 / 常量名补进 ``EXPECTED`` 就行。
+加新功能之后，把新的函数名 / 常量名补进 ``EXPECTED`` 就行 ——
+**但先跑一次 ``--selfcheck``**：``_collect`` 收的是整条常量与 ``co_names``，
+SQL 里嵌的列名、运行时现算的值都收不到，照抄一份清单必然假红。
 """
 
 from __future__ import annotations
@@ -41,16 +44,23 @@ EXPECTED = {
         "TodoAlertDialog", "ALERT_WIDTH", "snooze_all", "complete_all",
         "_place_bottom_right",
     ],
-    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.18.1"],
+    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.19.0"],
     "training_core": [
         "SRS_INTERVALS", "review_next_state", "streak_from_dates",
         "checkin_grid", "MASTERY_GOOD", "FEEDBACK_FORGOT",
+        # v1.19.0：SM-2 / FSRS 两套新算法与可切换的唯一入口
+        "advance_review", "normalize_algorithm", "algorithm_label",
+        "sm2_next_state", "fsrs_next_state", "fsrs_retrievability",
+        "fsrs_interval_for", "ALGORITHM_HINTS", "DEFAULT_ALGORITHM",
     ],
     "memory_db": [
         "MemoryPalaceDB", "PALACE_KINDS", "DEFAULT_PALACE_NAME",
         "format_item_line",
         # v1.18.0 题库项的「位置与四周」与实景截图（前者是 MemoryPalaceDB 的方法）
         "_ensure_memory_columns", "get_bank_item", "update_bank_item",
+        # v1.19.0：算法选择落在 train_settings 表（**表名嵌在 SQL 字符串里，
+        # _collect 收不到** —— 预演时确实报了「收不到」，所以只查读写它的两个方法）
+        "get_algorithm", "set_algorithm",
     ],
     "cs2_seed": [
         # v1.18.0：七张比赛地图点位的单一数据源（宫殿与题库都由它生成）。
@@ -81,8 +91,15 @@ EXPECTED = {
         # 真实字面量是「详情 / 位置与四周」，不是「位置与四周」
         # （_collect 收的是**整条**常量，所以不能拿子串去比对）
         "详情 / 位置与四周", "看详情",
+        # v1.19.0：语音朗读（speech 是被 import 的模块名，出现在 co_names 里）
+        "toggle_speech", "speech",
     ],
-    "mindmap_db": ["MindmapDB", "DEFAULT_MAP_TITLE", "format_map_line"],
+    "mindmap_db": [
+        "MindmapDB", "DEFAULT_MAP_TITLE", "format_map_line",
+        # v1.19.0：自由画布的手工坐标 + 训练算法选择
+        "node_positions", "set_node_pos", "clear_node_positions",
+        "get_algorithm", "set_algorithm",
+    ],
     "mindmap_layout": [
         "blind_brief", "reveal_levels", "to_opml", "iter_nodes",
         "build_tree", "DEPTH_COLORS",
@@ -95,12 +112,56 @@ EXPECTED = {
     "mindmap_page": [
         "BlindSession", "VIEW_EDITOR", "VIEW_WALL", "TREE_MAP",
         "ZOOM_VALUES",
+        # v1.19.0：自由画布拖拽 + 语音朗读
+        "toggle_speech", "speech", "_on_canvas_press", "_on_canvas_release",
     ],
     "mindmap_image": [
         "render_png", "available", "pick_font", "FONT_CANDIDATES",
     ],
     "training_todo_bridge": [
         "TrainingTodoBridge", "review_payload", "KIND_MEMORY", "KIND_MINDMAP",
+    ],
+    # ── v1.19.0 新增模块 ────────────────────────────────────────────────
+    "speech": [
+        "is_available", "enabled", "set_enabled", "toggle", "speak", "stop",
+    ],
+    "mindmap_memory_bridge": ["plan", "convert", "source_key"],
+    "excel_formula_hl": [
+        "tokenize", "Token", "KINDS",
+        # 六类 + text 就写在 KINDS 这个元组常量里，所以直接收得到
+        "func", "string", "ref", "number", "operator", "paren",
+    ],
+    "excel_export": ["markdown_to_html", "print_document", "PRINT_STYLE"],
+    "process_image_migrate": [
+        "plan_step", "migrate", "normalize_rel", "SUBDIR_ROOT",
+    ],
+    "process_annotate": [
+        "normalize_op", "normalize_ops", "clamp_box", "clamp_point",
+        "arrow_head", "candidate_path", "apply_ops", "annotate_file",
+        "SHAPE_LABELS", "SHAPE_ORDER", "COLORS", "SUFFIX",
+    ],
+    "process_annotate_dialog": [
+        "ScreenshotAnnotator", "to_image", "to_canvas", "ask_string",
+        "_redraw_ops", "VIEW_MAX", "MIN_DRAG",
+    ],
+    "process_todo_bridge": [
+        "ProcessTodoBridge", "flow_todo_payload", "flow_todo_title",
+        "step_titles", "FLOW_TODO_TAG",
+    ],
+    "process_terminal": [
+        "choose_launcher", "launcher_argv", "send_to_terminal",
+        "TERMINAL_CANDIDATES",
+    ],
+    # ── v1.19.0 改动到的既有模块 ────────────────────────────────────────
+    "excel_db": ["functions_markdown", "export_functions_markdown", "heatmap"],
+    "process_db": [
+        "fetch_process_templates", "save_process_template",
+        "delete_process_template",
+    ],
+    "process_page": [
+        "CommandBlock", "ScreenshotStrip", "today_str",
+        "annotate_step_image", "add_flow_to_todo", "send_command_to_terminal",
+        "_save_annotation", "process_todo_bridge", "process_annotate",
     ],
     # main 是入口脚本，不在 PYZ 里，单独在 ENTRY_EXPECTED 核对
 }
@@ -110,6 +171,9 @@ ENTRY_EXPECTED = [
     # v1.16.0 训练模块接线
     "MemoryPalacePage", "MindMapPage", "TrainingTodoBridge",
     "memory_page_refresh", "mindmap_page_refresh",
+    # v1.19.0 流程中心 P2 的接线：三个新模块 + 两个垫片方法
+    "process_image_migrate", "process_todo_bridge", "process_terminal",
+    "ProcessTodoBridge", "process_todo_hook", "send_to_terminal",
 ]
 
 # 运行时数据：打包脚本**绝不能**删掉它们
@@ -155,7 +219,61 @@ def symbols(code, acc: set) -> set:
     return acc
 
 
+def selfcheck() -> int:
+    """只用**本地源码**核一遍 EXPECTED / ENTRY_EXPECTED。
+
+    为什么值得单独有个模式：清单写错和「没打进包」在体检输出里长得一模一样
+    （都是「★缺 xxx」），而后者要重打包一分钟才验证得出来。预演一次就几秒：
+
+    * SQL 里嵌的列名收不到（它只是大字符串常量的一部分）；
+    * 运行时现算的值收不到（v1.18.0 有 6 个地图码被错记到 memory_seed 名下，
+      而它们只存在于 cs2_seed）；
+    * 名字干脆不存在（拼错）。
+
+    返回非零即「清单写错了」，与打包无关。
+    """
+    bad = 0
+    for module, attrs in EXPECTED.items():
+        path = ROOT / f"{module}.py"
+        if not path.exists():
+            print(f"★ {module:<24} 本地找不到源码，清单里的模块名写错了？")
+            bad += 1
+            continue
+        try:
+            code = compile(path.read_text(encoding="utf-8"), str(path), "exec",
+                           dont_inherit=True)
+        except SyntaxError as exc:
+            print(f"★ {module:<24} 本地源码编译不过：{exc}")
+            bad += 1
+            continue
+        miss = [a for a in attrs if a not in symbols(code, set())]
+        if miss:
+            print(f"★ {module:<24} 本地源码里收不到：{miss}")
+            bad += len(miss)
+        else:
+            print(f"  ok {module:<24} {len(attrs)} 个符号都在本地源码里")
+
+    entry = ROOT / "main.py"
+    if entry.exists():
+        code = compile(entry.read_text(encoding="utf-8"), str(entry), "exec",
+                       dont_inherit=True)
+        found = symbols(code, set())
+        miss = [a for a in ENTRY_EXPECTED if a not in found]
+        if miss:
+            print(f"★ {'main (entry)':<24} 本地源码里收不到：{miss}")
+            bad += len(miss)
+        else:
+            print(f"  ok {'main (entry)':<24} {len(ENTRY_EXPECTED)} 个符号都在本地源码里")
+
+    print()
+    print("清单自检失败：先修 EXPECTED（这不是打包问题）" if bad
+          else "清单自检通过：EXPECTED 全部收得到，可以去体检 exe 了")
+    return 1 if bad else 0
+
+
 def main(argv: list[str]) -> int:
+    if "--selfcheck" in argv:
+        return selfcheck()
     exe = Path(argv[0]) if argv else ROOT / "dist" / "ExpiryManager_fixed.exe"
     if not exe.exists():
         print(f"找不到 {exe}")
