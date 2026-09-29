@@ -1940,6 +1940,68 @@ class ExcelDB:
             "learned": int(row["learned"] or 0),
         }
 
+    def heatmap(self, *, weeks=18, today=None) -> dict:
+        """复习热力图的数据：**列 = 周（周一起），行 = 周一..周日**。
+
+        ``level`` 是给界面上色用的分档（0 = 没练，1..4 由浅到深）。分级按
+        ``max`` 等分 —— 全程只练 3 个的人不该看到一片浅色，得按他自己的峰值算。
+        """
+        span = max(1, int(weeks))
+        anchor = parse_date(today) or date.today()
+        # 末尾这一列必须是**包含今天**的那一周，且从周一开头
+        end_monday = anchor - timedelta(days=anchor.weekday())
+        start_monday = end_monday - timedelta(weeks=span - 1)
+
+        rows = {row["check_date"]: dict(row) for row in self.conn.execute(
+            "SELECT * FROM excel_checkins").fetchall()}
+
+        columns: list[list[dict]] = []
+        months: list[tuple] = []
+        last_month = None
+        peak = 0
+        total = 0
+        for column_index in range(span):
+            monday = start_monday + timedelta(weeks=column_index)
+            if last_month != monday.month:
+                months.append((column_index, f"{monday.month}月"))
+                last_month = monday.month
+            column: list[dict] = []
+            for row_index in range(7):
+                day = monday + timedelta(days=row_index)
+                key = day.isoformat()
+                record = rows.get(key) or {}
+                value = int(record.get("reviewed", 0) or 0)
+                future = day > anchor
+                if not future:
+                    total += value
+                    peak = max(peak, value)
+                column.append({
+                    "date": key,
+                    "value": value,
+                    "level": 0,
+                    "minutes": int(record.get("minutes", 0) or 0),
+                    "checked": key in rows,
+                    "future": future,
+                })
+            columns.append(column)
+
+        for column in columns:
+            for day in column:
+                if day["future"] or not day["value"] or not peak:
+                    continue
+                ratio = day["value"] / float(peak)
+                day["level"] = 1 if ratio <= 0.25 else (
+                    2 if ratio <= 0.5 else (3 if ratio <= 0.75 else 4))
+        return {
+            "weeks": span,
+            "columns": columns,
+            "months": months,
+            "max": peak,
+            "total": total,
+            "start": start_monday.isoformat(),
+            "end": anchor.isoformat(),
+        }
+
     def recent_activity(self, *, days=7, today=None) -> list[dict]:
         """最近 N 天的复习量（含没打卡的日子，值为 0），画柱状用。"""
         anchor = parse_date(today) or date.today()

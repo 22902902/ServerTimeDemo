@@ -152,6 +152,15 @@ RADAR_RADIUS = 96
 RADAR_LABEL_GAP = 26
 RADAR_RINGS = 4
 
+# 复习热力图：与雷达图同一个道理，**固定尺寸**，不参与自适应
+HEATMAP_WEEKS = 18
+HEATMAP_CELL = 11
+HEATMAP_GAP = 3
+HEATMAP_LEFT = 4        # 左边留给月份标签
+HEATMAP_TOP = 16
+# 由浅到深五档：0 档是「没练」的底色，必须和最浅那档拉得开
+HEATMAP_COLORS = ("#ececec", "#cfe3d4", "#a8cbb2", "#7bb38d", "#4f9166")
+
 MASTERY_FILTER_CHOICES = (
     ("全部掌握度", None),
     ("未学", MASTERY_NEW),
@@ -2713,6 +2722,35 @@ class ExcelLearningPage(ttk.Frame):
         # 条形回答「哪一类是多少」，雷达回答「整体形状缺哪一角」。
         # 12 个分类铺在圆周上，瘪进去的那一片一眼就看得出来，
         # 而横向条要逐行比长度才看得出来。
+        heat_card = tk.Frame(host, bg=self.palette.surface, highlightthickness=1,
+                             highlightbackground=self.palette.border_soft)
+        heat_card.pack(fill="x", anchor="w", pady=(12, 0))
+        tk.Label(heat_card, text="复习热力图（最近 18 周）",
+                 bg=self.palette.surface, fg=self.palette.text_primary,
+                 font=TYPOGRAPHY.section).pack(anchor="w", padx=12, pady=(10, 2))
+        heat_data = self.db.heatmap()
+        self._heatmap_chart(heat_card, heat_data).pack(
+            anchor="w", padx=12, pady=(4, 0))
+        heat_legend = tk.Frame(heat_card, bg=self.palette.surface)
+        heat_legend.pack(anchor="w", padx=12, pady=(6, 0))
+        tk.Label(heat_legend, text="少", bg=self.palette.surface,
+                 fg=self.palette.text_muted,
+                 font=TYPOGRAPHY.caption).pack(side="left", padx=(0, 4))
+        for color in HEATMAP_COLORS:
+            swatch = tk.Frame(heat_legend, width=11, height=11, bg=color)
+            swatch.pack(side="left", padx=1)
+            swatch.pack_propagate(False)
+        tk.Label(heat_legend, text="多", bg=self.palette.surface,
+                 fg=self.palette.text_muted,
+                 font=TYPOGRAPHY.caption).pack(side="left", padx=(4, 0))
+        tk.Label(heat_card,
+                 text="一格一天，颜色越深当天复习得越多；灰白是还没到的日子。"
+                      "看的是哪一阵子在练、哪一阵子荒了 —— 与上面的打卡日历"
+                      "（只问「打了没」）是两个问题。",
+                 bg=self.palette.surface, fg=self.palette.text_muted,
+                 font=TYPOGRAPHY.caption, justify="left", anchor="w",
+                 wraplength=700).pack(anchor="w", padx=12, pady=(6, 10))
+
         radar_card = tk.Frame(host, bg=self.palette.surface, highlightthickness=1,
                               highlightbackground=self.palette.border_soft)
         radar_card.pack(fill="x", anchor="w", pady=(12, 0))
@@ -2786,6 +2824,37 @@ class ExcelLearningPage(ttk.Frame):
             side="left", padx=4)
         ttk.Button(row, text="打卡 / 更新", command=self.checkin_today).pack(
             side="left", padx=4)
+
+    def _heatmap_chart(self, parent, data):
+        """复习热力图：**格子是量，不是有无** —— 看趋势用的。
+
+        跨 18 周、列按周一对齐（行是周一..周日）。未来的日子画成空档，否则
+        右下角一片深色会让人以为「最近没练」，其实那几天还没到。
+        """
+        step = HEATMAP_CELL + HEATMAP_GAP
+        columns = data.get("columns") or []
+        width = HEATMAP_LEFT + max(1, len(columns)) * step
+        height = HEATMAP_TOP + 7 * step
+        canvas = tk.Canvas(parent, width=width, height=height,
+                           bg=self.palette.surface, highlightthickness=0, bd=0)
+        for column_index, column in enumerate(columns):
+            x = HEATMAP_LEFT + column_index * step
+            for row_index, day in enumerate(column):
+                y = HEATMAP_TOP + row_index * step
+                if day.get("future"):
+                    fill = self.palette.surface_alt
+                    outline = self.palette.surface_alt
+                else:
+                    level = int(day.get("level", 0) or 0)
+                    fill = HEATMAP_COLORS[min(level, len(HEATMAP_COLORS) - 1)]
+                    outline = self.palette.border_soft
+                canvas.create_rectangle(x, y, x + HEATMAP_CELL, y + HEATMAP_CELL,
+                                        fill=fill, outline=outline)
+        for column_index, label in data.get("months") or []:
+            canvas.create_text(HEATMAP_LEFT + column_index * step, 2, text=label,
+                               anchor="nw", fill=self.palette.text_muted,
+                               font=TYPOGRAPHY.caption)
+        return canvas
 
     def _radar_chart(self, parent, stats, *, radius=RADAR_RADIUS):
         """12 轴分类掌握雷达图。

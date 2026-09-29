@@ -1441,6 +1441,49 @@ def test_formula_highlight(root, page, db) -> None:
           str(body.cget("state")) == "disabled", body.cget("state"))
 
 
+# S. 复习热力图（界面上真有 18×7 个格子）
+# ══════════════════════════════════════════════════════════════════════════
+def test_heatmap_chart(root, page, db) -> None:
+    section("[S] 复习热力图")
+    db.upsert_checkin(check_date="2026-09-10", reviewed=12, minutes=25)
+    db.upsert_checkin(check_date="2026-09-01", reviewed=3, minutes=8)
+    page.show_view("stats")
+    settle(root, 3)
+
+    charts = [c for c in _all_canvases(page)
+              if len([i for i in c.find_all() if c.type(i) == "rectangle"]) >= 100]
+    check("统计页里有一张满是小方块的图", bool(charts), len(_all_canvases(page)))
+    if not charts:
+        return
+    canvas = charts[0]
+    rects = [i for i in canvas.find_all() if canvas.type(i) == "rectangle"]
+    check("格子数 = 18 周 × 7 天", len(rects) == 18 * 7, len(rects))
+    check("图真的被映射出来了", mapped(canvas),
+          (canvas.winfo_width(), canvas.winfo_height()))
+    fills = [canvas.itemcget(i, "fill") for i in rects]
+    check("至少三种深浅（有练过的日子）", len(set(fills)) >= 3, len(set(fills)))
+    deepest = sum(1 for f in fills if f == "#4f9166")
+    check("最深档不超过四分之一（不是一片糊）",
+          0 < deepest <= len(fills) // 4, (deepest, len(fills)))
+
+
+def _all_canvases(widget) -> list:
+    """递归收所有 Canvas。"""
+    found = []
+    try:
+        children = widget.winfo_children()
+    except tk.TclError:
+        return found
+    for child in children:
+        try:
+            if child.winfo_class() == "Canvas":
+                found.append(child)
+        except tk.TclError:
+            pass
+        found.extend(_all_canvases(child))
+    return found
+
+
 def main_test() -> None:
     tmpdir = Path(tempfile.mkdtemp(prefix="excel_ui_test_"))
     root = tk.Tk()
@@ -1474,6 +1517,7 @@ def main_test() -> None:
         test_radar(root, page, db)
         test_note_link(root, page, db, tmpdir)
         test_formula_highlight(root, page, db)
+        test_heatmap_chart(root, page, db)
     finally:
         if db is not None:
             db.close()

@@ -48,6 +48,8 @@ S. 公式分词      拼接**恒等于原文** / 200 个函数的真实公式全
                  函数名必须紧跟左括号 / 引用 字符串 数字 各归各类
 T. 导出与打印    整库 Markdown 按分类分章 / 书页码与我的笔记跟着走 /
                  空字段不占位 / HTML 转义 / 打印失败静默返回 False
+U. 复习热力图    18 周 / 列按周一对齐 / 末列含今天 / 未来日标 future /
+                 分级按自己的峰值算 / 空库不炸
 
 用法：
     python scripts/test_excel.py
@@ -1549,6 +1551,69 @@ def test_export_markdown() -> None:
           print_document(Path(tempfile.mkdtemp()) / "不存在.html") is False)
 
 
+# U. 复习热力图
+# ══════════════════════════════════════════════════════════════════════════
+def test_heatmap() -> None:
+    section("[U] 复习热力图")
+    db = fresh("heatmap")
+    try:
+        # 空库：图照样画得出来（不能除零）
+        empty = db.heatmap(today="2026-09-29")
+        check("空库不炸且没有峰值", empty["max"] == 0 and empty["total"] == 0, empty)
+        check("空库每一格都是 0 档",
+              all(day["level"] == 0 for col in empty["columns"] for day in col))
+
+        db.upsert_checkin(check_date="2026-09-01", reviewed=3, minutes=8)
+        db.upsert_checkin(check_date="2026-09-10", reviewed=12, minutes=25)
+        db.upsert_checkin(check_date="2026-08-20", reviewed=6, minutes=15)
+        data = db.heatmap(today="2026-09-29")
+
+        # -- 网格形状 -------------------------------------------------
+        check("默认 18 周 = 18 列", len(data["columns"]) == 18 and data["weeks"] == 18,
+              (len(data["columns"]), data["weeks"]))
+        check("每列 7 天（周一..周日）",
+              all(len(col) == 7 for col in data["columns"]),
+              {len(c) for c in data["columns"]})
+        check("**列首是周一**（不对齐就看不出趋势）",
+              all(date.fromisoformat(col[0]["date"]).weekday() == 0
+                  for col in data["columns"]),
+              [col[0]["date"] for col in data["columns"][:3]])
+        check("**末列包含今天**（画到上周为止那最该看的一段就没了）",
+              any(day["date"] == "2026-09-29" for day in data["columns"][-1]),
+              [d["date"] for d in data["columns"][-1]])
+
+        # -- future ----------------------------------------------------
+        check("未来的日子标了 future",
+              all(day["future"] for day in data["columns"][-1]
+                  if day["date"] > "2026-09-29"),
+              [d["date"] for d in data["columns"][-1]])
+        check("今天不算未来",
+              not next(d for d in data["columns"][-1]
+                       if d["date"] == "2026-09-29")["future"])
+        check("未来的日子不计入总量",
+              data["total"] == 3 + 12 + 6, data["total"])
+
+        # -- 分档 ------------------------------------------------------
+        peek = {day["date"]: day for col in data["columns"] for day in col}
+        check("峰值格是最深档", peek["2026-09-10"]["level"] == 4,
+              peek["2026-09-10"])
+        check("没练的日子是 0 档", peek["2026-09-02"]["level"] == 0, peek["2026-09-02"])
+        check("分级按**自己的**峰值算（只练 3 个的人不该看到一片浅色）",
+              peek["2026-09-01"]["level"] == 1, peek["2026-09-01"])
+        check("中间量落在中间档", peek["2026-08-20"]["level"] in (2, 3),
+              peek["2026-08-20"])
+        check("峰值就是最大值", data["max"] == 12, data["max"])
+
+        # -- 月份标签 --------------------------------------------------
+        check("月份标签按列递增",
+              [c for c, _ in data["months"]] == sorted(c for c, _ in data["months"]),
+              data["months"])
+        check("月份标签数在一个合理范围（3~5 个）",
+              3 <= len(data["months"]) <= 5, data["months"])
+    finally:
+        db.close()
+
+
 def main_test() -> None:
     test_seed_consistency()
     test_seed_schema()
@@ -1570,6 +1635,7 @@ def main_test() -> None:
     test_page_contracts()
     test_formula_tokens()
     test_export_markdown()
+    test_heatmap()
 
 
 if __name__ == "__main__":
