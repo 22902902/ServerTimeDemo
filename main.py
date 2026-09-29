@@ -709,10 +709,18 @@ def resolve_account_image_paths(image_value: str) -> list[Path]:
 
 
 def get_account_image_storage_value(image_path: Path) -> str:
+    """图片在库里的存储值：**相对 BASE_DIR、正斜杠**。
+
+    正斜杠是硬要求，不是洁癖：孤儿回收按字符串比对路径，同一个文件写成
+    反斜杠与正斜杠两种形式就会被当成两张不同的图 —— 该回收的收不回，
+    甚至把还有人在用的图删掉。process_image_migrate 负责把老数据统一过来，
+    这里负责**别再写出反斜杠**。
+    """
+
     try:
-        return str(image_path.resolve().relative_to(BASE_DIR.resolve()))
+        return image_path.resolve().relative_to(BASE_DIR.resolve()).as_posix()
     except (OSError, ValueError, Exception):
-        return str(image_path.resolve())
+        return image_path.resolve().as_posix()
 
 
 def get_account_image_file_name(image_value: str) -> str:

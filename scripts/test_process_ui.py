@@ -516,6 +516,15 @@ def test_screenshot_reclaim(page, db, tmproot):
     check("页面真的拿到了图片能力（真适配器上有 resolve_paths）",
           callable(getattr(page.images, "resolve_paths", None)))
 
+    # 真适配器的存储值必须是**正斜杠**：孤儿回收按字符串比对路径，同一个文件
+    # 写成反斜杠与正斜杠两种形式就会被当成两张图（该收的收不回，甚至误删）。
+    # process_image_migrate 只管把老数据搬过来，得靠这里保证不再写回去。
+    sample = app.BASE_DIR / "account_images" / "process_flows" / "9" / "x.png"
+    stored = app.get_account_image_storage_value(sample)
+    check("**存储值统一用正斜杠**（不然老问题会从新贴的图重新长出来）",
+          "\\" not in stored and stored.endswith("account_images/process_flows/9/x.png"),
+          stored)
+
     saved = page.images
     page.images = FakeImages(tmproot)
     try:
