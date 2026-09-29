@@ -319,6 +319,18 @@ PROCESS_RUNS_TABLE = """
     )
 """
 
+PROCESS_TEMPLATES_TABLE = """
+    CREATE TABLE IF NOT EXISTS process_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'user',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+"""
+
 PROCESS_RUN_STEPS_TABLE = """
     CREATE TABLE IF NOT EXISTS process_run_steps (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -382,6 +394,7 @@ def init_process_tables(conn: sqlite3.Connection) -> list[str]:
     conn.execute(PROCESS_STEPS_TABLE)
     conn.execute(PROCESS_RUNS_TABLE)
     conn.execute(PROCESS_RUN_STEPS_TABLE)
+    conn.execute(PROCESS_TEMPLATES_TABLE)
     conn.commit()
     added = _add_missing_columns(conn, "process_steps", STEP_COLUMN_MIGRATIONS)
     added += _add_missing_columns(conn, "process_flows", FLOW_COLUMN_MIGRATIONS)
@@ -628,6 +641,52 @@ class ProcessDBMixin:
             (flow_id,),
         ).fetchone()
         return int(row["max_no"] or 0) + 1
+
+    # -- 流程模板（用户自己攒的那些才最值钱，必须落库） ----------------
+    def fetch_process_templates(self) -> list[dict]:
+        """库里的模板。**坏 JSON 直接跳过**，不该因为一条坏数据让整页打不开。"""
+        rows = self.conn.execute(
+            "SELECT key, label, source, payload_json FROM process_templates "
+            "ORDER BY id").fetchall()
+        result: list[dict] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            item = dict(payload)
+            item["key"] = row["key"]
+            item["label"] = row["label"] or payload.get("label") or row["key"]
+            item["source"] = row["source"] or "user"
+            result.append(item)
+        return result
+
+    def save_process_template(self, key: str, label: str, payload: dict,
+                              source: str = "user") -> int:
+        """按 ``key`` upsert —— 同一条流程反复另存不该堆出多份。"""
+        now = datetime.now().isoformat(timespec="seconds")
+        payload_text = json.dumps(payload or {}, ensure_ascii=False)
+        self.conn.execute(
+            "INSERT INTO process_templates (key, label, source, payload_json, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET label = excluded.label, "
+            "source = excluded.source, payload_json = excluded.payload_json, "
+            "updated_at = excluded.updated_at",
+            (str(key), str(label), str(source), payload_text, now, now))
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id FROM process_templates WHERE key = ?", (str(key),)).fetchone()
+        return int(row["id"]) if row else 0
+
+    def delete_process_template(self, key: str) -> bool:
+        """删模板。**只允许删自建的**（内置那份在代码里，删了重开又回来）。"""
+        cur = self.conn.execute(
+            "DELETE FROM process_templates WHERE key = ? AND source <> 'builtin'",
+            (str(key),))
+        self.conn.commit()
+        return int(cur.rowcount or 0) > 0
 
     def add_process_step(self, flow_id: int, payload: dict) -> int:
         now = datetime.now().isoformat(timespec="seconds")

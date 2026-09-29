@@ -578,11 +578,47 @@ def main_test() -> None:
             test_search(page, db)
             test_scroll_reset(page, db)
             test_screenshot_reclaim(page, db, tmpdir)
+            test_template_persists(root, page, db)
         finally:
             db.close()
             root.destroy()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# K. 模板落库（**重开还在**）
+# ══════════════════════════════════════════════════════════════════════════
+def test_template_persists(root, page, db) -> None:
+    section("K. 模板落库")
+    flow_id = db.add_process_flow({"title": "换证书流程", "category": "运维",
+                                   "platform": "", "link_url": "", "note": "n",
+                                   "variables": ""})
+    db.add_process_step(flow_id, {"step_no": 1, "title": "备份旧证书",
+                                  "description_text": "d"})
+    page.refresh_flows(select_flow_id=flow_id)
+    settle(root, 3)
+
+    before = len(page.flow_templates)
+    page.save_as_template()
+    settle(root, 2)
+    check("另存之后模板多了一条", len(page.flow_templates) == before + 1,
+          (before, len(page.flow_templates)))
+    check("库里真的写了一行", len(db.fetch_process_templates()) == 1,
+          db.fetch_process_templates())
+    check("状态栏说了「已保存」（不然用户以为只在本次有效）",
+          "已保存" in str(page.status_var.get()), page.status_var.get())
+
+    # 关键：**另开一个页面** = 程序重启。内存里那份没了就没了
+    again = make_page(root, db)
+    again.pack(fill="both", expand=True)
+    settle(root, 3)
+    check("**重开之后模板还在**（这条才是本次的重点）",
+          any(t.get("source") == "user" for t in again.flow_templates),
+          [t.get("key") for t in again.flow_templates])
+    check("重开后步骤也没丢",
+          any(len(t.get("steps") or []) == 1
+              for t in again.flow_templates if t.get("source") == "user"))
+    again.destroy()
 
 
 if __name__ == "__main__":

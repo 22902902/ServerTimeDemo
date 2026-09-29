@@ -133,7 +133,8 @@ class ProcessPage(ttk.Frame):
         super().__init__(master)
         self.db = db
         self.app_title = app_title
-        self.flow_templates = flow_templates or []
+        self.flow_templates = list(flow_templates or [])
+        self._merge_saved_templates()
         self.image_preview_cls = image_preview_cls
         self.images = images
         self.format_datetime = format_datetime
@@ -195,6 +196,7 @@ class ProcessPage(ttk.Frame):
             [
                 ("从模板创建流程", self.create_from_template),
                 ("从本流程另存为模板", self.save_as_template),
+                ("删除当前模板（仅自建）", self.delete_current_template),
                 "---",
                 ("复制流程文本", self.copy_flow_text),
                 ("复制为脚本", self.copy_script),
@@ -789,6 +791,45 @@ class ProcessPage(ttk.Frame):
             return
         self.open_url(link)
 
+    def _merge_saved_templates(self) -> None:
+        """把库里的自建模板并进来。**同 key 时库里的赢** —— 内置那份只是默认值，
+        用户改过的必须留着。
+        """
+        try:
+            saved = self.db.fetch_process_templates()
+        except Exception:
+            return                      # 库还没建好这张表：先按内置的跑
+        by_key = {item.get("key"): index
+                  for index, item in enumerate(self.flow_templates)}
+        for item in saved:
+            key = item.get("key")
+            if key in by_key:
+                self.flow_templates[by_key[key]] = item
+            else:
+                self.flow_templates.append(item)
+
+    def delete_current_template(self):
+        """删掉当前选中的模板。**内置的不给删**（删了重开又回来，纯属误导）。"""
+        item = self._pick_template()
+        if not item:
+            return
+        if (item.get("source") or "builtin") != "user":
+            messagebox.showinfo(
+                self.app_title,
+                "内置模板不能删除。\n\n想改就「从模板创建流程」后另存一份自己的。",
+                parent=self)
+            return
+        if not messagebox.askyesno(
+                self.app_title, f"删除模板「{item.get('label', '')}」？", parent=self):
+            return
+        self.db.delete_process_template(item.get("key"))
+        self.flow_templates = [t for t in self.flow_templates
+                               if t.get("key") != item.get("key")]
+        self.template_var.set(self.flow_templates[0]["label"]
+                              if self.flow_templates else "")
+        self._sync_template_combobox()
+        self._set_status("已删除该模板。")
+
     def create_from_template(self):
         template = self._pick_template()
         if not template:
@@ -837,11 +878,22 @@ class ProcessPage(ttk.Frame):
                 for step in steps
             ],
         }
-        if not any(t.get("key") == item["key"] for t in self.flow_templates):
+        item["source"] = "user"
+        for index, old in enumerate(self.flow_templates):
+            if old.get("key") == item["key"]:
+                self.flow_templates[index] = item
+                break
+        else:
             self.flow_templates.append(item)
+        # 落库：重开还要在（内存里那份没了就没了，攒模板的人最心疼这个）
+        try:
+            self.db.save_process_template(item["key"], item["label"], item)
+        except Exception as exc:
+            self._set_status(f"存为模板失败（只在本次有效）：{exc}")
+            return
         self.template_var.set(item["label"])
         self._sync_template_combobox()
-        self._set_status(f"已把「{flow['title']}」存为模板，可在左侧下拉里选用。")
+        self._set_status(f"已把「{flow['title']}」存为模板（已保存，重开还在）。")
 
     def _pick_template(self):
         label = (self.template_var.get() or "").strip()

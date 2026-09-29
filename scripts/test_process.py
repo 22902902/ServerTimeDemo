@@ -881,6 +881,65 @@ def test_screenshot_reclaim() -> None:
     check("删行之后再调同一个 id 什么都算不出来（顺序不能反）", after == [], after)
 
 
+# K. 模板落库
+# ══════════════════════════════════════════════════════════════════════════
+def test_templates() -> None:
+    section("K. 模板落库：另存 / 覆盖 / 删除 / 坏数据")
+    host = fresh("templates")
+    try:
+        check("新库建出 process_templates",
+              "process_templates" in {r[0] for r in host.conn.execute(
+                  "SELECT name FROM sqlite_master WHERE type='table'")})
+        check("空库没有模板", host.fetch_process_templates() == [],
+              host.fetch_process_templates())
+
+        payload = {"key": "local_1", "label": "换证书流程（自建）",
+                   "flow": {"title": "换证书", "category": "运维"},
+                   "steps": [{"step_no": 1, "title": "备份旧证书"}]}
+        template_id = host.save_process_template("local_1", payload["label"], payload)
+        check("存进去拿到 id", template_id > 0, template_id)
+
+        rows = host.fetch_process_templates()
+        check("读回来只有一条", len(rows) == 1, len(rows))
+        check("步骤也跟着回来了（模板不是只存个标题）",
+              len(rows[0].get("steps") or []) == 1, rows[0])
+        check("标了 source=user（才知道能不能删）",
+              rows[0].get("source") == "user", rows[0].get("source"))
+
+        # 同一条流程反复另存：不该堆出多份
+        payload2 = dict(payload, label="换证书流程 v2")
+        host.save_process_template("local_1", "换证书流程 v2", payload2)
+        rows = host.fetch_process_templates()
+        check("**同 key 再存是覆盖，不是堆两份**", len(rows) == 1, len(rows))
+        check("覆盖的是新的那份", rows[0]["label"] == "换证书流程 v2", rows[0]["label"])
+
+        # 内置的不给删（删了重开又回来，纯属误导）
+        host.save_process_template("builtin_x", "内置", {"key": "builtin_x",
+                                                     "label": "内置"},
+                                   source="builtin")
+        check("内置模板删不掉",
+              host.delete_process_template("builtin_x") is False)
+        check("自建模板删得掉", host.delete_process_template("local_1") is True)
+        check("删完之后自建那条没了（内置那条本来就该留着）",
+              [r["key"] for r in host.fetch_process_templates()] == ["builtin_x"],
+              [r["key"] for r in host.fetch_process_templates()])
+
+        # 坏 JSON：不该让整页打不开
+        host.conn.execute(
+            "INSERT INTO process_templates (key, label, source, payload_json, "
+            "created_at, updated_at) VALUES (?, ?, 'user', ?, 'x', 'x')",
+            ("bad", "坏数据", "{这不是 JSON"))
+        host.conn.commit()
+        host.save_process_template("ok", "好的", {"key": "ok", "label": "好的"})
+        rows = host.fetch_process_templates()
+        check("**坏 JSON 被跳过，好的那条照样读出来**",
+              "bad" not in [r["key"] for r in rows]
+              and "ok" in [r["key"] for r in rows],
+              [r["key"] for r in rows])
+    finally:
+        cleanup()
+
+
 def main_test() -> None:
     print("=" * 78)
     print("流程中心回归测试：数据层 + 脚本生成 + 建表迁移")
@@ -895,6 +954,7 @@ def main_test() -> None:
     test_search()
     test_runs()
     test_screenshot_reclaim()
+    test_templates()
 
 
 if __name__ == "__main__":
