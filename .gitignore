@@ -9,6 +9,10 @@ login_memory.json
 remember_me.json
 *.credentials.json
 
+# ---------- 本机私有配置（真实地址 / 参数，仓库里只有示例） ----------
+interfaces.local.json
+*.local.json
+
 # ---------- 运行期数据 ----------
 # 统一数据目录（程序首次启动自动创建并迁移）
 ExpiryManager_Data/

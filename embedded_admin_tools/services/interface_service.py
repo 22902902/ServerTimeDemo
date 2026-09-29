@@ -5,7 +5,9 @@
 """
 
 import json
+import os
 import re
+import sys
 from copy import deepcopy
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -15,7 +17,33 @@ PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 
 
 def _get_default_config_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "config" / "interfaces.json"
+    """默认接口配置文件的位置（**先私有、后示例**）。
+
+    按顺序取第一个存在的文件::
+
+        1. 环境变量 ``EXPIRY_INTERFACE_CONFIG`` 指定的文件
+        2. exe 同级目录下的 ``interfaces.local.json``（打包后走这条）
+        3. 同目录下的 ``interfaces.local.json``（源码运行走这条）
+        4. 同目录下的 ``interfaces.json``（仓库内的示例）
+
+    仓库里那份示例的地址是占位符（``example.com``）—— 真实地址属于内部信息，
+    不能进版本库。本机放一份 ``interfaces.local.json`` 就能照常使用，
+    而且它被 .gitignore 排除，不会被误提交。打包成 exe 后 ``__file__`` 指向
+    临时解包目录，所以额外再找一遍 **exe 同级目录**。
+    """
+    config_dir = Path(__file__).resolve().parent.parent / "config"
+    candidates: list[Path] = []
+    override = os.environ.get("EXPIRY_INTERFACE_CONFIG")
+    if override:
+        candidates.append(Path(override))
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "interfaces.local.json")
+    candidates.append(config_dir / "interfaces.local.json")
+    candidates.append(config_dir / "interfaces.json")
+    for path in candidates:
+        if path.exists():
+            return path
+    return config_dir / "interfaces.json"
 
 
 def _load_interface_config_from_json(file_path: Path | None) -> dict | None:
