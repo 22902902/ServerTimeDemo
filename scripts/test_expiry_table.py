@@ -59,7 +59,7 @@ def check(label: str, condition: bool, detail: str = "") -> None:
         print(f"  FAIL  {label}" + (f"\n        {detail}" if detail else ""))
 
 
-# 真实的库内取值（来自 expiry_manager.db 的 assets.resource_detail）
+# 取自库内 assets.resource_detail 的样本（IP / 域名已脱敏为占位值）
 REAL_MULTILINE = "IP：203.0.113.45\n配置：4 核（vCPU）16 GiB10 Mbps"
 REAL_DOMAINS = "samplehost001.com \nwww.samplehost001.com"
 REAL_ONE_LINE = "www.demo001.com、demo001.com"
