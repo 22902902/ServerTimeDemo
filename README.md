@@ -99,6 +99,37 @@ python scripts/export_sensitive.py 目标目录 --skip-tools      # 只要数据
 
 它同样是增量的，并在目标目录写 `备份清单.txt` 与 `恢复说明.txt`。
 
+## 同步到 GitHub
+
+仓库：<https://github.com/22902902/ServerTimeDemo>（Public）。远端已配好（SSH），
+日常同步就是一条命令：
+
+```bash
+python scripts/sync_github.py                   # 先看：哪些没提交、哪些没推送
+python scripts/sync_github.py -m "改了什么"      # 提交 + 推送
+python scripts/sync_github.py --audit           # 全量体检（扫所有已跟踪文件）
+```
+
+提交前会自动跑一道**安全体检**，不通过就拒绝提交：
+
+- **文件名红线** —— 数据库、表格、图片、登录凭据、`interfaces.local.json`、
+  随身包、AI 工作记忆目录等一律拒绝。
+- **内容红线** —— 公网 IP（私有段与 RFC 5737 文档保留段放行）、未放行域名。
+- **业务串清单** —— 公司名、内部接口名这类中文串通用规则拦不住，清单放在
+  **本机** `.redlines.local.txt`（已 gitignore，一行一个串，`#` 注释）。
+  **换机器时记得把它一起带走**，否则这道闸会静默失效。
+
+> ⚠️ 改工作区**删不掉已经推送出去的内容** —— 旧提交照样能被翻出来。
+> 真发现敏感信息进了历史，只能重写历史再强推：
+>
+> ```bash
+> git filter-repo --replace-text <替换表> --force   # 注意：会移除 origin，之后要重新 add
+> git push -u origin main --force
+> ```
+>
+> 替换值要与原值**等长**，否则会踩到基于像素宽度的截断断言（见
+> `scripts/test_expiry_table.py`）。
+
 ## 打包为 exe
 
 ```bash
