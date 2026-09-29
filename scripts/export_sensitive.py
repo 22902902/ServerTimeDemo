@@ -1,77 +1,99 @@
 # -*- coding: utf-8 -*-
-r"""把「不能进版本库的敏感数据」导出到一个文件夹，供随身 U 盘携带。
+r"""把「不能进 Git 的敏感数据」导出到一个文件夹，供随身 U 盘携带。
 
 用法::
 
     python scripts/export_sensitive.py                 # 导出到默认目录
     python scripts/export_sensitive.py H:\随身备份      # 指定 U 盘目录
-    python scripts/export_sensitive.py --skip-tools    # 不带 Tools 工具软件
+    python scripts/export_sensitive.py --skip-tools    # 不带 Tools（约 5 MB，秒级）
     python scripts/export_sensitive.py --list          # 只列出会导出什么
 
 为什么要单独导出：这些东西**永远不该进 Git**（数据库含业务数据、凭据含手机号
 与密码密文、excel 与各业务图片目录含内部资料），但换机器时又必须带着走。
 仓库里的 .gitignore 只是"不提交"，不解决"随身带走"。
 
+数据在哪（2026-09-29 之后）
+--------------------------
+程序的**运行目录是「随身包」**（默认 ``F:\ServerTimeDemo_随身包``，
+可用环境变量 ``SERVERDEMO_PORTABLE_DIR`` 覆盖）。exe 同级目录就是 ``BASE_DIR``，
+所以数据库、图片、Tools、excel、真实接口配置全在包里，**不在仓库里**。
+本脚本因此以包为源；只有 ``.workbuddy``（AI 工作记忆）和源码运行时用的那份
+``interfaces.local.json`` 还留在仓库根。
+
+和 ``make_portable.py --target`` 的分工
+---------------------------------------
+* ``make_portable.py --target X:\``  —— 把**整份运行目录**（含 Tools，约 600 MB）
+  同步到 U 盘。它就是"下班直接拷那个文件夹"的脚本版。
+* 本脚本 —— 只导**数据**（``--skip-tools`` 时约 5 MB，秒级），
+  另写 ``备份清单.txt``（含关键文件 SHA256）与 ``恢复说明.txt``。
+  适合"只想带走数据、Tools 到新机器再下"的场景。
+
 设计要点：
 
-* **只读源项目**：导出是复制，源文件一个字节都不动。
-* **增量**：目标文件与源文件的大小和修改时间都一致就跳过，第二次跑很快
-  （Tools 有 600 MB，全量重拷没必要）。
-* **镜像项目结构**：备份目录里就是项目根的局部镜像，恢复时整目录覆盖回去即可。
-* **Tools 是可选大头**：收集的工具软件约 600 MB，可重新下载，
-  所以给了 ``--skip-tools``。
-* 结束时写 ``备份清单.txt``（含关键文件 SHA256）与 ``恢复说明.txt``。
+* **只读源**：导出是复制，源文件一个字节都不动。
+* **增量**：目标文件与源文件的大小和修改时间都一致就跳过，第二次跑很快。
+* **镜像结构**：备份目录里就是包（及仓库里的少数几项）的局部镜像，
+  恢复时整目录覆盖回包里即可。
+* ``--skip-tools``：Tools 约 600 MB，是能重新下载的工具软件。
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import shutil
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DEST = Path(r"F:\ServerTimeDemo_随身备份")
+DEFAULT_PACK = Path(
+    os.environ.get("SERVERDEMO_PORTABLE_DIR", r"F:\ServerTimeDemo_随身包")
+)
 
-# 敏感 / 不可重建的数据。相对项目根，目录与文件混排；支持 * 通配。
-DATA_PATTERNS = [
-    # 运行版（exe 在 dist/ 下，BASE_DIR 就是 dist/）
-    "dist/expiry_manager.db*",
-    "dist/login_memory.json",
-    "dist/remember_me.json",
-    "dist/account_images",
-    # 源码运行时的数据（仓库根）
+# 随身包里要带走的数据（相对包根）。支持 * 通配。
+PACK_PATTERNS = [
+    # 主数据库与登录凭据
     "expiry_manager.db",
     "expiry_manager.db.*",
     "login_memory.json",
     "remember_me.json",
     "study_demo.db",
-    "study_notes.db",
+    # 业务图片
     "account_images",
     "process_flow_images",
     "study_notes_images",
     "study_notes_attachments",
-    "study_demo",
-    "adb_history",
     # 用户在意的表格
     "excel",
     # 真实接口配置（仓库里那份是 example.com 占位符）
-    "embedded_admin_tools/config/interfaces.local.json",
-    # AI 开发记忆（含项目内部描述，不进公开仓库）
-    ".workbuddy",
+    "interfaces.local.json",
+    # 运行数据目录：pg 不备份也问题不大，但 .migrated 必须带上 ——
+    # 缺了它，恢复后首次启动会把包根的数据再复制一份进 ExpiryManager_Data。
+    "ExpiryManager_Data/.migrated",
+    # 其余小目录
+    "adb_history",
+    "study_demo",
 ]
 
-# 体积大但可重新获取：收集的工具软件
-TOOLS_PATTERNS = ["Tools"]
+PACK_TOOLS = ["Tools"]
 
-# 需要留指纹的关键文件（数据库 / 凭据 / 表格），备份完算一次 SHA256
+# 仓库里、包里没有的
+REPO_PATTERNS = [
+    # AI 开发记忆（含项目内部描述，不进公开仓库）
+    ".workbuddy",
+    # 源码运行时用的真实接口配置
+    "embedded_admin_tools/config/interfaces.local.json",
+]
+
+# 关键文件指纹（算一次 SHA256，用于核对 U 盘是否拷全）。
+# 元素是 (来源, 相对路径)，来源为 "pack" 或 "repo"。
 FINGERPRINT = [
-    "dist/expiry_manager.db",
-    "expiry_manager.db",
-    "dist/login_memory.json",
-    "login_memory.json",
-    "excel/服务器与云服务到期情况.xlsx",
+    ("pack", "expiry_manager.db"),
+    ("pack", "login_memory.json"),
+    ("pack", "excel/服务器与云服务到期情况.xlsx"),
+    ("pack", "ExpiryManager_Data/.migrated"),
 ]
 
 
@@ -92,17 +114,17 @@ def human(n: int) -> str:
     return f"{n:.1f} TB"
 
 
-def expand(patterns: list[str]) -> list[Path]:
-    """把通配展开成实际存在的路径（相对项目根）。"""
+def expand(base: Path, patterns: list[str]) -> list[Path]:
+    """把通配展开成实际存在的路径（相对 base）。"""
     found: list[Path] = []
     for pat in patterns:
         if any(ch in pat for ch in "*?["):
-            found.extend(sorted(ROOT.glob(pat)))
+            found.extend(sorted(base.glob(pat)))
         else:
-            p = ROOT / pat
+            p = base / pat
             if p.exists():
                 found.append(p)
-    # 去重 + 去掉被别的条目包含的子路径（先列目录时容易重复）
+    # 去重 + 去掉被别的条目包含的子路径
     uniq: list[Path] = []
     seen: set[Path] = set()
     for p in found:
@@ -137,57 +159,68 @@ class Stats:
         self.bytes += src.stat().st_size
 
 
-def export(items: list[Path], dest: Path, stats: Stats) -> list[tuple[str, int, int]]:
-    """镜像复制；返回 [(相对路径, 文件数, 字节数)]。"""
-    report = []
-    for src in items:
-        rel = src.relative_to(ROOT)
+def measure(p: Path) -> tuple[int, int]:
+    if p.is_dir():
+        fs = [f for f in p.rglob("*") if f.is_file()]
+        return len(fs), sum(f.stat().st_size for f in fs)
+    return 1, p.stat().st_size
+
+
+def export(items: list[tuple[Path, Path, str]], dest: Path, stats: Stats) -> None:
+    """items 是 (源绝对路径, 基准目录, 在备份里的落点)。"""
+    for src, base, rel in items:
         target = dest / rel
-        n_before, b_before = stats.copied, stats.bytes
         if src.is_dir():
             for f in src.rglob("*"):
                 if f.is_file():
                     stats.sync(f, target / f.relative_to(src))
-            # 目录自身的文件数单独数一遍，便于写清单
-            files = [f for f in src.rglob("*") if f.is_file()]
-            report.append((str(rel) + "/", len(files), sum(f.stat().st_size for f in files)))
         else:
             stats.sync(src, target)
-            report.append((str(rel), 1, src.stat().st_size))
-        _ = (n_before, b_before)
-    return report
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="导出不能进 Git 的敏感数据")
-    ap.add_argument("dest", nargs="?", default=str(DEFAULT_DEST), help="目标目录（默认 %(default)s）")
-    ap.add_argument("--skip-tools", action="store_true", help="不导出 Tools 工具软件（约 600 MB）")
+    ap.add_argument("dest", nargs="?", default=str(DEFAULT_DEST),
+                    help="目标目录（默认 %(default)s）")
+    ap.add_argument("--from", dest="source", default=None,
+                    help=f"随身包位置，默认 {DEFAULT_PACK}（也可用环境变量 "
+                         f"SERVERDEMO_PORTABLE_DIR）")
+    ap.add_argument("--skip-tools", action="store_true",
+                    help="不导出 Tools 工具软件（约 600 MB -> 约 5 MB）")
     ap.add_argument("--list", action="store_true", help="只列出会导出什么，不复制")
     args = ap.parse_args()
 
     dest = Path(args.dest)
-    patterns = list(DATA_PATTERNS) + ([] if args.skip_tools else TOOLS_PATTERNS)
-    items = expand(patterns)
+    pack = Path(args.source) if args.source else DEFAULT_PACK
+    fallback = False
+    if not pack.is_dir():
+        print(f"★ 随身包不存在：{pack}")
+        print("  回退到按仓库根取数据（源码运行时的老布局）。")
+        print("  包在别处就加 --from <路径>，或设 SERVERDEMO_PORTABLE_DIR。")
+        print()
+        pack, fallback = ROOT, True
+
+    items: list[tuple[Path, Path, str]] = []
+    for p in expand(pack, PACK_PATTERNS + ([] if args.skip_tools else PACK_TOOLS)):
+        items.append((p, pack, p.relative_to(pack)))
+    for p in expand(ROOT, REPO_PATTERNS):
+        items.append((p, ROOT, p.relative_to(ROOT)))
 
     if not items:
-        print("没有找到任何可导出的数据 —— 确认脚本是在项目根下的 scripts/ 里运行。")
+        print("没有找到任何可导出的数据 —— 确认随身包路径对不对。")
         return 1
 
-    print(f"项目根 : {ROOT}")
-    print(f"目标目录: {dest}")
+    print(f"随身包 : {pack}{'  （回退到仓库根）' if fallback else ''}")
+    print(f"目标   : {dest}")
     print("-" * 70)
     total_files, total_bytes = 0, 0
     listing = []
-    for p in items:
-        if p.is_dir():
-            fs = [f for f in p.rglob("*") if f.is_file()]
-            n, b = len(fs), sum(f.stat().st_size for f in fs)
-        else:
-            n, b = 1, p.stat().st_size
+    for src, _base, rel in items:
+        n, b = measure(src)
         total_files += n
         total_bytes += b
-        listing.append((str(p.relative_to(ROOT)), n, b))
-        print(f"  {str(p.relative_to(ROOT)):<52} {n:>5} 个文件  {human(b):>10}")
+        listing.append((str(rel), n, b))
+        print(f"  {str(rel):<52} {n:>5} 个文件  {human(b):>10}")
     print("-" * 70)
     print(f"合计 {total_files} 个文件，{human(total_bytes)}")
 
@@ -206,11 +239,11 @@ def main() -> int:
     lines = [
         "ServerTimeDemo 随身备份清单",
         f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"来源项目: {ROOT}",
+        f"数据来源: {pack}",
         f"备份目录: {dest}",
         "",
         "这些内容**故意不进 Git**（数据库含业务数据、凭据含手机号与密码密文、",
-        "excel 与业务图片目录含内部资料）。换机器时把它们放回项目对应位置即可。",
+        "excel 与业务图片目录含内部资料）。恢复时按下面的说明放回去即可。",
         "",
         "=" * 70,
         f"{'项':<52}{'文件数':>8}{'体积':>12}",
@@ -223,9 +256,10 @@ def main() -> int:
     lines.append("")
 
     fp_lines = []
-    for rel in FINGERPRINT:
-        f = ROOT / rel
-        if f.exists():
+    for origin, rel in FINGERPRINT:
+        base = pack if origin == "pack" else ROOT
+        f = base / rel
+        if f.is_file():
             fp_lines.append(f"  {sha256(f)}  {rel}  ({f.stat().st_size} 字节)")
     if fp_lines:
         lines.append("关键文件指纹（SHA256，可用于核对 U 盘是否拷贝完整）：")
@@ -238,30 +272,36 @@ def main() -> int:
     restore = [
         "恢复说明 —— 把这份备份用回一台新机器",
         "",
-        "1. 先拿到代码（GitHub 公开仓库）：",
+        "前提：程序现在的**运行目录就是「随身包」**（exe 与数据在同一层，",
+        "exe 同级目录就是程序认的 BASE_DIR）。",
+        "",
+        "1. 先拿到代码（公开仓库）：",
         "       git clone https://github.com/22902902/ServerTimeDemo.git",
         "",
-        "2. 把本备份目录里的内容，按原来的相对位置复制回项目根目录：",
-        "       dist\\expiry_manager.db*        -> 项目根\\dist\\",
-        "       dist\\login_memory.json         -> 项目根\\dist\\",
-        "       dist\\account_images\\           -> 项目根\\dist\\",
-        "       expiry_manager.db 等根级数据库  -> 项目根\\",
-        "       excel\\                         -> 项目根\\",
-        "       Tools\\                         -> 项目根\\  （exe 还要用的话再复制一份到 dist\\Tools\\）",
-        "       embedded_admin_tools\\config\\interfaces.local.json -> 对应位置",
-        "   （本备份就是项目根的局部镜像，直接整目录覆盖合并过去即可。）",
+        f"2. 准备随身包目录：{pack}",
+        "   （环境变量 SERVERDEMO_PORTABLE_DIR 可以改位置。）",
+        "   包里的 exe 与 Tools\\ 可以从别处拷，或重新打包：",
+        "       pyinstaller ExpiryManager_fixed.spec --clean --noconfirm --distpath \"<包目录>\"",
         "",
-        "3. 装上 Python 3.12（Tkinter 要真实窗口，便携版没带），然后：",
-        "       pip install -r requirements.txt",
-        "       python main.py",
-        "   或者直接用 dist\\ExpiryManager_fixed.exe。",
+        "3. 把本备份目录里的内容**整目录覆盖合并**进包里：",
+        "       expiry_manager.db 等       -> <包目录>\\",
+        "       login_memory.json         -> <包目录>\\",
+        "       account_images\\            -> <包目录>\\account_images\\",
+        "       excel\\                     -> <包目录>\\excel\\",
+        "       interfaces.local.json     -> <包目录>\\",
+        "       ExpiryManager_Data\\.migrated -> <包目录>\\ExpiryManager_Data\\  ★别漏",
         "",
-        "4. 用「备份清单.txt」里的 SHA256 核对关键文件是否拷全。",
+        "4. ★ ExpiryManager_Data\\.migrated 是 0 字节隐藏文件，**必须存在**。",
+        "   缺了它，程序下次启动会把包根的数据再复制一份进 ExpiryManager_Data",
+        "   （是复制不是搬，数据不丢，但会白占一块空间）。",
+        "",
+        "5. 用「备份清单.txt」里的 SHA256 核对关键文件是否拷全。",
         "",
         "注意：",
-        "* 没纳入备份的 ExpiryManager_Data\\ 是早期数据目录的残留，",
-        "  程序和它没关系（现在认的是项目根 / dist\\），需要的话手工复制。",
-        "* Tools\\ 是可重新下载的工具软件，体积大；不带它也能正常用程序。",
+        "* Tools\\ 是可重新下载的工具软件，体积大；--skip-tools 的备份里没有它。",
+        "* 只要整份拷包（含 Tools）时，用 make_portable.py --target X:\\ 更省事：",
+        "       python scripts/make_portable.py --target X:\\",
+        "* 日常别再从源码跑 main.py 写数据，否则又会分裂出第二套库。",
     ]
     (dest / "恢复说明.txt").write_text("\n".join(restore), encoding="utf-8")
 
