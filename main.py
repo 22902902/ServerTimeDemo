@@ -173,6 +173,8 @@ import mindmap_memory_bridge  # 导图 -> 记忆宫殿：一键转换  # 思维�
 from training_todo_bridge import TrainingTodoBridge  # 训练模块 → 待办的写入胶水
 from excel_todo_bridge import ExcelTodoBridge  # Excel 宝典 → 待办：把「今日复习」变成一条待办
 from excel_note_bridge import ExcelNoteBridge  # Excel 宝典 → 学习笔记：把自测整理成一套模板
+from process_todo_bridge import ProcessTodoBridge  # 流程中心 → 待办：步骤当子任务
+import process_terminal  # 流程中心 → 系统终端：命令进剪贴板 + 开一个终端窗口
 from startup_manager import (  # 开机自启动：只写 HKCU 的 Run 键，当前用户级、不用提权
     REMEMBER_FILE_NAME,
     STATE_COMMAND_KEY,
@@ -2988,6 +2990,9 @@ class ExpiryManagerApp(TkinterDnD.Tk):
         # 页面拿到的是它的方法（见 _build_excel_page 的 todo_hook），
         # 这样页面不需要 import main，也不会形成循环依赖。
         self.excel_todo_bridge = ExcelTodoBridge(self.todo_db)
+        # 流程中心 → 待办：同一条待办下把步骤挂成子任务（见 process_todo_bridge）。
+        # 与上面两个桥同一手法 —— 只包着 todo_db，页面拿的是方法。
+        self.process_todo_bridge = ProcessTodoBridge(self.todo_db)
         # Excel 宝典 → 学习笔记的写入胶水：只包着 study_notes_db，不碰界面。
         # 与 todo_hook 同一套注入手法（页面拿对象、不 import main），所以
         # 「生成学习笔记」既不认识主窗口也不认识笔记窗口，绕不回环形导入。
@@ -3488,8 +3493,31 @@ class ExpiryManagerApp(TkinterDnD.Tk):
                 serialize_items=serialize_account_image_items,
             ),
             format_datetime=format_datetime_text,
+            todo_hook=self.process_todo_hook,
+            terminal=self.send_to_terminal,
             on_status=self.log_status,
         )
+
+    def process_todo_hook(self, payload):
+        """「加入待办」的落库动作：页面只拿到这个可调用对象。
+
+        与 ``excel_todo_hook`` / 训练的 ``todo_hook`` 一样，真正的写库留在
+        ``ProcessTodoBridge`` 里 —— 页面既不认识 ``todo_db``，也不 import main。
+        """
+        return self.process_todo_bridge.create_flow_todo(payload)
+
+    def send_to_terminal(self, text):
+        """「发送到终端」的落点：命令进剪贴板 + 开一个终端窗口，**不自动执行**。
+
+        流程里的命令是给服务器用的 Linux shell，本机 Windows 跑不了；
+        给的是「粘到 SSH 会话里回车」的那种便利，危险命令也不会被误触发。
+        """
+        try:
+            copy = self.process_page.copy_to_clipboard
+        except AttributeError:
+            copy = None
+        return process_terminal.send_to_terminal(text, copy=copy, cwd=BASE_DIR)
+
 
     def process_page_refresh(self):
         """页面切换垫片：让流程中心按当前选中项重新渲染。"""

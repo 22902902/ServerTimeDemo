@@ -55,6 +55,7 @@ import json
 import os
 import re
 import webbrowser
+from datetime import date
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
@@ -83,6 +84,12 @@ from process_db import (
 from ui_components import ScrollArea, create_flat_menu, create_ttk_section_header
 from ui_theme import MAIN_PALETTE, TYPOGRAPHY
 
+# 标注的**纯逻辑**（形状规整 / 坐标夹取 / 目标文件名 / 画 + 存）。它只在
+# 函数体里 import PIL，所以模块级引入是安全的；画布对话框另按需惰性导入 ——
+# 那是一整块 Tk 交互，页面构造时不必付这份代价。
+import process_annotate
+import process_todo_bridge
+
 try:
     from PIL import Image, ImageTk, UnidentifiedImageError
     HAS_PIL = True
@@ -104,6 +111,11 @@ KIND_BADGE_STYLE = {
 }
 
 VAR_LINE_PATTERN = re.compile(r"^\s*([^=]+?)\s*=\s*(.*)$")
+
+
+def today_str() -> str:
+    """今天的 ISO 日期串。与 excel_db / training_core 同一口径。"""
+    return date.today().isoformat()
 
 
 class ProcessImageTools:
@@ -129,7 +141,9 @@ class ProcessPage(ttk.Frame):
 
     def __init__(self, master, db, *, app_title: str, flow_templates,
                  image_preview_cls, images: ProcessImageTools, format_datetime,
-                 on_status=None, palette=MAIN_PALETTE, typography=TYPOGRAPHY):
+                 on_status=None, todo_hook=None, terminal=None,
+                 annotate_dialog_cls=None,
+                 palette=MAIN_PALETTE, typography=TYPOGRAPHY):
         super().__init__(master)
         self.db = db
         self.app_title = app_title
@@ -139,6 +153,13 @@ class ProcessPage(ttk.Frame):
         self.images = images
         self.format_datetime = format_datetime
         self.on_status = on_status
+        # 「加入待办」与「发送到终端」都是**注入进来的动作**：页面既不认识
+        # todo_db、也不认识 subprocess（与 ExcelImageTools / todo_hook 同一手法）
+        self.todo_hook = todo_hook
+        self.terminal = terminal
+        # 标注对话框：默认惰性导入；套件塞一个替身进来就不用真开画布
+        self._annotate_dialog_cls = annotate_dialog_cls
+        self._annotate_dialog = None       # 保引用，否则窗口一闪就没
         self.palette = palette
         self.typography = typography
 
@@ -200,6 +221,7 @@ class ProcessPage(ttk.Frame):
                 "---",
                 ("复制流程文本", self.copy_flow_text),
                 ("复制为脚本", self.copy_script),
+                ("加入待办（步骤当子任务）", self.add_flow_to_todo),
                 ("导出 Markdown", self.export_markdown),
                 "---",
                 ("编辑流程变量", self.edit_variables),
@@ -288,6 +310,7 @@ class ProcessPage(ttk.Frame):
                 ("编辑流程", self.edit_flow),
                 ("导出 Markdown", self.export_markdown),
                 ("复制为脚本", self.copy_script),
+                ("加入待办", self.add_flow_to_todo),
             ],
         )
 
@@ -712,6 +735,22 @@ class ProcessPage(ttk.Frame):
             return
         script = build_run_script(flow["title"] or "", steps, self.variable_values(),
                                   env=self.variable_values().get("环境", ""))
+        # 危险命令二次确认：「复制为脚本」的下一条动作就是整段粘到服务器上执行，
+        # 而这一步最容易在无意识中发生。先报出门槛，再动手。
+        risky = []
+        for step in steps:
+            for reason in danger_reasons(step["command_text"] or ""):
+                if reason not in risky:
+                    risky.append(reason)
+        if risky and not messagebox.askyesno(
+            self.app_title,
+            "这条流程里有被判为危险的操作：\n\n" + "、".join(risky) + "\n\n"
+            + f"脚本共 {len(script.splitlines())} 行，复制后粘到服务器上就会按原样执行。\n"
+            "确认复制吗？",
+            parent=self,
+        ):
+            self._set_status("已取消复制脚本。")
+            return
         self.copy_to_clipboard(script)
         self._set_status("已把流程内所有命令拼成脚本并复制（变量已渲染）。")
 
@@ -1144,6 +1183,119 @@ class ProcessPage(ttk.Frame):
         return f"process_flows/{int(flow['id'])}" if flow is not None else "process_flows"
 
     # ==================================================================
+    # P2：加入待办 / 发送到终端 / 截图标注
+    # ==================================================================
+    def add_flow_to_todo(self):
+        """把当前流程变成一条待办，**步骤当子任务**。
+
+        只在用户点击时建 —— 没点过这个按钮的用户，待办里就不该多出流程来。
+        """
+        flow = self._selected_flow()
+        if flow is None:
+            return
+        if self.todo_hook is None:
+            # 没注入就退回到「复制流程文本」：至少别让按钮点了没反应
+            self.copy_flow_text()
+            self._set_status("这一版没注入待办联动，已把流程内容复制到剪贴板。")
+            return
+        steps = self._current_steps()
+        payload = process_todo_bridge.flow_todo_payload(
+            flow, steps, today=today_str(), variables=self.variable_values())
+        if not payload.get("subtasks"):
+            payload["subtasks"] = []
+        result = self.todo_hook(payload) or {}
+        self._set_status(result.get("message") or "已加入待办。")
+
+    def send_command_to_terminal(self, text, *, danger=()):
+        """把一条命令送到系统终端：**先进剪贴板，再开一个终端窗口**。
+
+        不自动执行：流程里的命令是给服务器用的 Linux shell，本机是 Windows，
+        强行跑轻则报错重则删错目录。给人「粘上就能用」的那种便利就够了。
+        """
+        command = str(text or "").strip()
+        if not command:
+            self._set_status("这条步骤没有命令，没什么可发送的。")
+            return
+        reasons = [str(row) for row in (danger or ())] or danger_reasons(command)
+        if reasons and not messagebox.askyesno(
+            self.app_title,
+            "这条命令被判为危险操作：\n\n" + "、".join(reasons)
+            + "\n\n" + command[:400]
+            + "\n\n仍要发送到终端吗？（命令只会进剪贴板，不会自动执行）",
+            parent=self,
+        ):
+            self._set_status("已取消发送。")
+            return
+        if self.terminal is None:
+            self.copy_to_clipboard(command)
+            self._set_status("这一版没注入终端能力，命令已复制到剪贴板。")
+            return
+        result = self.terminal(command) or {}
+        self._set_status(result.get("reason") or "已发送到终端。")
+
+    def annotate_step_image(self, step_id=None, index: int = 0):
+        """在截图上画一笔：**另存**成 ``xxx_标注.png`` 再挂到这一步，原图不动。"""
+        step = self._resolve_step(step_id)
+        if step is None:
+            return
+        paths = self.images.resolve_paths(step["screenshot_path"] or "")
+        if not paths:
+            messagebox.showinfo(self.app_title, "当前步骤没有截图，先贴一张再标注。",
+                                parent=self)
+            return
+        source = Path(paths[max(0, min(int(index), len(paths) - 1))])
+        if not source.exists():
+            messagebox.showinfo(self.app_title, "这张截图文件不在了，先重新贴一张。",
+                                parent=self)
+            return
+        dialog_cls = self._annotate_dialog_cls
+        if dialog_cls is None:
+            try:
+                from process_annotate_dialog import ScreenshotAnnotator
+                dialog_cls = ScreenshotAnnotator
+            except Exception as exc:          # noqa: BLE001 - 一句话比堆栈好
+                messagebox.showerror(self.app_title, f"标注功能不可用：\n{exc}",
+                                     parent=self)
+                return
+        sid = int(step_id)
+        self._annotate_dialog = dialog_cls(
+            self, source, app_title=self.app_title,
+            on_save=lambda ops, sid=sid, src=source: self._save_annotation(sid, src, ops))
+        return self._annotate_dialog
+
+    def _save_annotation(self, step_id: int, source, ops) -> bool:
+        """落盘标注图并挂到这一步。返回 True = 让对话框留着（失败时好接着改）。"""
+        folder = Path(source).parent
+        taken = set()
+        try:
+            if folder.exists():
+                taken = {child.name.lower() for child in folder.iterdir()}
+        except OSError:
+            taken = set()
+        target = process_annotate.candidate_path(source, taken=taken)
+        result = process_annotate.annotate_file(source, target, ops)
+        if not result.get("ok"):
+            messagebox.showwarning(self.app_title, result.get("reason") or "标注失败。",
+                                   parent=self)
+            return True
+        try:
+            stored = self.images.storage_value(result["dest"])
+        except Exception:                     # noqa: BLE001
+            stored = str(result["dest"])
+        step = self.db.get_process_step(int(step_id))
+        if step is not None:
+            items = self.images.parse_items(step["screenshot_path"] or "")
+            # 原图留着，标注版**追加**在后面 —— 「标注」标签让两者一眼能分开
+            items.append({"path": stored, "label": "标注"})
+            self.db.update_process_step_screenshot(
+                int(step_id), self.images.serialize_items(items))
+        flow = self._selected_flow(silent=True)
+        if flow is not None:
+            self.refresh_flows(select_flow_id=int(flow["id"]))
+        self._set_status(result["reason"])
+        return False
+
+    # ==================================================================
     # 工具
     # ==================================================================
     def copy_to_clipboard(self, text: str):
@@ -1181,18 +1333,19 @@ def _badge(parent, text: str, bg_attr: str, fg_attr: str, palette=MAIN_PALETTE):
 
 
 class CommandBlock(tk.Frame):
-    """命令块：等宽字体 + 一键复制 + 危险原因提示。
+    """命令块：等宽字体 + 一键复制 + 发送到终端 + 危险原因提示。
 
-    只读 ``Text`` 仍然允许选中与 Ctrl+C，所以既能看也能抠字；「复制」按钮给的
-    是**变量已渲染**的内容，与屏幕上看到的一致。
+    只读 ``Text`` 仍然允许选中与 Ctrl+C，所以既能看也能抠字；「复制」与
+    「发送到终端」给的都是**变量已渲染**的内容，与屏幕上看到的一致。
     """
 
     def __init__(self, master, display_text: str, *, lang: str = "shell", danger=(),
-                 palette=MAIN_PALETTE, on_copy=None):
+                 palette=MAIN_PALETTE, on_copy=None, on_terminal=None):
         super().__init__(master, bg=palette.surface_alt,
                          highlightthickness=1, highlightbackground=palette.border_soft)
         self.display_text = display_text
         self.on_copy = on_copy
+        self.on_terminal = on_terminal
 
         head = tk.Frame(self, bg=palette.surface_alt)
         head.pack(fill="x", padx=8, pady=(5, 2))
@@ -1202,6 +1355,9 @@ class CommandBlock(tk.Frame):
             tk.Label(head, text="危险操作 · " + "、".join(danger), bg=palette.surface_alt,
                      fg=palette.danger, font=TYPOGRAPHY.caption).pack(side="left", padx=(8, 0))
         ttk.Button(head, text="复制", width=6, command=self._copy).pack(side="right")
+        if self.on_terminal is not None:
+            ttk.Button(head, text="发送到终端", width=11,
+                       command=self._to_terminal).pack(side="right", padx=(0, 4))
 
         lines = display_text.count("\n") + 1
         body = tk.Text(
@@ -1219,12 +1375,16 @@ class CommandBlock(tk.Frame):
         if self.on_copy:
             self.on_copy(self.display_text)
 
+    def _to_terminal(self):
+        if self.on_terminal:
+            self.on_terminal(self.display_text)
+
 
 class ScreenshotStrip(tk.Frame):
-    """截图横排缩略图；点任一张打开大图。"""
+    """截图横排缩略图；点任一张打开大图，图下的「标注」标的是**这一张**。"""
 
     def __init__(self, master, image_value: str, *, page, on_open=None,
-                 thumb_refs=None, palette=MAIN_PALETTE):
+                 on_annotate=None, thumb_refs=None, palette=MAIN_PALETTE):
         super().__init__(master, bg=palette.surface)
         paths = []
         try:
@@ -1250,12 +1410,19 @@ class ScreenshotStrip(tk.Frame):
                 continue
             if thumb_refs is not None:
                 thumb_refs.append(photo)     # 必须保引用，否则 PhotoImage 被 GC 掉
-            holder = tk.Label(self, image=photo, bg=palette.surface,
+            # 一张图一个「格子」：图上 + 图下的「标注」按钮。多图时只有把按钮
+            # 摆在图下面，用户才知道自己标的是哪一张（否则只能靠猜序号）
+            cell = tk.Frame(self, bg=palette.surface)
+            cell.pack(side="left", padx=(0, 6))
+            holder = tk.Label(cell, image=photo, bg=palette.surface,
                               highlightthickness=1,
                               highlightbackground=palette.border_soft, cursor="hand2")
             holder.image = photo
-            holder.pack(side="left", padx=(0, 6))
+            holder.pack()
             holder.bind("<Button-1>", lambda e, i=index: on_open(i) if on_open else None)
+            if on_annotate is not None:
+                ttk.Button(cell, text="标注", width=4,
+                           command=lambda i=index: on_annotate(i)).pack(pady=(2, 0))
 
 
 def _load_thumb(path, size):
@@ -1348,7 +1515,9 @@ def build_step_card(parent, step, *, index, variables, done, matched, page,
     if str(command_text).strip():
         CommandBlock(card, rendered("command_text"), lang=field("command_lang", "shell"),
                      danger=dangers, palette=palette,
-                     on_copy=page.copy_to_clipboard).pack(fill="x", padx=10, pady=(4, 2))
+                     on_copy=page.copy_to_clipboard,
+                     on_terminal=lambda text, d=dangers: page.send_command_to_terminal(
+                         text, danger=d)).pack(fill="x", padx=10, pady=(4, 2))
     expected = rendered("expected_text")
     if expected.strip():
         _section(card, "预期结果", expected, palette, fg=palette.success)
@@ -1370,6 +1539,7 @@ def build_step_card(parent, step, *, index, variables, done, matched, page,
              font=TYPOGRAPHY.caption, width=6, anchor="w").pack(side="left", anchor="n")
     ScreenshotStrip(shot_row, field("screenshot_path", ""), page=page,
                     on_open=lambda i, sid=step_id: page.view_step_image(sid, i),
+                    on_annotate=lambda i, sid=step_id: page.annotate_step_image(sid, i),
                     thumb_refs=thumb_refs, palette=palette).pack(side="left", anchor="n")
 
     # 上下移（放在卡片右下角，不挤头部）

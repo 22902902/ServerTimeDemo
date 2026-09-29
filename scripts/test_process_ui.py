@@ -38,6 +38,9 @@ G. 空状态      没有流程时的提示文案
 H. 搜索        关键词过滤行数；清空恢复
 I. 滚动        重排后卡片流回到顶部（内容变矮时旧 yOrigin 不会自己夹回来）
 J. 截图回收    真删文件 / 缺失不报错 / **共用的那张始终不动**
+L. 发送到终端  按钮 / 危险命令二次确认（取消就一个字都不发）/ 走注入的发送器
+M. 加入待办    按钮 / payload 带步骤 / 日期是今天 / 没注入时退回复制
+N. 截图标注    每张图下有「标注」/ 假对话框走完落盘 + 追加路径 / 原图不动
 
 用法::
 
@@ -50,6 +53,7 @@ import tempfile
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
+from tkinter import messagebox  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -59,7 +63,11 @@ try:
 except Exception:
     pass
 
+import json  # noqa: E402
+from datetime import date  # noqa: E402
+
 import main as app  # noqa: E402
+import process_page as PP  # noqa: E402  （按类型找命令块，不靠中文文案）
 from ui_theme import MAIN_PALETTE, THEME  # noqa: E402
 
 PASSED = 0
@@ -551,6 +559,318 @@ def test_screenshot_reclaim(page, db, tmproot):
         page.images = saved
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# L. 发送到终端
+# ══════════════════════════════════════════════════════════════════════════
+class quiet_dialogs:
+    """把弹窗换成记录器。
+
+    口径（见文件头第 6 条）：**不真弹模态窗**。这里连 ``askyesno`` 也一起换掉 ——
+    危险命令二次确认是这一节的考点，不能靠「点了不会挂」糊过去。
+    """
+
+    NAMES = ("showinfo", "showwarning", "showerror")
+
+    def __init__(self, askyesno=True):
+        self.answer = askyesno
+        self.calls: dict[str, list] = {}
+
+    def __enter__(self):
+        self._saved = {name: getattr(messagebox, name) for name in self.NAMES}
+        self._saved["askyesno"] = messagebox.askyesno
+
+        def record(name, answer=None):
+            def fake(*args, **kwargs):
+                self.calls.setdefault(name, []).append(
+                    args[1] if len(args) > 1 else kwargs.get("message", ""))
+                return answer
+            return fake
+
+        for name in self.NAMES:
+            setattr(messagebox, name, record(name))
+        messagebox.askyesno = record("askyesno", self.answer)
+        return self
+
+    def __exit__(self, *exc):
+        for name in self.NAMES:
+            setattr(messagebox, name, self._saved[name])
+        messagebox.askyesno = self._saved["askyesno"]
+        return False
+
+
+def command_blocks(widget) -> list:
+    """递归找出所有命令块（按类型找，不靠按钮上的中文）。"""
+    found = []
+    for child in widget.winfo_children():
+        if isinstance(child, PP.CommandBlock):
+            found.append(child)
+        found.extend(command_blocks(child))
+    return found
+
+
+def menu_labels(widget) -> list:
+    """收集所有下拉菜单里的条目文案。
+
+    菜单条目**不是控件**，``texts_of`` 看不到它们 —— 「更多」里的动作只能从
+    ``Menu.entrycget`` 读，否则「加了但看不见」这类问题测不出来。
+    """
+    found = []
+    menu = getattr(widget, "menu", None)
+    if menu is not None:
+        try:
+            last = menu.index("end")
+        except tk.TclError:
+            last = None
+        if last is not None:
+            for index in range(int(last) + 1):
+                try:
+                    label = menu.entrycget(index, "label")
+                except tk.TclError:
+                    continue
+                if label:
+                    found.append(str(label))
+    for child in widget.winfo_children():
+        found.extend(menu_labels(child))
+    return found
+
+
+def test_send_to_terminal_ui(page, db, root):
+    section("L. 发送到终端：按钮 / 危险命令二次确认 / 走注入的发送器")
+
+    rows = [row for row in db.fetch_process_flows("") if "证书续期" in str(row["title"])]
+    check("样例数据里有带命令的那条流程", bool(rows))
+    if rows:
+        page.refresh_flows(select_flow_id=int(rows[0]["id"]))
+        settle(root, 3)
+    check("卡片里出现「发送到终端」按钮", "发送到终端" in joined(page.step_holder))
+
+    boxes = command_blocks(page.step_holder)
+    check("找到了命令块", len(boxes) >= 2, len(boxes))
+    check("命令块里的文本是渲染后的命令",
+          any("openssl" in str(b.display_text) for b in boxes),
+          [str(b.display_text)[:30] for b in boxes])
+    check("**每个命令块都拿到了发送回调**（否则按钮是个摆设）",
+          boxes and all(b.on_terminal for b in boxes), [bool(b.on_terminal) for b in boxes])
+
+    sent = []
+    page.terminal = lambda text: (sent.append(text)
+                                  or {"reason": "已打开终端（测试替身）。", "opened": True})
+    with quiet_dialogs() as quiet:
+        page.send_command_to_terminal("openssl x509 -noout -enddate")
+    check("普通命令直接发送，不弹确认", sent == ["openssl x509 -noout -enddate"], sent)
+    check("没有弹过确认框", "askyesno" not in quiet.calls, quiet.calls)
+    check("状态栏用的是发送器给的那句话",
+          "已打开终端" in str(page.status_var.get()), page.status_var.get())
+
+    sent.clear()
+    with quiet_dialogs(askyesno=True) as quiet:
+        page.send_command_to_terminal("rm -rf /www/x")
+    check("**危险命令先问一句**", "askyesno" in quiet.calls, quiet.calls)
+    check("确认之后才真的发送", sent == ["rm -rf /www/x"], sent)
+
+    sent.clear()
+    with quiet_dialogs(askyesno=False) as quiet:
+        page.send_command_to_terminal("rm -rf /www/x")
+    check("**取消就一个字都不发**", sent == [], sent)
+    check("状态栏说明已取消", "取消" in str(page.status_var.get()), page.status_var.get())
+
+    sent.clear()
+    page.terminal = None
+    with quiet_dialogs():
+        page.send_command_to_terminal("openssl x509 -noout")
+    check("没注入终端能力时退回剪贴板并说明",
+          "剪贴板" in str(page.status_var.get()), page.status_var.get())
+
+    sent.clear()
+    with quiet_dialogs():
+        page.send_command_to_terminal("   ")
+    check("空命令什么都不做", sent == []
+          and "没什么可发送" in str(page.status_var.get()), page.status_var.get())
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# M. 加入待办
+# ══════════════════════════════════════════════════════════════════════════
+def test_add_flow_to_todo_ui(page, db, root):
+    section("M. 加入待办：按钮 / payload 带步骤 / 状态栏 / 没注入时退回复制")
+
+    check("流程头有「加入待办」按钮",
+          "加入待办" in joined(page.run_button.master),
+          joined(page.run_button.master)[:200])
+    toolbar_entries = menu_labels(page.winfo_children()[0])
+    check("工具栏「更多」里也有一份（菜单条目不是控件，得从 Menu 读）",
+          any("加入待办" in entry for entry in toolbar_entries), toolbar_entries)
+
+    captured = []
+    page.todo_hook = lambda payload: (captured.append(payload)
+                                      or {"created": True,
+                                          "message": "已在待办里加上「x」（含 4 个子任务）。"})
+    flow = page._selected_flow(silent=True)
+    steps = [s for s in db.fetch_process_steps(int(flow["id"]))
+             if str(s["title"] or "").strip()]
+
+    page.add_flow_to_todo()
+    check("todo_hook 收到一条 payload", len(captured) == 1, captured)
+    payload = captured[0] if captured else {}
+    check("标题是「走一遍流程：…」",
+          str(payload.get("title", "")).startswith("走一遍流程："), payload.get("title"))
+    check("**步骤变成了子任务，条数与库里的步骤数一致**",
+          len(payload.get("subtasks") or []) == len(steps),
+          f"{payload.get('subtasks')} vs {[s['title'] for s in steps]}")
+    check("日期 == 今天（现算，不写死）",
+          payload.get("due_date") == date.today().isoformat(), payload.get("due_date"))
+    check("状态栏直接用桥给的那句话",
+          "已在待办里加上" in str(page.status_var.get()), page.status_var.get())
+
+    # 没注入 → 退回到「复制流程文本」，而不是点了没反应
+    page.todo_hook = None
+    copied = []
+    saved_copy = page.copy_to_clipboard
+    page.copy_to_clipboard = lambda text: copied.append(text)
+    try:
+        page.add_flow_to_todo()
+    finally:
+        page.copy_to_clipboard = saved_copy
+    check("**没注入待办联动时退回复制，并说明原因**",
+          copied and "剪贴板" in str(page.status_var.get()), page.status_var.get())
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# N. 截图标注
+# ══════════════════════════════════════════════════════════════════════════
+class AnnotateImages:
+    """带存储值转换的图片替身。
+
+    真适配器以 ``app.BASE_DIR``（开发库）为根，而测试纪律是**对真实数据只读**，
+    所以这里把根换到临时目录。序列化规则照抄真实现（全没标签 → 数组，有标签 →
+    对象数组），否则「标注那条带没带标签」就测不出来了。
+    """
+
+    def __init__(self, base):
+        self.base = Path(base)
+
+    def resolve_paths(self, value):
+        if not value:
+            return []
+        rows = self.parse_items(value)
+        return [self.base / row["path"] for row in rows]
+
+    def storage_value(self, path):
+        try:
+            return Path(path).resolve().relative_to(self.base.resolve()).as_posix()
+        except (OSError, ValueError):
+            return str(path).replace("\\", "/")
+
+    def parse_items(self, value):
+        text = str(value or "").strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                data = json.loads(text)
+            except ValueError:
+                return [{"path": text, "label": ""}]
+            rows = []
+            for item in data:
+                path = item.get("path") if isinstance(item, dict) else item
+                label = item.get("label", "") if isinstance(item, dict) else ""
+                if path:
+                    rows.append({"path": str(path), "label": str(label or "")})
+            return rows
+        return [{"path": text, "label": ""}]
+
+    def serialize_items(self, items):
+        rows = [row for row in items if str(row.get("path") or "").strip()]
+        if not rows:
+            return ""
+        if all(not str(row.get("label") or "") for row in rows):
+            if len(rows) == 1:
+                return rows[0]["path"]
+            return json.dumps([row["path"] for row in rows], ensure_ascii=False)
+        return json.dumps(rows, ensure_ascii=False)
+
+
+def test_annotate_ui(page, db, root, tmproot):
+    section("N. 截图标注：每张图下有「标注」/ 假对话框走完保存链路 / 原图不动")
+    from PIL import Image
+
+    saved = page.images
+    page.images = AnnotateImages(tmproot)
+    try:
+        folder = tmproot / "account_images" / "process_flows"
+        folder.mkdir(parents=True, exist_ok=True)
+        source = folder / "n_src.png"
+        Image.new("RGB", (140, 90), "white").save(source)
+        original = source.read_bytes()
+
+        flow = db.add_process_flow({"title": "标注用例", "category": "运维"})
+        step_id = db.add_process_step(flow, {
+            "step_no": 1, "title": "带图步骤",
+            "screenshot_path": "account_images/process_flows/n_src.png"})
+        page.refresh_flows(select_flow_id=flow)
+        settle(root, 3)
+
+        check("步骤卡里出现「标注」按钮", "标注" in joined(page.step_holder),
+              joined(page.step_holder)[:200])
+
+        opened = []
+
+        class FakeDialog:
+            """替身：不建画布，只把 (路径, 保存回调) 记下来。"""
+
+            def __init__(self, master, path, *, on_save=None, app_title=""):
+                opened.append({"path": Path(path), "on_save": on_save})
+
+        page._annotate_dialog_cls = FakeDialog
+        page.annotate_step_image(step_id, 0)
+        check("对话框拿到的是这一张的**绝对路径**",
+              opened and opened[0]["path"] == source, opened)
+        check("保存回调给了对话框", opened and callable(opened[0]["on_save"]))
+
+        keep = opened[0]["on_save"]([{"kind": "ellipse", "x1": 5, "y1": 5,
+                                      "x2": 60, "y2": 40}])
+        check("保存成功 → 告诉对话框可以关了", keep is False, keep)
+        check("标注图落在同目录、名字带 _标注",
+              (folder / "n_src_标注.png").exists(),
+              sorted(p.name for p in folder.iterdir()))
+        check("**原图一个字节没动**", source.read_bytes() == original)
+        stored = str(db.get_process_step(step_id)["screenshot_path"])
+        check("库里变成两条：原图 + 标注版",
+              "n_src.png" in stored and "n_src_标注.png" in stored, stored)
+        check("**标注那条带「标注」标签**（不然缩略图里两张看着一样）",
+              '"label": "标注"' in stored or '"label":"标注"' in stored, stored)
+        check("状态栏报了保存结果",
+              "标注已保存" in str(page.status_var.get()), page.status_var.get())
+
+        again = opened[0]["on_save"]([{"kind": "rect", "x1": 1, "y1": 1,
+                                       "x2": 20, "y2": 20}])
+        check("再标一次退到 _2，**不覆盖上一张**",
+              again is False and (folder / "n_src_标注_2.png").exists(),
+              sorted(p.name for p in folder.iterdir()))
+
+        with quiet_dialogs() as quiet:
+            keep_empty = opened[0]["on_save"]([])
+        check("一笔都没画：不落盘、并让对话框留着接着画",
+              keep_empty is True and not (folder / "n_src_标注_3.png").exists())
+        check("并且提示了原因（不是静默失败）",
+              quiet.calls.get("showwarning"), quiet.calls)
+
+        # 没截图的步骤：给提示而不是崩
+        blank = db.add_process_step(flow, {"step_no": 2, "title": "没图"})
+        page.refresh_flows(select_flow_id=flow)
+        settle(root, 2)
+        with quiet_dialogs() as quiet:
+            page.annotate_step_image(blank, 0)
+        check("没有截图的步骤点标注 → 提示先贴一张",
+              any("没有截图" in str(m) for m in quiet.calls.get("showinfo", [])),
+              quiet.calls)
+
+        page._annotate_dialog_cls = None
+        db.delete_process_flow(flow)
+    finally:
+        page.images = saved
+
+
 def main_test() -> None:
     tmpdir = Path(tempfile.mkdtemp(prefix="process_ui_"))
     try:
@@ -579,6 +899,9 @@ def main_test() -> None:
             test_scroll_reset(page, db)
             test_screenshot_reclaim(page, db, tmpdir)
             test_template_persists(root, page, db)
+            test_send_to_terminal_ui(page, db, root)
+            test_add_flow_to_todo_ui(page, db, root)
+            test_annotate_ui(page, db, root, tmpdir)
         finally:
             db.close()
             root.destroy()

@@ -58,6 +58,9 @@ try:
 except Exception:
     pass
 
+import process_annotate  # noqa: E402
+import process_terminal  # noqa: E402
+import process_todo_bridge  # noqa: E402
 from process_db import (  # noqa: E402
     COMMAND_LANGS,
     FLOW_COLUMN_MIGRATIONS,
@@ -1055,6 +1058,303 @@ def test_image_migrate() -> None:
           host.collect_orphan_screenshots([sid]))
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# M. 截图标注（纯逻辑那一半：形状规整 / 坐标夹取 / 落点 / 真画一张）
+# ══════════════════════════════════════════════════════════════════════════
+def test_annotate() -> None:
+    section("[M] 截图标注：形状规整 / 坐标夹取 / 另存不覆盖原图 / 空笔不落盘")
+
+    # -- 1. 形状规整：不合法的一笔丢掉，而不是整张图存不出来 --------------
+    one = process_annotate.normalize_op({"kind": "ellipse", "x1": 5, "y1": 6,
+                                         "x2": "30", "y2": 40})
+    check("圈注规整出确定形状",
+          one == {"kind": "ellipse", "color": process_annotate.DEFAULT_COLOR,
+                  "width": process_annotate.DEFAULT_WIDTH,
+                  "x1": 5, "y1": 6, "x2": 30, "y2": 40}, one)
+    check("形状名大小写不敏感",
+          process_annotate.normalize_op({"kind": "RECT"})["kind"] == "rect")
+    check("**不认识的一笔返回 None**（丢掉那一笔）",
+          process_annotate.normalize_op({"kind": "star"}) is None
+          and process_annotate.normalize_op("ellipse") is None
+          and process_annotate.normalize_op(None) is None)
+    check("文字没内容就不算一笔",
+          process_annotate.normalize_op({"kind": "text", "text": "  "}) is None)
+    check("文字有内容才留",
+          process_annotate.normalize_op({"kind": "text", "text": " 证书目录 "})["text"]
+          == "证书目录")
+    check("颜色空着回落到默认色",
+          process_annotate.normalize_op({"kind": "rect", "color": " "})["color"]
+          == process_annotate.DEFAULT_COLOR)
+    check("线宽 0 / 不写都算「没写」，回落到默认值（0 不是「最细」的意思）",
+          process_annotate.normalize_op({"kind": "rect", "width": 0})["width"]
+          == process_annotate.DEFAULT_WIDTH)
+    check("线宽被夹进 1..24（负 / 超大都不至于画出个怪物）",
+          process_annotate.normalize_op({"kind": "rect", "width": -5})["width"] == 1
+          and process_annotate.normalize_op({"kind": "rect", "width": 999})["width"] == 24)
+    check("坐标写不出来的当 0（不抛异常）",
+          process_annotate.normalize_op({"kind": "rect", "x1": "abc"})["x1"] == 0)
+    check("整批规整保留顺序、丢掉坏的那条",
+          [op["kind"] for op in process_annotate.normalize_ops(
+              [{"kind": "ellipse"}, {"kind": "nope"}, {"kind": "arrow"}])]
+          == ["ellipse", "arrow"])
+    check("空 / None → []",
+          process_annotate.normalize_ops(None) == []
+          and process_annotate.normalize_ops([None, {}]) == [])
+
+    # -- 2. 坐标夹取：越界在图上「不报错只画坏」，所以必须先夹 ------------
+    check("反着拖也归一成左上 / 右下",
+          process_annotate.clamp_box((80, 90, 10, 20), (200, 200)) == (10, 20, 80, 90))
+    check("负数与超出部分被夹进图内",
+          process_annotate.clamp_box((-50, -50, 9999, 9999), (400, 300))
+          == (0, 0, 400, 300))
+    check("点也夹",
+          process_annotate.clamp_point((-9, 999), (100, 50)) == (0, 50)
+          and process_annotate.clamp_point(("7", "8"), (100, 50)) == (7, 8))
+
+    # -- 3. 箭头：两条翼朝终点，零长度不出翼 ------------------------------
+    wings = process_annotate.arrow_head(0, 0, 100, 0)
+    check("向右的箭头：两条翼都在终点左侧（不会指反）",
+          len(wings) == 2
+          and all(w[1] == (100, 0) and w[0][0] < 100 for w in wings), wings)
+    check("起止重合就不出翼（画出来是个点，没必要）",
+          process_annotate.arrow_head(50, 50, 50, 50) == [])
+
+    # -- 4. 落点：另存不覆盖 --------------------------------------------
+    check("默认落点带 _标注",
+          process_annotate.candidate_path("a/shot.png").name == "shot_标注.png")
+    check("**已存在就退到 _2（绝不覆盖已有标注图）**",
+          process_annotate.candidate_path("a/shot.png",
+                                          taken={"shot_标注.png"}).name == "shot_标注_2.png")
+    check("_2 也占了就继续退",
+          process_annotate.candidate_path(
+              "a/shot.png", taken={"shot_标注.png", "shot_标注_2.png"}).name
+          == "shot_标注_3.png")
+
+    # -- 5. 真画一张（有 PIL 才跑）---------------------------------------
+    try:
+        from PIL import Image
+        has_pil = True
+    except ImportError:
+        has_pil = False
+    if not has_pil:
+        check("跳过真画一张：本机没装 Pillow", True)
+        return
+
+    folder = Path(tempfile.mkdtemp(prefix="process_annotate_"))
+    _TMP.append(folder)
+    source = folder / "shot.png"
+    Image.new("RGB", (200, 120), "white").save(source)
+    original = source.read_bytes()
+
+    empty = process_annotate.annotate_file(source, folder / "none.png", [])
+    check("**一笔都没有就不落盘**（免得堆一堆和原图一样的副本）",
+          empty["ok"] is False and not (folder / "none.png").exists(), empty)
+
+    target = process_annotate.candidate_path(source)
+    result = process_annotate.annotate_file(source, target, [
+        {"kind": "ellipse", "x1": 10, "y1": 10, "x2": 60, "y2": 50},
+        {"kind": "arrow", "x1": 120, "y1": 90, "x2": 60, "y2": 50},
+        {"kind": "text", "x1": 10, "y1": 80, "text": "证书目录"},
+        {"kind": "rect", "x1": -100, "y1": -100, "x2": 99999, "y2": 99999},
+    ])
+    check("画了 4 笔并落了盘",
+          result["ok"] is True and result["dest"].exists() and result["count"] == 4, result)
+    check("**原图一个字节没动**（截图不可再生，覆盖等于弄丢）",
+          source.read_bytes() == original)
+    check("标注图与原图不是同一份内容", result["dest"].read_bytes() != original)
+    with Image.open(result["dest"]) as drawn:
+        palette = drawn.convert("RGB").getcolors(maxcolors=1 << 20) or []
+        has_red = any(color[0] > 180 and color[1] < 120 and color[2] < 120
+                      for _count, color in palette)
+        check("**标注图上真的多了红色**（不是存了个空文件）", has_red,
+              sorted(palette)[:4])
+        check("尺寸与原图一致（没有被意外裁剪 / 缩放）",
+              drawn.size == (200, 120), drawn.size)
+    check("原图打不开时给一句话而不是抛异常",
+          process_annotate.annotate_file(folder / "ghost.png", folder / "x.png",
+                                         [{"kind": "rect"}])["ok"] is False)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# N. 待办联动（流程 → 待办 + 步骤当子任务）
+# ══════════════════════════════════════════════════════════════════════════
+class _TodoRow:
+    def __init__(self, id, title, due_date, completed=0):
+        self.id = id
+        self.title = title
+        self.due_date = due_date
+        self.completed = completed
+
+
+class _FakeTodo:
+    """最小 TodoDB 替身：只记下收到了什么，顺带能演「add_item 抛异常」。"""
+
+    def __init__(self, *, fail_add=False):
+        self.items: list[_TodoRow] = []
+        self.subtasks: dict[int, list[str]] = {}
+        self.payloads: list[dict] = []
+        self.fail_add = fail_add
+
+    def fetch_items(self, *, scope="all", **kwargs):
+        return list(self.items)
+
+    def fetch_subtasks(self, item_id):
+        return [_TodoRow(0, title, "") for title in self.subtasks.get(int(item_id), [])]
+
+    def add_item(self, payload):
+        if self.fail_add:
+            raise RuntimeError("磁盘满了")
+        self.payloads.append(dict(payload))
+        item_id = len(self.items) + 1
+        self.items.append(_TodoRow(item_id, payload["title"], payload["due_date"]))
+        self.subtasks[item_id] = []
+        return item_id
+
+    def add_subtask(self, item_id, title):
+        self.subtasks.setdefault(int(item_id), []).append(title)
+        return len(self.subtasks[int(item_id)])
+
+
+def test_process_todo_bridge() -> None:
+    section("[N] 待办联动：标题 / 子任务 / 当天幂等 / 补子任务 / 失败给一句话")
+    flow = {"title": "换 SSL 证书", "category": "运维", "platform": "CentOS",
+            "link_url": "https://console.example.com", "note": "先备份旧证书"}
+    steps = [{"step_no": 1, "title": "备份旧证书"},
+             {"step_no": 2, "title": "上传新证书"},
+             {"step_no": 3, "title": "  "}]
+
+    check("标题带前缀，一眼看得出是流程类",
+          process_todo_bridge.flow_todo_title(flow) == "走一遍流程：换 SSL 证书")
+    check("没名字也不崩", process_todo_bridge.flow_todo_title({}) == "走一遍流程：未命名流程")
+    check("超长标题被截断（不把待办列表撑变形）",
+          len(process_todo_bridge.flow_todo_title({"title": "长" * 200}))
+          == len("走一遍流程：") + process_todo_bridge.TITLE_LIMIT + 1)
+    check("sqlite3.Row 也能取标题",
+          process_todo_bridge.flow_todo_title({"title": "abc"}) == "走一遍流程：abc")
+
+    check("步骤 → 带序号的子任务，空标题跳过",
+          process_todo_bridge.step_titles(steps) == ["1. 备份旧证书", "2. 上传新证书"])
+    check("超量截断",
+          len(process_todo_bridge.step_titles(
+              [{"step_no": i, "title": f"步骤{i}"} for i in range(1, 60)], limit=5)) == 5)
+
+    payload = process_todo_bridge.flow_todo_payload(
+        flow, steps, today="2026-09-29", variables={"域名": "a.com", "空的": ""})
+    check("日期用调用方给的今天（时间只有一个来源）",
+          payload["due_date"] == "2026-09-29")
+    check("子任务就是步骤", payload["subtasks"] == ["1. 备份旧证书", "2. 上传新证书"])
+    check("备注里带上分类 / 平台 / 入口",
+          "运维" in payload["notes"] and "CentOS" in payload["notes"]
+          and "console.example.com" in payload["notes"], payload["notes"])
+    check("有值的变量才写进备注（空值不写）",
+          "域名=a.com" in payload["notes"] and "空的" not in payload["notes"])
+    check("**返回里就带着 subtasks，桥不用再去问流程**",
+          "subtasks" in payload)
+
+    # -- 建待办：子任务一起落地 ------------------------------------------
+    todo = _FakeTodo()
+    bridge = process_todo_bridge.ProcessTodoBridge(todo)
+    first = bridge.create_flow_todo(payload)
+    check("建成了，并报了子任务条数",
+          first["created"] is True and first["subtasks"] == 2, first)
+    check("**skip_holidays=0**（周六点一下不该被顺延到周一）",
+          todo.payloads[0]["skip_holidays"] == 0, todo.payloads[0])
+    check("打了「流程」标签", todo.payloads[0]["tags"] == ["流程"], todo.payloads[0])
+    check("子任务真的写进了 item 下",
+          todo.subtasks[first["item_id"]] == ["1. 备份旧证书", "2. 上传新证书"])
+    check("状态栏那句话能直接用",
+          "已在待办里加上" in first["message"], first["message"])
+
+    # -- 当天幂等 --------------------------------------------------------
+    again = bridge.create_flow_todo(payload)
+    check("**同一天再点不堆第二条待办**",
+          again["created"] is False and len(todo.items) == 1, again)
+    check("子任务也没有重复加", todo.subtasks[1] == ["1. 备份旧证书", "2. 上传新证书"])
+    check("复用时报的是原来那条 id", again["item_id"] == first["item_id"])
+
+    payload2 = dict(payload, subtasks=["1. 备份旧证书", "2. 上传新证书", "3. 重载 nginx"])
+    third = bridge.create_flow_todo(payload2)
+    check("**流程加了新步骤：复用那条待办，只补缺的子任务**",
+          third["created"] is False and third["subtasks"] == 1
+          and len(todo.subtasks[1]) == 3, third)
+
+    check("未完成的那条找得到（下面翻转 completed 前的对照）",
+          bridge.find_open_todo(title=payload["title"], due_date="2026-09-29") is not None)
+    todo.items[0].completed = 1
+    check("标记完成后就找不到「未完成的那条」了",
+          bridge.find_open_todo(title=payload["title"], due_date="2026-09-29") is None)
+
+    # -- 缺字段 / 写失败 --------------------------------------------------
+    check("缺标题或日期就不建",
+          process_todo_bridge.ProcessTodoBridge(_FakeTodo()).create_flow_todo(
+              {"title": "", "due_date": "2026-09-29"})["created"] is False)
+    check("写库失败时给一句话，不抛堆栈",
+          process_todo_bridge.ProcessTodoBridge(
+              _FakeTodo(fail_add=True)).create_flow_todo(payload)["message"]
+          .startswith("写待办失败："))
+    broken = _FakeTodo()
+    broken.fetch_items = lambda **kw: (_ for _ in ()).throw(RuntimeError("库锁了"))
+    check("读待办失败当「没有重复」，不把按钮弄废",
+          process_todo_bridge.ProcessTodoBridge(broken).create_flow_todo(payload)["created"]
+          is True)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# O. 发送到终端（不自动执行：命令进剪贴板 + 开一个空窗口）
+# ══════════════════════════════════════════════════════════════════════════
+def test_send_to_terminal() -> None:
+    section("[O] 发送到终端：挑终端 / 命令行不带执行参数 / 开不了就给退路")
+
+    check("cmd 要走 /k（开个空窗口，不带任何命令）",
+          process_terminal.launcher_argv("C:\\Windows\\System32\\cmd.exe")
+          == ["C:\\Windows\\System32\\cmd.exe", "/k"])
+    check("Windows Terminal 直接开，不带参数",
+          process_terminal.launcher_argv("wt.exe") == ["wt.exe"])
+    check("空路径 → []", process_terminal.launcher_argv("") == [])
+
+    check("优先 Windows Terminal",
+          process_terminal.choose_launcher(
+              which=lambda name: f"/usr/bin/{name}" if name == "wt.exe" else None)
+          == "/usr/bin/wt.exe")
+    check("没有 wt 就退回 cmd",
+          process_terminal.choose_launcher(
+              which=lambda name: "C:\\Windows\\cmd.exe" if name.startswith("cmd") else None)
+          == "C:\\Windows\\cmd.exe")
+    check("一个都没有 → None", process_terminal.choose_launcher(which=lambda n: None) is None)
+    check("探测本身抛异常也当「没有」，不往上冒",
+          process_terminal.choose_launcher(
+              which=lambda n: (_ for _ in ()).throw(OSError("boom"))) is None)
+
+    calls: list = []
+    result = process_terminal.send_to_terminal(
+        "cd /www/x && rm -rf old",
+        copy=lambda text: calls.append(("copy", text)) or True,
+        which=lambda name: "C:\\Windows\\cmd.exe" if name.startswith("cmd") else None,
+        popen=lambda argv, **kwargs: calls.append(("popen", argv)))
+    check("命令原样进了剪贴板（与屏幕上看到的一字不差）",
+          calls[0] == ("copy", "cd /www/x && rm -rf old"), calls)
+    check("开的是**空窗口**：argv 里没有那条命令",
+          calls[1][1] == ["C:\\Windows\\cmd.exe", "/k"], calls)
+    check("**绝不把命令塞进命令行参数**（免得 % & ^ 在路上被 shell 吃掉）",
+          all("rm -rf" not in part for part in calls[1][1]), calls[1][1])
+    check("回了「已打开终端」与可读的一句话",
+          result["opened"] is True and result["copied"] is True
+          and "剪贴板" in result["reason"], result)
+
+    check("空命令什么都不做",
+          process_terminal.send_to_terminal("   ")["opened"] is False)
+    fallback = process_terminal.send_to_terminal(
+        "ls", copy=lambda text: True, which=lambda name: None)
+    check("找不到终端：命令还是复制了，并说明请手动粘贴",
+          fallback["copied"] is True and fallback["opened"] is False
+          and "手动" in fallback["reason"], fallback)
+    boom = process_terminal.send_to_terminal(
+        "ls", copy=lambda text: True, which=lambda n: "cmd.exe",
+        popen=lambda argv, **kw: (_ for _ in ()).throw(OSError("access denied")))
+    check("开窗口失败也给退路话术（命令已经复制好了）",
+          boom["opened"] is False and "手动粘贴" in boom["reason"], boom)
+
+
 def main_test() -> None:
     print("=" * 78)
     print("流程中心回归测试：数据层 + 脚本生成 + 建表迁移")
@@ -1071,6 +1371,9 @@ def main_test() -> None:
     test_screenshot_reclaim()
     test_templates()
     test_image_migrate()
+    test_annotate()
+    test_process_todo_bridge()
+    test_send_to_terminal()
 
 
 if __name__ == "__main__":

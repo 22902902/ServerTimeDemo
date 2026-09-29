@@ -197,7 +197,11 @@ def test_wired_into_ui():
                 "mindmap_memory_bridge",
                 "excel_formula_hl",
                 "excel_export",
-                "process_image_migrate",]
+                "process_image_migrate",
+                "process_annotate",
+                "process_annotate_dialog",
+                "process_todo_bridge",
+                "process_terminal",]
         missing = [n for n in need if n not in spec_src]
         check("打包 spec 把新模块写进了 hiddenimports",
               not missing, f"漏了 {missing}（运行版会 ImportError）")
