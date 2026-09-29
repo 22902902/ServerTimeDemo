@@ -56,8 +56,45 @@ FORMIDDEN_NAME = (
 )
 
 # ---------------------------------------------------------------- 内容红线
-# 1) 显式的业务串（脱敏一旦被破坏就会命中）
-CONTENT_NEEDLES = ("needle-1", "needle-2", "needle-3", "needle-4", "needle-5")
+# 1) 显式的业务串 —— 这些串**不能写在本文件里**：本文件是要推到公网的，
+#    把「要防的东西」明文列进去等于自己把它公布了（本脚本第一版就犯了这个错）。
+#    改为从不入库的本地文件读，每行一个，'#' 开头当注释。
+#    查找顺序：$SYNC_GITHUB_REDLINES -> 仓库根 .redlines.local.txt
+#              -> build/redlines.local.txt
+#    找不到就只跑通用规则（公网 IP + 未放行域名），不报错 —— 但要知道
+#    「公司名」这类中文串只有靠这个文件才拦得住。
+REDLINE_FILES = (
+    ROOT / ".redlines.local.txt",
+    ROOT / "build" / "redlines.local.txt",
+)
+
+
+def _load_needles() -> tuple[str, ...]:
+    """读本地红线串（不入库）。文件不存在则返回空。"""
+    import os
+
+    candidates = []
+    env_path = os.environ.get("SYNC_GITHUB_REDLINES")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.extend(REDLINE_FILES)
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            words = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    words.append(line)
+            if words:
+                return tuple(words)
+        except OSError:
+            continue
+    return ()
+
+
+CONTENT_NEEDLES = _load_needles()
 
 # 2) 公网 IP：私有段 / 回环 / 链路本地 / 文档保留段放行，其余当真实资产拦下
 IP_RE = re.compile(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])")

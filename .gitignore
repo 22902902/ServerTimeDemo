@@ -13,6 +13,10 @@ remember_me.json
 interfaces.local.json
 *.local.json
 
+# 敏感串清单（公司名 / 客户域名等），供 scripts/sync_github.py 做内容体检。
+# 清单本身必须留在本机 —— 写进仓库就等于把要防的东西公布了。
+.redlines.local.txt
+
 # ---------- 运行期数据 ----------
 # 统一数据目录（程序首次启动自动创建并迁移）
 ExpiryManager_Data/
