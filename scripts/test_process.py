@@ -36,6 +36,8 @@ G. 步骤 CRUD   增删改查 / 序号 / 上下移动 / 重排 / 危险标记
 H. 搜索        命中流程字段与步骤内容 / 不重复出行 / 命中步骤 id 集合
 I. 执行留痕    开跑 / 勾选 / 计数 / 结束 / 历史 / 快照 / 级联
 J. 截图回收    拆路径四种存法 / **共用的图不误删** / 跨流程共用 / 顺序不变量
+K. 模板落库    另存为模板 / 同 key 覆盖 / 内置不给删 / 坏 JSON 跳过
+L. 图片迁移    老路径收编进 process_flows/<id>/ / 幂等 / 源不在不动库 / 重名不覆盖
 
 用法：
     python scripts/test_process.py
@@ -881,6 +883,7 @@ def test_screenshot_reclaim() -> None:
     check("删行之后再调同一个 id 什么都算不出来（顺序不能反）", after == [], after)
 
 
+# ══════════════════════════════════════════════════════════════════════════
 # K. 模板落库
 # ══════════════════════════════════════════════════════════════════════════
 def test_templates() -> None:
@@ -940,6 +943,118 @@ def test_templates() -> None:
         cleanup()
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# L. 历史截图目录迁移
+# ══════════════════════════════════════════════════════════════════════════
+def test_image_migrate() -> None:
+    section("[L] 图片目录迁移：老路径收进 process_flows/<id>/ · 幂等 · 源不在不动库")
+    from process_image_migrate import migrate, plan_step
+
+    # -- 1. plan_step：只出方案，不碰任何东西 ------------------------------
+    new_value, moves = plan_step("account_images\\20260707_153800.png", 7)
+    check("老的反斜杠根目录路径 → 收进 process_flows/<流程id>/",
+          new_value == "account_images/process_flows/7/20260707_153800.png"
+          and moves == [("account_images/20260707_153800.png",
+                         "account_images/process_flows/7/20260707_153800.png")],
+          (new_value, moves))
+    check("只有一张时回写成裸字符串（与库里的旧约定一致）",
+          isinstance(new_value, str) and not new_value.startswith("["), new_value)
+    check("已经在规范目录里的原样不动（幂等的根本）",
+          plan_step("account_images/process_flows/7/a.png", 7)
+          == ("account_images/process_flows/7/a.png", []))
+    check("已规范的图不跟着别的流程 id 跑",
+          plan_step("account_images/process_flows/3/a.png", 9)
+          == ("account_images/process_flows/3/a.png", []))
+    multi, multi_moves = plan_step(
+        '["account_images/old1.png", "account_images/process_flows/9/keep.png"]', 9)
+    check("多图：老的那张收编、规范的那张不动",
+          json.loads(multi) == ["account_images/process_flows/9/old1.png",
+                                "account_images/process_flows/9/keep.png"]
+          and len(multi_moves) == 1, (multi, multi_moves))
+    check("空 / None → 原样返回、不出方案",
+          plan_step("", 1) == ("", []) and plan_step(None, 1) == ("", []))
+
+    # -- 2. 真搬一次：文件确实挪了、库里的路径也跟着改 ----------------------
+    d = Path(tempfile.mkdtemp(prefix="process_migrate_"))
+    _TMP.append(d)
+    host = Host(d / "migrate.db")
+    fid = host.add_process_flow({"title": "迁移用例", "category": "运维"})
+    old_rel = "account_images/20260707_153800.png"
+    (d / "account_images").mkdir(parents=True, exist_ok=True)
+    (d / old_rel).write_bytes(b"png")
+    sid = host.add_process_step(fid, {
+        "step_no": 1, "title": "截图步骤",
+        "screenshot_path": "account_images\\20260707_153800.png"})
+
+    stats = migrate(host, d)
+    check("搬了 1 个文件、改了 1 条步骤",
+          stats["moved"] == 1 and stats["steps"] == 1, stats)
+    want = f"account_images/process_flows/{fid}/20260707_153800.png"
+    check("文件真的到规范目录了", (d / want).exists(), [p.name for p in (d / "account_images").iterdir()])
+    check("老位置已经不在了（是搬不是拷）", not (d / old_rel).exists())
+    got = host.conn.execute(
+        "SELECT screenshot_path FROM process_steps WHERE id = ?", (sid,)).fetchone()[0]
+    check("**库里的路径也统一成正斜杠了**（否则孤儿回收认不出来）",
+          got == want, got)
+
+    # -- 3. 幂等：再跑一次什么都不该动 -------------------------------------
+    stats2 = migrate(host, d)
+    check("第二次跑：不搬、不改库",
+          stats2["moved"] == 0 and stats2["steps"] == 0, stats2)
+    check("第二次跑认出来是「已经规范」", stats2["unchanged"] == 1, stats2)
+    check("文件还在原地（幂等是「不动」不是「再搬一遍」）", (d / want).exists())
+
+    # -- 4. 源不在就别动库（把路径改掉等于把引用一起丢了） ------------------
+    host2 = Host(d / "migrate2.db")
+    fid2 = host2.add_process_flow({"title": "源没了", "category": "运维"})
+    raw_ghost = "account_images\\ghost.png"
+    sid2 = host2.add_process_step(fid2, {"step_no": 1, "title": "图丢了",
+                                         "screenshot_path": raw_ghost})
+    stats3 = migrate(host2, d)
+    check("源不在：记一笔 missing", stats3["missing"] == 1, stats3)
+    raw2 = host2.conn.execute(
+        "SELECT screenshot_path FROM process_steps WHERE id = ?", (sid2,)).fetchone()[0]
+    check("**源不在时库里的路径保持原样**（没搬成就不改库）",
+          raw2 == raw_ghost, raw2)
+
+    # -- 5. 只是分隔符不同：不搬文件，但库要顺手统一 ------------------------
+    host3 = Host(d / "migrate3.db")
+    fid3 = host3.add_process_flow({"title": "分隔符", "category": "运维"})
+    sid3 = host3.add_process_step(fid3, {
+        "step_no": 1, "title": "反斜杠的规范路径",
+        "screenshot_path": "account_images\\process_flows\\5\\a.png"})
+    stats4 = migrate(host3, d)
+    check("只在分隔符上不同：算改库、不算搬",
+          stats4["moved"] == 0 and stats4["steps"] == 1, stats4)
+    raw3 = host3.conn.execute(
+        "SELECT screenshot_path FROM process_steps WHERE id = ?", (sid3,)).fetchone()[0]
+    check("统一成正斜杠了", raw3 == "account_images/process_flows/5/a.png", raw3)
+
+    # -- 6. 目标已有同名文件：加后缀，绝不覆盖 ------------------------------
+    host4 = Host(d / "migrate4.db")
+    fid4 = host4.add_process_flow({"title": "重名", "category": "运维"})
+    (d / "account_images/same.png").write_bytes(b"old-one")
+    keep = d / "account_images" / "process_flows" / str(fid4)
+    keep.mkdir(parents=True, exist_ok=True)
+    (keep / "same.png").write_bytes(b"already-there")
+    sid4 = host4.add_process_step(fid4, {"step_no": 1, "title": "重名图",
+                                        "screenshot_path": "account_images/same.png"})
+    migrate(host4, d)
+    check("**目标同名不覆盖：另存成 same_2.png**",
+          (keep / "same_2.png").read_bytes() == b"old-one", sorted(p.name for p in keep.iterdir()))
+    check("原来那张一个字节没动",
+          (keep / "same.png").read_bytes() == b"already-there")
+    raw4 = host4.conn.execute(
+        "SELECT screenshot_path FROM process_steps WHERE id = ?", (sid4,)).fetchone()[0]
+    check("库里指向重命名后的那张",
+          raw4 == f"account_images/process_flows/{fid4}/same_2.png", raw4)
+
+    # -- 7. 迁移之后孤儿回收才认得出来（这才是这次迁移的目的） -------------
+    check("迁移后的路径能被回收逻辑认识（同一条路径只算一次）",
+          host.collect_orphan_screenshots([sid]) == [want],
+          host.collect_orphan_screenshots([sid]))
+
+
 def main_test() -> None:
     print("=" * 78)
     print("流程中心回归测试：数据层 + 脚本生成 + 建表迁移")
@@ -955,6 +1070,7 @@ def main_test() -> None:
     test_runs()
     test_screenshot_reclaim()
     test_templates()
+    test_image_migrate()
 
 
 if __name__ == "__main__":

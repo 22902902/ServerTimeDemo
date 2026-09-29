@@ -1340,6 +1340,13 @@ class Database(ProcessDBMixin):
         )
         self.conn.commit()
         init_process_tables(self.conn)  # ★ 流程中心：执行留痕两张表 + 新列迁移
+        # ★ 流程中心：把散在 account_images/ 根目录的老截图收进 process_flows/<id>/
+        #   库里存的还是反斜杠，与规范目录比对不上就没法回收孤儿
+        try:
+            from process_image_migrate import migrate as _migrate_shots
+            _migrate_shots(self, BASE_DIR)
+        except Exception:  # noqa: BLE001  整理而已，失败不该捏住启动
+            logger.debug("process screenshot migration skipped", exc_info=True)
         self.ensure_default_admin()
         self.ensure_shared_account_schema()
         self.migrate_legacy_accounts()
