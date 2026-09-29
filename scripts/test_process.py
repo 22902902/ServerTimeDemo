@@ -671,7 +671,7 @@ def test_search() -> None:
     check("命中流程分类", hit_titles("运维") == ["SSL 更新"])
     check("命中流程平台", hit_titles("阿里云") == ["域名备案"])
     check("命中流程备注", hit_titles("每年一次") == ["域名备案"])
-    check("命中流程链接（ASCII 大小写不敏感）", hit_titles("WJSPM") == ["SSL 更新"])
+    check("命中流程链接（ASCII 大小写不敏感）", hit_titles("EXAMPLE") == ["SSL 更新"])
     check("命中步骤标题", hit_titles("提交主体信息") == ["域名备案"])
     check("命中步骤说明", hit_titles("在控制台提交") == ["域名备案"])
     check("命中步骤备注", hit_titles("3 个工作日") == ["域名备案"])
