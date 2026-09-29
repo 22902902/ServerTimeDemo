@@ -61,24 +61,48 @@ python main.py
 所以本机放一份 `interfaces.local.json` 就能连真实环境，而且它被 `.gitignore`
 排除、不会被提交。
 
-这些数据换机器时要带走，用导出的方式：
+### 换机器 / 拷 U 盘：随身包
+
+运行需要的东西不止数据库 —— 还有 `excel/`（默认导入表）、`account_images/`
+（账号与流程截图）、`Tools/`（工具箱）、`interfaces.local.json`（真实接口
+地址）。它们本来散在好几个地方，拷的时候容易漏。
+
+`scripts/make_portable.py` 把它们**收进一个自包含文件夹** `dist/随身包/`：
+里面的 `ExpiryManager_fixed.exe` 双击即可运行，而 exe 同级目录就是程序的
+数据目录 —— 数据天然就在它旁边。**换机器时拷这一个文件夹就够了。**
+
+```bash
+python scripts/make_portable.py --list          # 先看会收哪些东西
+python scripts/make_portable.py --full          # 首次建包（约 635 MB）
+python scripts/make_portable.py                 # 以后只刷 exe（几秒）
+python scripts/make_portable.py --target E:\    # 直接写到 U 盘
+```
+
+包里会放一份 `使用说明.txt`。有一点必须知道：包里
+`ExpiryManager_Data/.migrated` 是个**不能删的空文件** —— 程序靠它判断
+「数据已经整理好」，删掉会让下次启动把数据搬到别的位置。
+
+### 另存一份带校验的冷备
+
+如果要留一份能核对的归档（含 SHA256 清单）：
 
 ```bash
 python scripts/export_sensitive.py 目标目录                  # 含 Tools，约 600 MB
 python scripts/export_sensitive.py 目标目录 --skip-tools      # 只要数据，约 5 MB
-python scripts/export_sensitive.py --list                    # 先看会导出什么
 ```
 
-脚本是增量的（大小与修改时间都一致就跳过），并在目标目录写 `备份清单.txt`
-（含关键文件 SHA256）与 `恢复说明.txt`。
+它同样是增量的，并在目标目录写 `备份清单.txt` 与 `恢复说明.txt`。
 
 ## 打包为 exe
 
 ```bash
-pyinstaller --noconfirm ExpiryManager_fixed.spec
+pyinstaller --noconfirm ExpiryManager_fixed.spec --distpath "dist/随身包"
 ```
 
-打包后可执行文件位于 `dist/ExpiryManager_fixed.exe`。
+产物直接落在 `dist/随身包/ExpiryManager_fixed.exe` —— 也就是**运行目录**。
+这样 `dist/` 下只有一个文件夹，不会出现「exe 在这头、数据在那头」的两份。
+（旧命令不带 `--distpath` 时会输出到 `dist/`，那种情况下需要再执行一次
+`python scripts/make_portable.py` 把 exe 同步进包。）
 
 说明：
 
