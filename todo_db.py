@@ -51,6 +51,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+import db_backup
+
 # =============================================================================
 # 常量
 # =============================================================================
@@ -584,7 +586,7 @@ class TodoDB:
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
-        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.conn = db_backup.connect(str(db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self._holidays_cache: Optional[dict[str, Holiday]] = None

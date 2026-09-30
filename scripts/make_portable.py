@@ -86,6 +86,7 @@ ServerTimeDemo 随身包
 ----------------
   {exe}   程序本体
   expiry_manager.db        主数据库（账号、待办、流程、笔记……）
+  _backup\\                 上一版数据库（每次写库前自动留，回滚用）
   account_images\\           账号截图、流程步骤截图
   Tools\\                    工具箱里的软件
   excel\\                    服务器与云服务到期情况.xlsx（导入用）
@@ -94,7 +95,7 @@ ServerTimeDemo 随身包
   login_memory.json        登录信息
   remember_me.json         「记住我」状态
 
-三条注意
+四条注意
 --------
 1. 这些文件是一个整体，别单独删或改名。特别是 ExpiryManager_Data\\
    里那个隐藏的空文件 .migrated 不能删 —— 程序靠它判断「数据已经
@@ -102,6 +103,12 @@ ServerTimeDemo 随身包
 2. interfaces.local.json 里是内部接口地址，敏感，不要分享出去。
 3. 更新程序：打包时把产物直接写进本文件夹（pyinstaller 加
    --distpath），数据不受影响；不要先在别处打包再手动拷 exe。
+4. _backup\\ 里是「上一条」数据库快照 —— 程序每次写库前自动更新它。
+   数据改错了可以退回来，在**代码项目**目录下跑：
+       python scripts\\rollback_db.py         只看现状，不动任何文件
+       python scripts\\rollback_db.py --yes   回滚到上一条
+   不用传路径 —— 它默认就作用于本文件夹里的 expiry_manager.db。
+   别删 _backup\\，删了就没有可回退的版本了。
 
 生成时间：{ts}
 """

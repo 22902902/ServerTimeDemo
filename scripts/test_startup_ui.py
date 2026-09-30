@@ -18,6 +18,8 @@
 用法：
     python scripts/test_startup_ui.py
 """
+import base64
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -75,6 +77,32 @@ def restore_state(db_path, snapshot):
 
 
 import main  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# 夹具库：本套件**自己造**一份，不用真实的开发库 / 随身包
+# ---------------------------------------------------------------------------
+# 两个理由：
+#   1. 仓库根的老库已删（数据只留随身包一处），指着它只会 OperationalError；
+#   2. 收尾要 ``DELETE FROM app_state`` 再灌回去 —— 这是**写**操作，
+#      落在真实数据上是不能接受的。自建之后，写坏了也只是坏一份探针文件。
+# ``build/`` 已被 gitignore，所以它不会进仓库。
+FIXTURE_DB = ROOT / "build" / "probe" / "__startup_ui_fixture.db"
+FIXTURE_DB.parent.mkdir(parents=True, exist_ok=True)
+if FIXTURE_DB.exists():
+    FIXTURE_DB.unlink()          # 每次重建，状态确定
+
+_fx = main.Database(FIXTURE_DB)  # 顺带把全部表建出来
+_fx.conn.execute(
+    "INSERT INTO assets (record_no, platform, resource_type, created_at, updated_at) "
+    "VALUES (?, ?, ?, ?, ?)",
+    ("__probe__", "__probe__", "__probe__", "2026-01-01T00:00:00",
+     "2026-01-01T00:00:00"))
+_fx.conn.commit()
+_fx.close()
+
+# ★ 必须在构造 App **之前**改：ExpiryManagerApp.__init__ 里
+#   ``self.db = Database(DB_PATH)`` 是运行时取模块全局，改早了才生效。
+main.DB_PATH = FIXTURE_DB
 
 snapshot = snapshot_state(main.DB_PATH)
 app = None
@@ -247,7 +275,17 @@ try:
               app.winfo_ismapped() == 0)
 
         # 闸 2：凭据失效
-        main.LoginDialog.REMEMBER_FILE = ROOT / "dist" / "remember_me.json"
+        # 夹具**自己造**，不要指 dist/ —— 那个目录随随身包方案已删，
+        # 指着它会让后面 4 条断言恒红，而且看着像静默登录坏了。
+        # 格式与 LoginDialog._save_remembered 一致（base64 混淆）。
+        probe_remember = ROOT / "build" / "probe" / "__remember_ui.json"
+        probe_remember.parent.mkdir(parents=True, exist_ok=True)
+        probe_remember.write_text(json.dumps({
+            "remember": True,
+            "username": base64.b64encode(b"probe_user").decode("ascii"),
+            "password": base64.b64encode(b"probe_pass").decode("ascii"),
+        }), encoding="utf-8")
+        main.LoginDialog.REMEMBER_FILE = probe_remember
         app.db.verify_user = lambda u, p: False
         check("记住的凭据过不了 verify_user 时失败", app.try_silent_login() is False)
 

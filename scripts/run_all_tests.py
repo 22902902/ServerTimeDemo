@@ -34,6 +34,13 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# 夹具库生成器（把随身包里的库复制成仓库根的 expiry_manager.db）。
+# 按文件路径加载，免得依赖 sys.path 里有没有 scripts/。
+_fx_spec = importlib.util.spec_from_file_location(
+    "prepare_test_fixture", ROOT / "scripts" / "prepare_test_fixture.py")
+fixture = importlib.util.module_from_spec(_fx_spec)
+_fx_spec.loader.exec_module(fixture)
 SUITES = [
     "test_notes_markdown",
     "test_notes_editor",
@@ -49,6 +56,7 @@ SUITES = [
     "test_todo_ui",
     "test_process",
     "test_process_ui",
+    "test_db_backup",
     "test_excel",
     "test_excel_note",
     "test_excel_ui",
@@ -95,6 +103,12 @@ def main(argv: list[str]) -> int:
             print(r"请改用系统 Python：C:\Users\shaoy\AppData\Local\Programs"
                   r"\Python\Python312\python.exe")
             return 2
+
+    # 夹具库：UI / 数据层套件读的是仓库根的 `expiry_manager.db`。
+    # 数据现在只留随身包一处，所以开跑前按需派生一份 —— 它是逐字节副本、
+    # 被 .gitignore 覆盖、随时可删，**不是**第二份要人维护的数据。
+    # 不派生的话会看到「库里存在笔记 → 共 0 篇」这类看着像功能坏了的假红。
+    fixture.prepare()
 
     wanted = [s for s in SUITES
               if not args or any(a in s for a in args)]

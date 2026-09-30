@@ -9,12 +9,12 @@ PyInstaller 的 onefile 把源码编译进 exe，出了问题也不报错 ——
 
 这里做的是**反向核对**：打开 exe 的 CArchive → 取内嵌的 PYZ → 把目标模块的
 code object 解开、递归收集 ``co_names`` / ``co_consts``，逐个断言新函数名与
-新常量真的在里面。顺带清点 ``dist/`` 下的运行期数据，保证打包脚本没把它们删掉
+新常量真的在里面。顺带清点运行目录（随身包）下的运行期数据，保证打包脚本没把它们删掉
 （``build.bat`` 就干过这种事，见项目记忆的硬规则 3）。
 
 用法::
 
-    python scripts/check_exe.py                  # 检查 dist/ExpiryManager_fixed.exe
+    python scripts/check_exe.py                  # 检查随身包里的 ExpiryManager_fixed.exe
     python scripts/check_exe.py 别的.exe
     python scripts/check_exe.py --selfcheck      # 只用本地源码核 EXPECTED（不打开 exe）
 
@@ -26,6 +26,7 @@ SQL 里嵌的列名、运行时现算的值都收不到，照抄一份清单必�
 from __future__ import annotations
 
 import marshal
+import os
 import sys
 import time
 import types
@@ -33,8 +34,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# 运行目录（随身包）——与 make_portable / export_sensitive 同一个约定。
+# dist/ 已弃用删除，exe 的默认位置在这里。
+PORTABLE_DIR = Path(os.environ.get("SERVERDEMO_PORTABLE_DIR",
+                                   r"F:\ServerTimeDemo_随身包"))
+EXE_NAME = "ExpiryManager_fixed.exe"
+
 # 期望在归档里出现的符号（加功能时补这里）
 EXPECTED = {
+    "db_backup": [
+        # 已在本地源码上预演过：这 11 个都能被 _collect 收到
+        "BACKUP_DIR_NAME", "BACKUP_SUFFIX", "SNAPSHOT_MIN_INTERVAL",
+        "ROLLBACK_KEEP_PREFIX", "backup_path", "is_write_sql", "snapshot",
+        "verify", "restore", "connect", "_tracer_for",
+    ],
     "todo_db": [
         "pending_alerts", "mark_alerted", "snooze", "alert_moment",
         "parse_moment", "moment_str", "ALERT_GRACE_MINUTES", "SNOOZE_MINUTES",
@@ -178,6 +191,8 @@ ENTRY_EXPECTED = [
 
 # 运行时数据：打包脚本**绝不能**删掉它们
 DATA_PATHS = [
+    # 主库必须排第一 —— 打包脚本丢了别的东西还能忍，丢了这个是丢全部
+    "expiry_manager.db", "_backup",
     "ExpiryManager_Data", "login_memory.json", "account_images",
     "study_notes_images", "study_notes_attachments", "process_flow_images",
     "Tools", "excel", "study_demo",
@@ -274,7 +289,9 @@ def selfcheck() -> int:
 def main(argv: list[str]) -> int:
     if "--selfcheck" in argv:
         return selfcheck()
-    exe = Path(argv[0]) if argv else ROOT / "dist" / "ExpiryManager_fixed.exe"
+    exe = Path(argv[0]) if argv else next(
+        (c for c in (PORTABLE_DIR / EXE_NAME, ROOT / "dist" / EXE_NAME)
+         if c.exists()), PORTABLE_DIR / EXE_NAME)
     if not exe.exists():
         print(f"找不到 {exe}")
         return 2
@@ -322,7 +339,7 @@ def main(argv: list[str]) -> int:
               f"{'符号齐全' if not miss else f'★缺 {miss}★'}")
         bad += len(miss)
 
-    print("\ndist 运行期数据:")
+    print(f"\n{exe.parent} 运行期数据:")
     for rel in DATA_PATHS:
         target = exe.parent / rel
         if target.is_dir():

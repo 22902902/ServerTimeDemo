@@ -48,6 +48,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import db_backup
+
 
 # =============================================================================
 # 辅助函数
@@ -327,7 +329,7 @@ class StudyNotesDB:
         """
         self.db_path = db_path
         # check_same_thread=False：允许不同线程共用同一连接（Tkinter UI 线程 + 可能的后台线程）
-        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.conn = db_backup.connect(str(db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row  # 开启列名索引（row["column_name"]）
         self.conn.execute("PRAGMA foreign_keys = ON")  # 开启外键级联
         self.create_tables()    # 建表（如已存在则忽略）

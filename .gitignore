@@ -25,6 +25,7 @@ ExpiryManager_Data/
 *.db
 *.db-journal
 *.db-wal
+_backup/
 *.sqlite
 *.sqlite3
 

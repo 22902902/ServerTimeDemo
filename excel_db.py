@@ -46,6 +46,7 @@ import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import db_backup
 from excel_seed import CATEGORIES, LEARNING_PATHS, SEED_FUNCTIONS, SEED_RECIPES
 
 logger = logging.getLogger(__name__)
@@ -1183,7 +1184,7 @@ class ExcelDB:
 
     def __init__(self, db_path, *, seed: bool = True):
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn = db_backup.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         init_excel_tables(self.conn)
         if seed:

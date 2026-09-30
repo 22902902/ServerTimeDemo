@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, List
 
+import db_backup
+
 
 def _now() -> str:
     """返回当前时间的 ISO 格式字符串"""
@@ -138,7 +140,7 @@ class QAWorkLogDB:
         self._init_tables()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = db_backup.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 

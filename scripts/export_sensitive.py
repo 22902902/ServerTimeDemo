@@ -60,6 +60,9 @@ PACK_PATTERNS = [
     "login_memory.json",
     "remember_me.json",
     "study_demo.db",
+    # 「上一条」快照与回滚前的后路 —— 包整个丢了要恢复时，
+    # 少了它就没有可回退的版本（它很小，别省）
+    "_backup",
     # 业务图片
     "account_images",
     "process_flow_images",
@@ -289,6 +292,7 @@ def main() -> int:
         "       account_images\\            -> <包目录>\\account_images\\",
         "       excel\\                     -> <包目录>\\excel\\",
         "       interfaces.local.json     -> <包目录>\\",
+        "       _backup\\                   -> <包目录>\\_backup\\   （「上一条」快照）",
         "       ExpiryManager_Data\\.migrated -> <包目录>\\ExpiryManager_Data\\  ★别漏",
         "",
         "4. ★ ExpiryManager_Data\\.migrated 是 0 字节隐藏文件，**必须存在**。",
@@ -301,7 +305,8 @@ def main() -> int:
         "* Tools\\ 是可重新下载的工具软件，体积大；--skip-tools 的备份里没有它。",
         "* 只要整份拷包（含 Tools）时，用 make_portable.py --target X:\\ 更省事：",
         "       python scripts/make_portable.py --target X:\\",
-        "* 日常别再从源码跑 main.py 写数据，否则又会分裂出第二套库。",
+        "* 日常别再从源码跑 main.py 写数据 —— 源码跑的 BASE_DIR 是仓库根，"
+        "只适合临时调试；跑全量测试会在仓库根派生一份夹具库（可随时删）。",
     ]
     (dest / "恢复说明.txt").write_text("\n".join(restore), encoding="utf-8")
 

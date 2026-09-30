@@ -34,6 +34,7 @@ import re
 import sqlite3
 from datetime import date, datetime, timedelta
 
+import db_backup
 import mindmap_layout as ml
 import mindmap_seed
 import training_core as tc
@@ -77,7 +78,7 @@ class MindmapDB:
     # 连接与建表
     # ==================================================================
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = db_backup.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 

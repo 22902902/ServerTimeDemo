@@ -143,6 +143,7 @@ from embedded_admin_tools.services.login_memory_service import LoginMemoryServic
 
 #  功能页面（各模块独立文件，嵌入主窗口 page_container）
 from study_notes_window import StudyNotesPage   # 学习笔记页面
+import db_backup
 from study_notes_db import StudyNotesDB          # 笔记数据库操作
 from qa_work_log_page import QAWorkLogPage       # Q&A + 纪要 + 练习记录页面
 from qa_work_log_db import QAWorkLogDBExt  # Q&A + 纪要数据库操作
@@ -1076,7 +1077,7 @@ def acquire_single_instance_mutex():
 
 
 def signal_existing_instance_show():
-    conn = sqlite3.connect(DB_PATH)
+    conn = db_backup.connect(DB_PATH)
     try:
         conn.execute(
             """
@@ -1240,7 +1241,7 @@ class Database(ProcessDBMixin):
     def __init__(self, db_path: Path):
         self.db_path = db_path
         # ★ check_same_thread=False：允许子线程共用同一连接（控制台图标抽取线程需要）
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn = db_backup.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.create_tables()

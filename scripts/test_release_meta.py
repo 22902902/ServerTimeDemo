@@ -201,6 +201,7 @@ def test_wired_into_ui():
                 "process_annotate",
                 "process_annotate_dialog",
                 "process_todo_bridge",
+                "db_backup",
                 "process_terminal",]
         missing = [n for n in need if n not in spec_src]
         check("打包 spec 把新模块写进了 hiddenimports",
