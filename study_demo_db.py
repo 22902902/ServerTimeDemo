@@ -2,10 +2,31 @@
 Python 学习模块数据库层
 study_demo_db.py
 """
-import sqlite3, os
+import os
+import sqlite3
+import sys
+from pathlib import Path
 from typing import Optional
 
-DEMO_DB_PATH = os.path.join(os.path.dirname(__file__), "study_demo.db")
+import db_backup
+
+
+def _base_dir() -> Path:
+    """数据根。规则与 main.get_base_dir() 保持一致。
+
+    ★ 这里**不能**用 ``os.path.dirname(__file__)``：打包成 onefile 的 exe 之后
+    本模块在 PYZ 里，``__file__`` 是 ``<临时解包目录>/study_demo_db.pyc`` ——
+    库文件因此被建在临时目录，**程序一退出就连同数据一起被删掉**：
+    「Python 学习」里的课程 / 章节 / 代码片段每次都从头开始，而且**不报任何错**
+    （页面照开、种子数据照有，只是你上一次加的东西不见了）。
+    源码跑时它还让 ``study_demo.db`` 在仓库根反复长出来。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+DEMO_DB_PATH = str(_base_dir() / "study_demo.db")
 
 # ---------------------------------------------------------------------------
 # 表结构
@@ -63,7 +84,8 @@ CREATE TABLE IF NOT EXISTS demo_files (
 # 初始化
 # ---------------------------------------------------------------------------
 def get_conn():
-    conn = sqlite3.connect(DEMO_DB_PATH, check_same_thread=False)
+    # 走 db_backup.connect：与其余连接一致，写之前先留一份「上一条」
+    conn = db_backup.connect(DEMO_DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     init_db(conn)
     return conn

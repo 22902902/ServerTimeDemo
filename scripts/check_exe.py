@@ -25,6 +25,7 @@ SQL 里嵌的列名、运行时现算的值都收不到，照抄一份清单必�
 
 from __future__ import annotations
 
+import importlib.util
 import marshal
 import os
 import sys
@@ -40,6 +41,26 @@ PORTABLE_DIR = Path(os.environ.get("SERVERDEMO_PORTABLE_DIR",
                                    r"F:\ServerTimeDemo_随身包"))
 EXE_NAME = "ExpiryManager_fixed.exe"
 
+
+def _current_version() -> str:
+    """当前版本号，从本地 ``app_version.py`` 现读。
+
+    ★ **别在 EXPECTED 里写死版本串**：那样每升一版，这条体检就变成
+    「验一个旧版本」—— 通过是当然的，但当前版本压根没验到
+    （真实踩过：一直钉着 "1.19.0"，升到 1.20.x 后它还在验两版前的串）。
+    """
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "app_version", ROOT / "app_version.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return str(mod.APP_VERSION)
+    except Exception:
+        return ""
+
+
+APP_VERSION_NOW = _current_version()
+
 # 期望在归档里出现的符号（加功能时补这里）
 EXPECTED = {
     "db_backup": [
@@ -47,6 +68,10 @@ EXPECTED = {
         "BACKUP_DIR_NAME", "BACKUP_SUFFIX", "SNAPSHOT_MIN_INTERVAL",
         "ROLLBACK_KEEP_PREFIX", "backup_path", "is_write_sql", "snapshot",
         "verify", "restore", "connect", "_tracer_for",
+    ],
+    "study_demo_db": [
+        # v1.20.1：库路径不再用 dirname(__file__)（onefile 下那是临时目录）
+        "_base_dir", "DEMO_DB_PATH", "get_conn", "init_db",
     ],
     "todo_db": [
         "pending_alerts", "mark_alerted", "snooze", "alert_moment",
@@ -57,7 +82,9 @@ EXPECTED = {
         "TodoAlertDialog", "ALERT_WIDTH", "snooze_all", "complete_all",
         "_place_bottom_right",
     ],
-    "app_version": ["APP_VERSION", "VERSION_HISTORY", "1.19.0"],
+    # 版本串现算（见上面的 _current_version），不写死
+    "app_version": (["APP_VERSION", "VERSION_HISTORY"]
+                    + ([APP_VERSION_NOW] if APP_VERSION_NOW else [])),
     "training_core": [
         "SRS_INTERVALS", "review_next_state", "streak_from_dates",
         "checkin_grid", "MASTERY_GOOD", "FEEDBACK_FORGOT",
